@@ -1,0 +1,1005 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>QuantAgent · 量化分析助手</title>
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<style>
+  :root {
+    --bg:          #0d1117;
+    --bg-elev:     #161b22;
+    --bg-elev-2:   #1f2937;
+    --border:      #30363d;
+    --text:        #e6edf3;
+    --text-muted:  #8b949e;
+    --primary:     #00d4aa;
+    --primary-dim: #00d4aa33;
+    --danger:      #f85149;
+    --warning:     #d29922;
+    --user-bg:     #1f6feb;
+    --code-bg:     #0a0d12;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; font-family: -apple-system, BlinkMacSystemFont,
+                "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }
+  body { background: var(--bg); color: var(--text); overflow: hidden; }
+
+  .app { display: flex; height: 100vh; }
+
+  /* ── 侧边栏 ── */
+  .sidebar {
+    width: 260px;
+    background: var(--bg-elev);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+  }
+  .sidebar-header {
+    padding: 16px;
+    border-bottom: 1px solid var(--border);
+  }
+  .logo {
+    font-size: 18px;
+    font-weight: 600;
+    color: var(--primary);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .logo-sub {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-top: 4px;
+  }
+  .new-btn {
+    margin: 12px 16px;
+    padding: 10px 14px;
+    background: var(--primary);
+    color: #000;
+    border: none;
+    border-radius: 6px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: opacity 0.2s;
+  }
+  .new-btn:hover { opacity: 0.85; }
+
+  .session-list {
+    flex: 1;
+    overflow-y: auto;
+    padding: 0 8px 16px;
+  }
+  .session-item {
+    padding: 10px 12px;
+    margin-bottom: 4px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 13px;
+    color: var(--text-muted);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    transition: background 0.15s;
+  }
+  .session-item:hover { background: var(--bg-elev-2); color: var(--text); }
+  .session-item.active {
+    background: var(--primary-dim);
+    color: var(--text);
+    border-left: 2px solid var(--primary);
+  }
+  .session-title { flex: 1; overflow: hidden; text-overflow: ellipsis;
+                    white-space: nowrap; }
+  .session-delete {
+    visibility: hidden;
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    padding: 0 4px;
+    font-size: 14px;
+  }
+  .session-item:hover .session-delete { visibility: visible; }
+  .session-delete:hover { color: var(--danger); }
+
+  .sidebar-footer {
+    padding: 12px 16px;
+    border-top: 1px solid var(--border);
+    font-size: 11px;
+    color: var(--text-muted);
+  }
+
+  /* ── 主对话区 ── */
+  .chat-area { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+
+  .chat-header {
+    padding: 14px 24px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-elev);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .chat-title { font-size: 15px; font-weight: 600; }
+  .chat-meta { font-size: 12px; color: var(--text-muted); }
+
+  .messages {
+    flex: 1;
+    overflow-y: auto;
+    padding: 24px 20%;
+    scroll-behavior: smooth;
+  }
+  @media (max-width: 1200px) { .messages { padding: 24px 10%; } }
+  @media (max-width: 800px)  { .messages { padding: 16px 12px; } }
+
+  .empty-state {
+    text-align: center;
+    color: var(--text-muted);
+    padding: 80px 0;
+  }
+  .empty-state h2 { color: var(--text); margin-bottom: 12px; font-weight: 500; }
+  .empty-state .examples {
+    margin-top: 32px;
+    display: grid;
+    gap: 10px;
+  }
+  .example-btn {
+    background: var(--bg-elev);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 12px 16px;
+    border-radius: 8px;
+    text-align: left;
+    cursor: pointer;
+    font-size: 13px;
+    transition: all 0.15s;
+  }
+  .example-btn:hover {
+    border-color: var(--primary);
+    background: var(--bg-elev-2);
+  }
+
+  .msg { margin-bottom: 20px; }
+  .msg-role {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    font-weight: 600;
+    margin-bottom: 8px;
+    color: var(--text-muted);
+  }
+  .msg-role .badge {
+    display: inline-block;
+    width: 24px;
+    height: 24px;
+    border-radius: 4px;
+    text-align: center;
+    line-height: 24px;
+    font-size: 12px;
+    color: #000;
+  }
+  .msg.user .badge { background: var(--user-bg); color: #fff; }
+  .msg.assistant .badge { background: var(--primary); }
+
+  .msg-content {
+    padding: 14px 16px;
+    background: var(--bg-elev);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    line-height: 1.7;
+    font-size: 14px;
+    word-wrap: break-word;
+  }
+  .msg.user .msg-content { background: var(--bg-elev-2); }
+  .msg-content p { margin: 8px 0; }
+  .msg-content p:first-child { margin-top: 0; }
+  .msg-content p:last-child { margin-bottom: 0; }
+  .msg-content h1, .msg-content h2, .msg-content h3, .msg-content h4 {
+    margin: 14px 0 8px;
+    color: var(--primary);
+  }
+  .msg-content h1 { font-size: 18px; }
+  .msg-content h2 { font-size: 16px; }
+  .msg-content h3 { font-size: 14px; }
+  .msg-content code {
+    background: var(--code-bg);
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-family: "Menlo", "Monaco", monospace;
+    font-size: 12px;
+    color: #ffa657;
+  }
+  .msg-content pre {
+    background: var(--code-bg);
+    padding: 12px;
+    border-radius: 6px;
+    overflow-x: auto;
+    margin: 8px 0;
+  }
+  .msg-content pre code { background: none; padding: 0; }
+  .msg-content table {
+    border-collapse: collapse;
+    margin: 12px 0;
+    font-size: 13px;
+    width: 100%;
+  }
+  .msg-content th, .msg-content td {
+    padding: 8px 12px;
+    border: 1px solid var(--border);
+  }
+  .msg-content th { background: var(--bg-elev-2); color: var(--primary); }
+  .msg-content blockquote {
+    border-left: 3px solid var(--warning);
+    padding: 4px 12px;
+    color: var(--text-muted);
+    margin: 8px 0;
+    background: rgba(210, 153, 34, 0.08);
+  }
+  .msg-content ul, .msg-content ol { padding-left: 24px; margin: 8px 0; }
+
+  /* ── 工具执行卡片 ── */
+  .tool-trace {
+    margin-top: 12px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg-elev-2);
+    font-size: 12px;
+    overflow: hidden;
+  }
+  .tool-trace-header {
+    padding: 8px 12px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    user-select: none;
+  }
+  .tool-trace-header:hover { background: rgba(255,255,255,0.03); }
+  .tool-icon {
+    width: 18px;
+    height: 18px;
+    border-radius: 3px;
+    background: var(--primary);
+    color: #000;
+    text-align: center;
+    line-height: 18px;
+    font-size: 11px;
+    font-weight: 700;
+  }
+  .tool-trace.error .tool-icon { background: var(--danger); color: #fff; }
+  .tool-name {
+    font-family: "Menlo", monospace;
+    color: var(--primary);
+    font-weight: 600;
+  }
+  .tool-trace.error .tool-name { color: var(--danger); }
+  .tool-status { margin-left: auto; color: var(--text-muted); font-size: 11px; }
+  .tool-arrow { color: var(--text-muted); transition: transform 0.2s; }
+  .tool-trace.open .tool-arrow { transform: rotate(90deg); }
+
+  .tool-trace-body {
+    display: none;
+    padding: 8px 12px 12px;
+    border-top: 1px solid var(--border);
+  }
+  .tool-trace.open .tool-trace-body { display: block; }
+  .tool-trace-body pre {
+    background: var(--code-bg);
+    padding: 8px;
+    border-radius: 4px;
+    overflow-x: auto;
+    margin: 4px 0;
+    font-size: 11px;
+    line-height: 1.5;
+  }
+  .tool-trace-body .label {
+    color: var(--text-muted);
+    font-size: 11px;
+    margin-top: 6px;
+    margin-bottom: 2px;
+  }
+
+  /* ── 思考过程 ── */
+  .thought {
+    padding: 8px 12px;
+    margin-top: 8px;
+    background: rgba(0, 212, 170, 0.05);
+    border-left: 2px solid var(--primary);
+    border-radius: 4px;
+    font-size: 13px;
+    color: var(--text-muted);
+    font-style: italic;
+  }
+
+  /* ── 输入区 ── */
+  .input-area {
+    border-top: 1px solid var(--border);
+    padding: 16px 20%;
+    background: var(--bg-elev);
+  }
+  @media (max-width: 1200px) { .input-area { padding: 16px 10%; } }
+  @media (max-width: 800px)  { .input-area { padding: 12px; } }
+
+  .input-wrap {
+    display: flex;
+    gap: 8px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 8px;
+    align-items: flex-end;
+  }
+  .input-wrap:focus-within { border-color: var(--primary); }
+  textarea {
+    flex: 1;
+    background: none;
+    border: none;
+    color: var(--text);
+    font-size: 14px;
+    padding: 8px;
+    resize: none;
+    min-height: 24px;
+    max-height: 200px;
+    font-family: inherit;
+    line-height: 1.5;
+  }
+  textarea:focus { outline: none; }
+  .send-btn {
+    padding: 8px 18px;
+    background: var(--primary);
+    color: #000;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 14px;
+    font-weight: 600;
+    transition: opacity 0.15s;
+    height: 36px;
+  }
+  .send-btn:hover { opacity: 0.85; }
+  .send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  .upload-btn {
+    width: 36px;
+    height: 36px;
+    background: transparent;
+    color: var(--text-muted);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 18px;
+    transition: all 0.15s;
+    flex-shrink: 0;
+  }
+  .upload-btn:hover {
+    color: var(--primary);
+    border-color: var(--primary);
+    background: var(--primary-dim);
+  }
+  .upload-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .upload-btn.uploading {
+    color: var(--primary);
+    animation: pulse 1.5s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
+
+  .attachment-area {
+    margin-bottom: 8px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .attachment-area:empty { margin: 0; }
+  .attachment-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    background: var(--bg-elev-2);
+    border: 1px solid var(--primary-dim);
+    border-radius: 6px;
+    padding: 6px 10px;
+    font-size: 13px;
+    max-width: 280px;
+  }
+  .attachment-chip .att-icon { font-size: 16px; }
+  .attachment-chip .att-name {
+    color: var(--text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1;
+    min-width: 0;
+  }
+  .attachment-chip .att-size {
+    color: var(--text-muted);
+    font-size: 11px;
+    flex-shrink: 0;
+  }
+  .attachment-chip .att-remove {
+    background: none; border: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    font-size: 16px; line-height: 1;
+    padding: 0 4px;
+    flex-shrink: 0;
+  }
+  .attachment-chip .att-remove:hover { color: var(--danger); }
+
+  /* 消息气泡内附件展示 */
+  .msg-attachment {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: var(--bg-elev-2);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 4px 8px;
+    font-size: 12px;
+    color: var(--text-muted);
+    margin-bottom: 6px;
+  }
+
+  .toast {
+    position: fixed;
+    bottom: 100px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: var(--bg-elev-2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 10px 16px;
+    border-radius: 6px;
+    font-size: 13px;
+    z-index: 1000;
+    opacity: 0;
+    transition: opacity 0.3s;
+    pointer-events: none;
+    max-width: 400px;
+  }
+  .toast.show { opacity: 1; }
+  .toast.error { border-color: var(--danger); color: var(--danger); }
+  .toast.success { border-color: var(--primary); }
+
+  .input-hint {
+    margin-top: 6px;
+    font-size: 11px;
+    color: var(--text-muted);
+    text-align: center;
+  }
+
+  /* ── Loading 状态 ── */
+  .loading-dot {
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    background: var(--primary);
+    border-radius: 50%;
+    margin: 0 2px;
+    animation: bounce 1.4s infinite ease-in-out both;
+  }
+  .loading-dot:nth-child(1) { animation-delay: -0.32s; }
+  .loading-dot:nth-child(2) { animation-delay: -0.16s; }
+  @keyframes bounce {
+    0%, 80%, 100% { transform: scale(0); }
+    40% { transform: scale(1); }
+  }
+
+  /* 滚动条 */
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+  ::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+</style>
+</head>
+<body>
+
+<div class="app">
+  <!-- 侧边栏 -->
+  <aside class="sidebar">
+    <div class="sidebar-header">
+      <div class="logo">📊 QuantAgent</div>
+      <div class="logo-sub">v1.0 · 量化分析助手</div>
+    </div>
+    <button class="new-btn" onclick="createSession()">+ 新对话</button>
+    <div class="session-list" id="sessionList"></div>
+    <div class="sidebar-footer">
+      会话数据仅存于内存，重启服务即清空
+    </div>
+  </aside>
+
+  <!-- 对话主区 -->
+  <main class="chat-area">
+    <header class="chat-header">
+      <div class="chat-title" id="chatTitle">未选择会话</div>
+      <div class="chat-meta" id="chatMeta"></div>
+    </header>
+
+    <div class="messages" id="messages">
+      <div class="empty-state">
+        <h2>📊 QuantAgent 量化分析助手</h2>
+        <p>多因子打分 · 期权定价 · 风险评估 · 财经搜索</p>
+        <div class="examples">
+          <button class="example-btn" onclick="useExample(this)">
+            帮我分析下英伟达 NVDA，要现价行情和多因子打分，用成长股风格的权重
+          </button>
+          <button class="example-btn" onclick="useExample(this)">
+            苹果股票 213 美元，行权价 220、3个月到期的看涨期权，无风险利率 4.5%，IV 28%，给我理论价格和 Greeks
+          </button>
+          <button class="example-btn" onclick="useExample(this)">
+            收益率 [0.012,-0.008,0.015,0.003,-0.021,0.008,0.011,-0.005,0.018,-0.012,0.007,0.022,-0.015,0.009,0.013,-0.018,0.025,0.004,-0.009,0.016,0.011,-0.007,0.019,-0.013,0.008,0.014,-0.022,0.017,0.006,0.020]，全套风险指标
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div class="input-area">
+      <div class="attachment-area" id="attachmentArea"></div>
+      <div class="input-wrap">
+        <button class="upload-btn" id="uploadBtn"
+                onclick="document.getElementById('pdfInput').click()"
+                title="附加 PDF（点击发送时随消息一起上传）">📎</button>
+        <input type="file" id="pdfInput" accept=".pdf"
+               style="display:none" onchange="queueAttachment(this.files[0])">
+        <textarea id="input"
+                  placeholder="向 QuantAgent 提问... (Enter 发送, Shift+Enter 换行)"
+                  rows="1"
+                  onkeydown="handleKey(event)"
+                  oninput="autoResize(this)"></textarea>
+        <button class="send-btn" id="sendBtn" onclick="sendMessage()">发送</button>
+      </div>
+      <div class="input-hint">
+        ⚠️ 仅供研究参考，不构成投资建议
+      </div>
+    </div>
+  </main>
+</div>
+
+<script>
+// ════════════════════════════════════════════════════════════
+// 状态
+// ════════════════════════════════════════════════════════════
+let currentSession = null;
+let isStreaming = false;
+
+// ════════════════════════════════════════════════════════════
+// 会话管理
+// ════════════════════════════════════════════════════════════
+
+async function loadSessions() {
+  const r = await fetch('/api/sessions');
+  const sessions = await r.json();
+  renderSessionList(sessions);
+  return sessions;
+}
+
+function renderSessionList(sessions) {
+  const list = document.getElementById('sessionList');
+  if (sessions.length === 0) {
+    list.innerHTML = '<div style="padding:16px;color:var(--text-muted);font-size:12px;text-align:center;">暂无会话</div>';
+    return;
+  }
+  list.innerHTML = sessions.map(s => `
+    <div class="session-item ${s.id === currentSession ? 'active' : ''}"
+         onclick="switchSession('${s.id}')">
+      <span class="session-title">${escapeHtml(s.title)}</span>
+      <button class="session-delete" onclick="event.stopPropagation();deleteSession('${s.id}')">×</button>
+    </div>
+  `).join('');
+}
+
+async function createSession() {
+  const r = await fetch('/api/sessions', { method: 'POST' });
+  const session = await r.json();
+  currentSession = session.id;
+  await loadSessions();
+  await loadSessionDetail(session.id);
+}
+
+async function switchSession(sid) {
+  if (isStreaming) return;
+  currentSession = sid;
+  await loadSessions();
+  await loadSessionDetail(sid);
+}
+
+async function deleteSession(sid) {
+  if (!confirm('删除该会话？')) return;
+  await fetch('/api/sessions/' + sid, { method: 'DELETE' });
+  if (currentSession === sid) {
+    currentSession = null;
+    showEmptyState();
+  }
+  await loadSessions();
+}
+
+async function loadSessionDetail(sid) {
+  const r = await fetch('/api/sessions/' + sid);
+  const detail = await r.json();
+  document.getElementById('chatTitle').textContent = detail.title;
+  document.getElementById('chatMeta').textContent =
+    `创建于 ${detail.created_at} · ${detail.display.length} 条消息`;
+
+  const msgs = document.getElementById('messages');
+  msgs.innerHTML = '';
+  detail.display.forEach(m => renderMessage(m));
+  scrollToBottom();
+}
+
+function showEmptyState() {
+  document.getElementById('chatTitle').textContent = '未选择会话';
+  document.getElementById('chatMeta').textContent = '';
+  document.getElementById('messages').innerHTML = `
+    <div class="empty-state">
+      <h2>选择会话或新建一个</h2>
+    </div>`;
+}
+
+// ════════════════════════════════════════════════════════════
+// 消息渲染
+// ════════════════════════════════════════════════════════════
+
+function renderMessage(m) {
+  const msgs = document.getElementById('messages');
+  const div = document.createElement('div');
+  div.className = 'msg ' + m.role;
+
+  const roleLabel = m.role === 'user'
+    ? '<span class="badge">U</span> 你'
+    : '<span class="badge">Q</span> QuantAgent';
+
+  // 只展示失败的工具调用；成功调用对用户隐藏
+  let toolsHtml = '';
+  if (m.tool_calls && m.tool_calls.length) {
+    toolsHtml = m.tool_calls
+      .filter(tc => tc.is_error)
+      .map(tc => renderToolTrace(tc))
+      .join('');
+  }
+
+  const content = m.role === 'assistant'
+    ? marked.parse(m.content || '')
+    : escapeHtml(m.content);
+
+  // 用户消息可携带附件（来自上传）
+  let attachmentHtml = '';
+  if (m.attachment) {
+    attachmentHtml = `
+      <div class="msg-attachment">
+        📄 ${escapeHtml(m.attachment.name)}
+        <span style="color:var(--text-muted)"> · ${m.attachment.size_kb} KB · ${m.attachment.chunks} 段</span>
+      </div>`;
+  }
+
+  div.innerHTML = `
+    <div class="msg-role">${roleLabel}</div>
+    ${attachmentHtml}
+    <div class="msg-content">${content}</div>
+    ${toolsHtml}
+  `;
+  msgs.appendChild(div);
+  return div;
+}
+
+function renderToolTrace(tc) {
+  const isErr = tc.is_error;
+  const status = tc.result
+    ? (isErr ? '失败' : '成功')
+    : '执行中...';
+  const inputJson = JSON.stringify(tc.input, null, 2);
+  const resultJson = tc.result
+    ? JSON.stringify(tc.result, null, 2)
+    : '';
+
+  return `
+    <div class="tool-trace ${isErr ? 'error' : ''}" data-tool-id="${tc.id || ''}">
+      <div class="tool-trace-header" onclick="this.parentElement.classList.toggle('open')">
+        <span class="tool-arrow">▶</span>
+        <span class="tool-icon">⚡</span>
+        <span class="tool-name">${tc.name}</span>
+        <span class="tool-status">${status}</span>
+      </div>
+      <div class="tool-trace-body">
+        <div class="label">Input：</div>
+        <pre>${escapeHtml(inputJson)}</pre>
+        ${resultJson ? `
+          <div class="label">Result：</div>
+          <pre>${escapeHtml(resultJson)}</pre>
+        ` : ''}
+      </div>
+    </div>
+  `;
+}
+
+// ════════════════════════════════════════════════════════════
+// 发送消息（SSE 流式）
+// ════════════════════════════════════════════════════════════
+
+async function sendMessage() {
+  if (isStreaming) return;
+  const ta = document.getElementById('input');
+  const text = ta.value.trim();
+  const hasFile = !!pendingAttachment;
+  if (!text && !hasFile) return;
+
+  if (!currentSession) await createSession();
+
+  isStreaming = true;
+  document.getElementById('sendBtn').disabled = true;
+
+  // 先尝试上传附件（如果有）
+  let attachmentMeta = null;
+  let displayContent = text;
+  let serverMessage = text;
+  if (hasFile) {
+    const filename = pendingAttachment.name;
+    const sizeKB = (pendingAttachment.size / 1024).toFixed(1);
+    const upRes = await uploadAttachmentIfAny();
+    if (!upRes) {
+      // 上传失败，中止整次发送
+      isStreaming = false;
+      document.getElementById('sendBtn').disabled = false;
+      return;
+    }
+    attachmentMeta = { name: upRes.filename, size_kb: upRes.size_kb,
+                       chunks: upRes.chunks_added };
+    // 给模型的消息：附带文件提示，让它知道可以用 search_research_docs
+    serverMessage = `[附件 PDF：${upRes.filename}，已索引 ${upRes.chunks_added} 段] ${text || '请阅读这份文档并给出分析'}`;
+    clearAttachment();
+  }
+
+  ta.value = '';
+  autoResize(ta);
+
+  // 用户消息立刻渲染（含附件 chip 展示）
+  renderMessage({
+    role: 'user',
+    content: displayContent || '请阅读这份文档并给出分析',
+    attachment: attachmentMeta,
+  });
+  scrollToBottom();
+
+  // 占位 assistant 消息
+  const assistantDom = renderMessage({
+    role: 'assistant',
+    content: '',
+    tool_calls: [],
+  });
+  const contentDom = assistantDom.querySelector('.msg-content');
+  contentDom.innerHTML = '<span class="loading-dot"></span><span class="loading-dot"></span><span class="loading-dot"></span>';
+
+  const tracesByName = {};  // 用于流式拼回工具结果
+
+  try {
+    const resp = await fetch(`/api/sessions/${currentSession}/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        message: serverMessage,
+        attachment: attachmentMeta,
+      }),
+    });
+
+    if (!resp.ok) {
+      contentDom.innerHTML = `<p style="color:var(--danger)">请求失败：${resp.status}</p>`;
+      return;
+    }
+
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let finalContent = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const chunks = buffer.split('\n\n');
+      buffer = chunks.pop();
+
+      for (const chunk of chunks) {
+        if (!chunk.startsWith('data: ')) continue;
+        const event = JSON.parse(chunk.slice(6));
+        handleEvent(event, assistantDom, contentDom, tracesByName);
+        if (event.type === 'final') finalContent = event.text;
+      }
+      scrollToBottom();
+    }
+
+    if (finalContent) {
+      contentDom.innerHTML = marked.parse(finalContent);
+    }
+
+  } catch (e) {
+    contentDom.innerHTML = `<p style="color:var(--danger)">网络错误：${e.message}</p>`;
+  } finally {
+    isStreaming = false;
+    document.getElementById('sendBtn').disabled = false;
+    await loadSessions();
+    scrollToBottom();
+  }
+}
+
+function handleEvent(event, assistantDom, contentDom, tracesByName) {
+  if (event.type === 'thought') {
+    // 在内容区追加思考片段
+    const t = document.createElement('div');
+    t.className = 'thought';
+    t.textContent = '💭 ' + event.text;
+    contentDom.parentElement.appendChild(t);
+  }
+  else if (event.type === 'tool_call') {
+    // 只在 JS 中记录待处理的调用，不在 UI 上显示卡片
+    tracesByName[event.id] = {
+      name: event.name,
+      input: event.input,
+    };
+  }
+  else if (event.type === 'tool_result') {
+    // 成功调用：完全隐藏；失败调用：渲染错误卡片
+    if (event.is_error) {
+      const pending = Object.values(tracesByName).find(p => p.name === event.name) || {};
+      const wrapper = document.createElement('div');
+      wrapper.innerHTML = renderToolTrace({
+        name: event.name,
+        input: pending.input || {},
+        result: event.result,
+        is_error: true,
+      });
+      assistantDom.appendChild(wrapper.firstElementChild);
+    }
+    // 无论成功失败都从待处理列表移除
+    for (const [id, p] of Object.entries(tracesByName)) {
+      if (p.name === event.name) { delete tracesByName[id]; break; }
+    }
+  }
+  else if (event.type === 'final') {
+    // 清掉 loading，渲染最终答案
+    contentDom.innerHTML = marked.parse(event.text);
+    // 清掉中间 thought 块
+    assistantDom.querySelectorAll('.thought').forEach(t => t.remove());
+  }
+  else if (event.type === 'error') {
+    contentDom.innerHTML = `<p style="color:var(--danger)">❌ ${event.error}</p>`;
+  }
+}
+
+// ════════════════════════════════════════════════════════════
+// 工具函数
+// ════════════════════════════════════════════════════════════
+
+function escapeHtml(s) {
+  if (s == null) return '';
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function scrollToBottom() {
+  const msgs = document.getElementById('messages');
+  msgs.scrollTop = msgs.scrollHeight;
+}
+
+function handleKey(e) {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    sendMessage();
+  }
+}
+
+function autoResize(ta) {
+  ta.style.height = 'auto';
+  ta.style.height = Math.min(ta.scrollHeight, 200) + 'px';
+}
+
+function useExample(btn) {
+  document.getElementById('input').value = btn.textContent.trim();
+  autoResize(document.getElementById('input'));
+  document.getElementById('input').focus();
+}
+
+// ════════════════════════════════════════════════════════════
+// PDF 附件：选择 → 入队 → 发送时一起上传
+// ════════════════════════════════════════════════════════════
+
+let pendingAttachment = null;  // 当前待发送的附件（单文件）
+
+function queueAttachment(file) {
+  if (!file) return;
+  if (!file.name.toLowerCase().endsWith('.pdf')) {
+    showToast('只支持 PDF 文件', 'error');
+    return;
+  }
+  if (file.size > 20 * 1024 * 1024) {
+    showToast('文件超过 20MB 限制', 'error');
+    return;
+  }
+  pendingAttachment = file;
+  renderAttachmentChip(file);
+  document.getElementById('pdfInput').value = '';  // 允许重选同名
+  document.getElementById('input').focus();
+}
+
+function renderAttachmentChip(file) {
+  const wrap = document.getElementById('attachmentArea');
+  if (!file) {
+    wrap.innerHTML = '';
+    return;
+  }
+  const sizeKB = (file.size / 1024).toFixed(1);
+  wrap.innerHTML = `
+    <div class="attachment-chip">
+      <span class="att-icon">📄</span>
+      <span class="att-name" title="${escapeHtml(file.name)}">${escapeHtml(file.name)}</span>
+      <span class="att-size">${sizeKB} KB</span>
+      <button class="att-remove" onclick="clearAttachment()" title="移除">×</button>
+    </div>
+  `;
+}
+
+function clearAttachment() {
+  pendingAttachment = null;
+  renderAttachmentChip(null);
+}
+
+async function uploadAttachmentIfAny() {
+  /** 若有待发附件，上传到后端并入库，返回 result 或 null */
+  if (!pendingAttachment) return null;
+  const file = pendingAttachment;
+
+  const uploadBtn = document.getElementById('uploadBtn');
+  uploadBtn.classList.add('uploading');
+  uploadBtn.disabled = true;
+
+  const formData = new FormData();
+  formData.append('file', file);
+  try {
+    const r = await fetch('/api/upload_pdf', { method: 'POST', body: formData });
+    const result = await r.json();
+    if (!result.success) {
+      showToast(`❌ ${file.name}: ${result.error || '上传失败'}`, 'error');
+      return null;
+    }
+    return result;
+  } catch (e) {
+    showToast(`❌ 上传网络错误: ${e.message}`, 'error');
+    return null;
+  } finally {
+    uploadBtn.classList.remove('uploading');
+    uploadBtn.disabled = false;
+  }
+}
+
+let _toastTimer = null;
+function showToast(msg, type = 'info', duration = 3000) {
+  let toast = document.querySelector('.toast');
+  if (!toast) {
+    toast = document.createElement('div');
+    toast.className = 'toast';
+    document.body.appendChild(toast);
+  }
+  clearTimeout(_toastTimer);
+  toast.className = 'toast show ' + type;
+  toast.textContent = msg;
+  if (duration > 0) {
+    _toastTimer = setTimeout(() => toast.classList.remove('show'), duration);
+  }
+}
+
+// ════════════════════════════════════════════════════════════
+// 启动
+// ════════════════════════════════════════════════════════════
+
+loadSessions();
+</script>
+
+</body>
+</html>
