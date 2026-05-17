@@ -5,10 +5,15 @@ PDF → Chroma 向量库的索引构建。
     python -m rag.indexer                  # 全量重建
     python -m rag.indexer --add 新文档.pdf  # 单文件增量
 """
+import os
 import sys
 import hashlib
 import argparse
 from pathlib import Path
+
+# HF 镜像支持（大陆部署必备）—— 必须在 import sentence_transformers 之前
+if not os.getenv("HF_ENDPOINT"):
+    os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 
 import fitz  # PyMuPDF
 import chromadb
@@ -102,10 +107,17 @@ def get_embedder():
 
 
 def get_collection():
-    """获取或创建 Chroma collection"""
+    """获取或创建 Chroma collection（禁用 telemetry 避免大陆网络问题）"""
     global _client
     if _client is None:
-        _client = chromadb.PersistentClient(path=str(DB_DIR))
+        from chromadb.config import Settings
+        _client = chromadb.PersistentClient(
+            path=str(DB_DIR),
+            settings=Settings(
+                anonymized_telemetry=False,  # 禁用 posthog 上报
+                allow_reset=True,
+            ),
+        )
     return _client.get_or_create_collection(
         name=COLLECTION_NAME,
         metadata={"hnsw:space": "cosine"},
