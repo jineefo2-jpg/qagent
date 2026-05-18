@@ -247,6 +247,86 @@ def _news_eastmoney(keyword: str, max_results: int = 5):
         return []
 
 
+def _news_yahoo_rss(symbol: str, max_results: int = 5):
+    """
+    Yahoo Finance 个股 RSS（全球可用、无需 Key、按 ticker 精准命中）。
+    适合美股/港股/欧股，A 股新闻覆盖薄。
+    """
+    try:
+        url = (f"https://feeds.finance.yahoo.com/rss/2.0/headline"
+               f"?s={urllib.parse.quote(symbol)}&region=US&lang=en-US")
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            xml_text = resp.read().decode("utf-8", errors="ignore")
+
+        import xml.etree.ElementTree as ET
+        root = ET.fromstring(xml_text)
+        items = root.findall('.//item')
+        news = []
+        for it in items[:max_results]:
+            title = (it.findtext('title') or '').strip()
+            link = (it.findtext('link') or '').strip()
+            pub = (it.findtext('pubDate') or '').strip()
+            desc = (it.findtext('description') or '').strip()
+            desc = re.sub(r'<[^>]+>', '', desc)[:200]
+            if title:
+                news.append({
+                    "title": title,
+                    "publisher": "Yahoo Finance",
+                    "link": link,
+                    "published_at": pub,
+                    "summary": desc,
+                    "source_api": "yahoo_rss",
+                    "related_tickers": [symbol.upper()],
+                })
+        return news
+    except Exception:
+        return []
+
+
+def _news_google_rss(query: str, max_results: int = 5):
+    """
+    Google News RSS 搜索（全球可用、无需 Key、覆盖最广）。
+    适合任意关键词搜索，包括公司名/主题词。
+    """
+    try:
+        q = urllib.parse.quote(f"{query} stock")
+        url = (f"https://news.google.com/rss/search?q={q}"
+               f"&hl=en-US&gl=US&ceid=US:en")
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            xml_text = resp.read().decode("utf-8", errors="ignore")
+
+        import xml.etree.ElementTree as ET
+        root = ET.fromstring(xml_text)
+        ns = {"news": "http://news.google.com/"}
+        items = root.findall('.//item')
+        news = []
+        for it in items[:max_results]:
+            title = (it.findtext('title') or '').strip()
+            link = (it.findtext('link') or '').strip()
+            pub = (it.findtext('pubDate') or '').strip()
+            # Google News 标题里常带 " - 媒体名" 后缀，提取出来当 publisher
+            publisher = "Google News"
+            if " - " in title:
+                parts = title.rsplit(" - ", 1)
+                if len(parts) == 2 and len(parts[1]) < 40:
+                    publisher = parts[1].strip()
+                    title = parts[0].strip()
+            if title:
+                news.append({
+                    "title": title,
+                    "publisher": publisher,
+                    "link": link,
+                    "published_at": pub,
+                    "summary": "",
+                    "source_api": "google_news_rss",
+                })
+        return news
+    except Exception:
+        return []
+
+
 def _news_finnhub(symbol: str, max_results: int = 5):
     """Finnhub 全球公司新闻（需 FINNHUB_API_KEY 环境变量）"""
     if not FINNHUB_API_KEY:
@@ -1154,19 +1234,28 @@ def market_news_search(query: str, max_results: int = 5) -> dict:
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     tasks = {}
-    with ThreadPoolExecutor(max_workers=4) as ex:
-        # 1. Yahoo（quotes + 全球新闻）
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        # 1. Yahoo Search API（quotes 元信息 + 通用新闻）
         tasks["Yahoo Finance"] = ex.submit(_news_yahoo, primary, max_results)
 
-        # 2. 东方财富（A 股 + 中文）
+        # 2. Yahoo Finance per-ticker RSS（无 key，美股最佳，全球可用）
+        if market in ("US", "HK"):
+            tasks["Yahoo RSS"] = ex.submit(_news_yahoo_rss, primary, max_results)
+
+        # 3. Google News RSS（全球免费，任意关键词都好用）
+        #    A 股不调（中文支持差），其他都加入
+        if market in ("US", "HK", "unknown"):
+            tasks["Google News"] = ex.submit(_news_google_rss, primary, max_results)
+
+        # 4. 东方财富（A 股 / 港股 / 中文主题）
         if market in ("A", "HK", "unknown"):
             tasks["东方财富"] = ex.submit(_news_eastmoney, primary, max_results)
 
-        # 3. Finnhub（需 key，美股/港股深度）
+        # 5. Finnhub（需 key，美股/港股深度）
         if FINNHUB_API_KEY and market in ("US", "HK"):
             tasks["Finnhub"] = ex.submit(_news_finnhub, primary, max_results)
 
-        # 4. AKShare（A 股或中文主题）
+        # 6. AKShare（A 股或中文主题）
         if _AKSHARE_AVAILABLE and (market == "A" or has_chinese):
             tasks["AKShare"] = ex.submit(_news_akshare, primary, max_results)
 
@@ -1210,12 +1299,23 @@ def market_news_search(query: str, max_results: int = 5) -> dict:
         if primary.lower() in title:
             score += 50
         src = n.get("source_api")
+        # A 股优先国内源
         if market == "A" and src in ("eastmoney", "akshare"):
             score += 30
-        elif market == "US" and src in ("yahoo", "finnhub"):
-            score += 30
-        elif market == "HK" and src in ("yahoo", "eastmoney"):
-            score += 20
+        # 美股优先 ticker 精准源（Yahoo RSS / Finnhub）> 通用新闻 > Yahoo Search
+        elif market == "US":
+            if src in ("yahoo_rss", "finnhub"):
+                score += 40
+            elif src == "google_news_rss":
+                score += 30
+            elif src == "yahoo":
+                score += 10
+        # 港股两套都加权
+        elif market == "HK":
+            if src in ("yahoo_rss", "eastmoney"):
+                score += 30
+            elif src in ("google_news_rss", "yahoo"):
+                score += 15
         return score
 
     deduped.sort(key=lambda x: (_relevance(x), x.get("published_at", "")),
