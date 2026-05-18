@@ -21,11 +21,16 @@ import json
 import math
 import os
 import re
+import socket
 import statistics
 import datetime
 import urllib.request
 import urllib.parse
 from zoneinfo import ZoneInfo
+
+# 全局兜底：任何未显式设 timeout 的 socket 操作最多 15 秒
+# 避免 AKShare 等三方库内部请求卡死拖累整个 Agent
+socket.setdefaulttimeout(15)
 
 # 自动加载项目 .env 文件（如果存在），免去手动 export
 try:
@@ -36,6 +41,7 @@ except ImportError:
     pass  # 没装 dotenv 时静默跳过，回退到系统环境变量
 
 from openai import OpenAI
+from cache import cache  # 统一缓存层（Redis 或内存）
 
 # ════════════════════════════════════════════════════════════
 # LLM 客户端：DeepSeek（OpenAI 协议兼容）
@@ -319,12 +325,23 @@ MOCK_QUOTES = {
 }
 
 
+_QUOTE_CACHE_TTL = 30        # 盘中价格 30 秒精度足够
+
+
 def market_quote(symbol: str) -> dict:
     """
-    多源实时行情快照。
-    源优先级：新浪财经（实时）→ MOCK 兜底（仅当 Sina 失败且代码在 MOCK 库内）
+    多源实时行情快照（30 秒缓存）。
+    源优先级：新浪财经（实时）→ MOCK 兜底
     """
     symbol_raw = symbol.strip()
+    # 命中缓存（Redis 或内存）
+    cache_key = f"quant:quote:{symbol_raw.upper()}"
+    cached = cache.get(cache_key)
+    if cached:
+        result = dict(cached)
+        result["from_cache"] = True
+        return result
+
     sources_tried = []
 
     # ── 1. 新浪财经实时行情（A/HK/US 通用）──
@@ -332,7 +349,7 @@ def market_quote(symbol: str) -> dict:
     sources_tried.append({"source": "新浪财经",
                           "ok": sina is not None})
     if sina:
-        return {
+        result = {
             "success": True,
             "symbol": sina["symbol"],
             "name": sina["name"],
@@ -349,6 +366,8 @@ def market_quote(symbol: str) -> dict:
             "data_source": "新浪财经实时行情",
             "sources_tried": sources_tried,
         }
+        cache.set(cache_key, result, ttl=_QUOTE_CACHE_TTL)
+        return result
 
     # ── 2. MOCK 兜底（仅在 Sina 完全无返回时）──
     s_upper = symbol_raw.upper()
@@ -403,40 +422,78 @@ MOCK_FACTOR_RAW = {
 
 import time as _time
 
-_FACTOR_CACHE = {}     # {symbol: (timestamp, result_dict)}
 _FACTOR_CACHE_TTL = 3600  # 因子数据缓存 1 小时
+
+
+def _fetch_financial_df(s: str):
+    """单独抽出来好并发调用"""
+    try:
+        return _ak.stock_financial_analysis_indicator(symbol=s, start_year="2024")
+    except Exception:
+        return None
+
+
+def _fetch_kline_df(s: str, days: int = 120):
+    """单独抽出来好并发调用"""
+    try:
+        end_d = datetime.date.today().strftime('%Y%m%d')
+        start_d = (datetime.date.today()
+                    - datetime.timedelta(days=days)).strftime('%Y%m%d')
+        return _ak.stock_zh_a_hist(symbol=s, period='daily',
+                                    start_date=start_d, end_date=end_d,
+                                    adjust='qfq')
+    except Exception:
+        return None
 
 
 def _compute_factors_akshare(symbol: str):
     """
-    从 AKShare 拉真实财务/价格数据，计算 5 因子原始值。
-    成功返回 dict（含 factors + raw + 计算时间），失败返回 None。
-    仅支持 A 股；缓存 1 小时。
+    从 AKShare 拉真实财务/价格数据，并发 3 个接口后计算 5 因子。
+    成功返回 dict（含 factors + raw），失败返回 None。
     """
     if not _AKSHARE_AVAILABLE:
         return None
 
     s = symbol.replace(".SS", "").replace(".SH", "").replace(".SZ", "")
 
-    # 命中缓存
-    cached = _FACTOR_CACHE.get(s)
-    if cached and (_time.time() - cached[0]) < _FACTOR_CACHE_TTL:
-        return cached[1]
+    cache_key = f"quant:factor:{s}"
+    cached = cache.get(cache_key)
+    if cached:
+        return cached
 
+    # ── 并发拉 3 个数据源（核心优化）──
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=3) as ex:
+        f_price = ex.submit(_quote_sina, s)
+        f_fin   = ex.submit(_fetch_financial_df, s)
+        f_k     = ex.submit(_fetch_kline_df, s, 120)
+
+        # 各源 6 秒硬超时，慢源不拖累整体（之前 12s 太宽松）
+        try:
+            quote = f_price.result(timeout=6)
+        except Exception:
+            quote = None
+        try:
+            fin_df = f_fin.result(timeout=6)
+        except Exception:
+            fin_df = None
+        try:
+            k_df = f_k.result(timeout=6)
+        except Exception:
+            k_df = None
+
+    # ── 拿到原始数据后串行算因子（CPU 时间忽略不计）──
     factors = {}
     raw = {}
 
-    # 现价（用于算 PE/PB）
-    quote = _quote_sina(s)
     price = quote.get("price") if quote else None
     if price:
         raw["price"] = price
 
-    # ── 财务因子：EPS / BPS / ROE / 营收增速 / 净利增速 ──
-    try:
-        df = _ak.stock_financial_analysis_indicator(symbol=s, start_year="2024")
-        if len(df) > 0:
-            r = df.iloc[0]
+    # 财务因子
+    if fin_df is not None and len(fin_df) > 0:
+        try:
+            r = fin_df.iloc[0]
             eps = float(r.get('摊薄每股收益(元)', 0) or 0)
             bps = float(r.get('每股净资产_调整前(元)', 0) or 0)
             roe = float(r.get('净资产收益率(%)', 0) or 0)
@@ -450,41 +507,35 @@ def _compute_factors_akshare(symbol: str):
             raw["profit_growth_pct"] = prof_g
             raw["report_date"] = str(r.get("日期", ""))
 
-            # Value 评分：用 PE 反向映射（PE 低 → 分高）
             if price and eps > 0:
-                pe = price / (eps * 4)   # 季报粗略年化
+                pe = price / (eps * 4)
                 raw["pe_estimated"] = round(pe, 2)
                 factors["value"] = max(0, min(100, 100 - pe * 2))
             if price and bps > 0:
                 raw["pb"] = round(price / bps, 2)
 
-            # Growth 评分：营收 + 净利增速平均
             avg_g = (rev_g + prof_g) / 2
             factors["growth"] = max(0, min(100, 50 + avg_g * 1.5))
-
-            # Quality 评分：ROE 越高越好
             factors["quality"] = max(0, min(100, roe * 4))
-    except Exception:
-        pass
+        except Exception:
+            pass
 
-    # ── 动量因子：近 3 个月收益 + 60 日均线背离 ──
-    try:
-        end_d = datetime.date.today().strftime('%Y%m%d')
-        start_d = (datetime.date.today() - datetime.timedelta(days=120)).strftime('%Y%m%d')
-        k = _ak.stock_zh_a_hist(symbol=s, period='daily',
-                                 start_date=start_d, end_date=end_d, adjust='qfq')
-        if len(k) >= 20:
-            cur = float(k['收盘'].iloc[-1])
-            ret_3m = (cur / float(k['收盘'].iloc[0]) - 1) * 100
+    # 动量 + 技术因子
+    if k_df is not None and len(k_df) >= 20:
+        try:
+            cur = float(k_df['收盘'].iloc[-1])
+            ret_3m = (cur / float(k_df['收盘'].iloc[0]) - 1) * 100
             raw["return_3m_pct"] = round(ret_3m, 2)
             factors["momentum"] = max(0, min(100, 50 + ret_3m * 1.67))
 
-            ma60 = float(k['收盘'].tail(60).mean()) if len(k) >= 60 else float(k['收盘'].mean())
+            ma60 = (float(k_df['收盘'].tail(60).mean())
+                    if len(k_df) >= 60
+                    else float(k_df['收盘'].mean()))
             tech_pct = (cur / ma60 - 1) * 100
             raw["vs_ma60_pct"] = round(tech_pct, 2)
             factors["technical"] = max(0, min(100, 50 + tech_pct * 2))
-    except Exception:
-        pass
+        except Exception:
+            pass
 
     if not factors:
         return None
@@ -495,7 +546,7 @@ def _compute_factors_akshare(symbol: str):
         "computed_at": datetime.datetime.now().strftime('%Y-%m-%d %H:%M'),
         "note": "PE 为季报×4 粗略年化估算，与 TTM 口径有差异",
     }
-    _FACTOR_CACHE[s] = (_time.time(), result)
+    cache.set(cache_key, result, ttl=_FACTOR_CACHE_TTL)
     return result
 
 
@@ -517,7 +568,7 @@ def factor_score(symbol: str, style: str = "balanced") -> dict:
     """
     symbol = symbol.upper().strip()
 
-    # 检测是否为概念词/中文/非 ticker 格式
+    # 概念词/中文（如「芯片ETF」）→ 直接引导
     is_concept = bool(re.search(r'[一-鿿]', symbol)) or \
                  not re.match(r'^[A-Z0-9.]{1,10}$', symbol)
     if is_concept:
@@ -527,10 +578,21 @@ def factor_score(symbol: str, style: str = "balanced") -> dict:
             "error": f"'{symbol}' 不是有效股票代码，factor_score 只接受具体 ticker",
             "hint": "若要分析行业/概念：先用 market_news_search 找到相关公司，"
                     "再对每个 ticker 单独调用 factor_score",
-            "example_flow": [
-                "market_news_search('机器人概念股') → 拿到相关公司列表",
-                "factor_score('300024')  # 对每只成份股打分",
-            ],
+        }
+
+    # ── ETF / 基金 短路：本工具基于股票财务报表，对 ETF 无效 ──
+    # A 股 ETF 代码：5xxxxx（上交所） / 159xxx / 15xxxx / 16xxxx（深交所）
+    is_etf = bool(re.match(r'^(5\d{5}|15\d{4}|16\d{4})$', symbol))
+    if is_etf:
+        return {
+            "success": False,
+            "error_type": "not_applicable_to_etf",
+            "error": f"'{symbol}' 是 ETF/基金，无个股财务报表，factor_score 不适用",
+            "hint": "ETF 分析应直接走技术面：先 historical_prices(symbol, days=60)，"
+                    "再 technical_indicator(close, 'rsi'/'macd'/'bollinger') 即可。"
+                    "若想看成份股基本面，可对成份股逐个 factor_score。",
+            "recommended_tools": ["historical_prices", "technical_indicator",
+                                   "market_news_search"],
         }
 
     # ── 优先尝试 AKShare 真因子（A 股可用）──
@@ -645,7 +707,9 @@ def technical_indicator(
         if indicator == "rsi":
             if len(prices) < period + 1:
                 return {"success": False,
-                        "error": f"RSI({period}) 至少需要 {period+1} 个价格点"}
+                        "error_type": "insufficient_data",
+                        "error": f"RSI({period}) 至少需要 {period+1} 个价格点，当前 {len(prices)}",
+                        "hint": f"先调用 historical_prices(symbol, days={period*2}) 拿数据"}
             gains, losses = [], []
             for i in range(1, len(prices)):
                 diff = prices[i] - prices[i-1]
@@ -681,7 +745,9 @@ def technical_indicator(
         elif indicator == "macd":
             if len(prices) < 26:
                 return {"success": False,
-                        "error": "MACD 至少需要 26 个价格点"}
+                        "error_type": "insufficient_data",
+                        "error": f"MACD 至少需要 26 个价格点，当前只有 {len(prices)} 个",
+                        "hint": "先调用 historical_prices(symbol, days=40) 拿到 close 数组再传入"}
 
             def ema(data, n):
                 k = 2 / (n + 1)
@@ -717,7 +783,9 @@ def technical_indicator(
         elif indicator == "bollinger":
             if len(prices) < period:
                 return {"success": False,
-                        "error": f"布林带至少需要 {period} 个价格点"}
+                        "error_type": "insufficient_data",
+                        "error": f"布林带需要 {period} 个价格点，当前 {len(prices)}",
+                        "hint": f"先调 historical_prices(symbol, days={period+5})"}
             window = prices[-period:]
             mean = sum(window) / period
             std = statistics.stdev(window) if period > 1 else 0
@@ -750,7 +818,9 @@ def technical_indicator(
         elif indicator == "sma":
             if len(prices) < period:
                 return {"success": False,
-                        "error": f"SMA({period}) 至少需要 {period} 个数据点"}
+                        "error_type": "insufficient_data",
+                        "error": f"SMA({period}) 需要 {period} 个数据点，当前 {len(prices)}",
+                        "hint": f"先调 historical_prices(symbol, days={period+5})"}
             sma = sum(prices[-period:]) / period
             current = prices[-1]
             return {
@@ -1078,34 +1148,48 @@ def market_news_search(query: str, max_results: int = 5) -> dict:
     all_news = []
     quotes = []
     sources_tried = []
-
-    # ── 1. Yahoo（quotes 元信息 + 全球新闻）──
-    y_quotes, y_news = _news_yahoo(primary, max_results)
-    quotes.extend(y_quotes)
-    all_news.extend(y_news)
-    sources_tried.append({"source": "Yahoo Finance", "news_count": len(y_news)})
-
-    # ── 2. 东方财富（A 股 + 中文新闻）──
-    if market in ("A", "HK", "unknown"):
-        em_news = _news_eastmoney(primary, max_results)
-        all_news.extend(em_news)
-        sources_tried.append({"source": "东方财富", "news_count": len(em_news)})
-
-    # ── 3. Finnhub（可选，全球公司深度新闻）──
-    if FINNHUB_API_KEY and market in ("US", "HK"):
-        fh_news = _news_finnhub(primary, max_results)
-        all_news.extend(fh_news)
-        sources_tried.append({"source": "Finnhub",
-                              "news_count": len(fh_news)})
-
-    # ── 4. AKShare（可选）──
-    # 触发条件：market='A'（A股代码）或 query 包含中文（主题/概念词）
     has_chinese = bool(re.search(r'[一-鿿]', primary))
-    if _AKSHARE_AVAILABLE and (market == "A" or has_chinese):
-        ak_news = _news_akshare(primary, max_results)
-        all_news.extend(ak_news)
-        sources_tried.append({"source": "AKShare",
-                              "news_count": len(ak_news)})
+
+    # ── 多源并发请求（取代之前的串行调用，~6s 降到 ~2s）──
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    tasks = {}
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        # 1. Yahoo（quotes + 全球新闻）
+        tasks["Yahoo Finance"] = ex.submit(_news_yahoo, primary, max_results)
+
+        # 2. 东方财富（A 股 + 中文）
+        if market in ("A", "HK", "unknown"):
+            tasks["东方财富"] = ex.submit(_news_eastmoney, primary, max_results)
+
+        # 3. Finnhub（需 key，美股/港股深度）
+        if FINNHUB_API_KEY and market in ("US", "HK"):
+            tasks["Finnhub"] = ex.submit(_news_finnhub, primary, max_results)
+
+        # 4. AKShare（A 股或中文主题）
+        if _AKSHARE_AVAILABLE and (market == "A" or has_chinese):
+            tasks["AKShare"] = ex.submit(_news_akshare, primary, max_results)
+
+        # 收集结果（带超时保护，单源不超过 10 秒）
+        for name, fut in tasks.items():
+            try:
+                result = fut.result(timeout=10)
+            except Exception as e:
+                sources_tried.append({"source": name, "news_count": 0,
+                                       "error": str(e)[:80]})
+                continue
+
+            if name == "Yahoo Finance":
+                # Yahoo 返回 (quotes, news) 二元组
+                y_quotes, y_news = result
+                quotes.extend(y_quotes)
+                all_news.extend(y_news)
+                sources_tried.append({"source": name,
+                                       "news_count": len(y_news)})
+            else:
+                all_news.extend(result)
+                sources_tried.append({"source": name,
+                                       "news_count": len(result)})
 
     # ── 去重（按标题）──
     seen_titles = set()
@@ -1252,6 +1336,737 @@ def search_research_docs(query: str, top_k: int = 3,
     return _rag_search(query=query, top_k=top_k, doc_filter=doc_filter)
 
 
+# ─────────────────────────────────────────────
+# Tool 9: correlation_matrix — 多资产相关性
+# ─────────────────────────────────────────────
+
+def correlation_matrix(returns_data: dict) -> dict:
+    """
+    计算多资产收益率相关系数矩阵。
+
+    Args:
+        returns_data: 资产 → 收益率序列。
+            {"AAPL": [0.01, -0.02, ...], "MSFT": [...], ...}
+            所有序列长度必须一致。
+
+    Returns:
+        相关系数矩阵 + 高相关性 pair 提醒
+    """
+    if not returns_data or not isinstance(returns_data, dict):
+        return {"success": False, "error": "returns_data 必须为 {asset: [returns]} 字典"}
+
+    assets = list(returns_data.keys())
+    if len(assets) < 2:
+        return {"success": False, "error": "至少需要 2 个资产"}
+
+    series = [returns_data[a] for a in assets]
+    n = len(series[0])
+    if not all(len(s) == n for s in series):
+        return {"success": False,
+                "error": "所有收益率序列长度必须一致",
+                "lengths": {a: len(returns_data[a]) for a in assets}}
+    if n < 5:
+        return {"success": False, "error": "每个序列至少需要 5 个数据点"}
+
+    def _corr(x, y):
+        mx = sum(x) / len(x)
+        my = sum(y) / len(y)
+        cov = sum((xi - mx) * (yi - my) for xi, yi in zip(x, y)) / len(x)
+        vx = sum((xi - mx) ** 2 for xi in x) / len(x)
+        vy = sum((yi - my) ** 2 for yi in y) / len(y)
+        denom = math.sqrt(vx * vy)
+        return cov / denom if denom > 0 else 0
+
+    matrix = {}
+    high_pairs = []
+    for i, a1 in enumerate(assets):
+        matrix[a1] = {}
+        for j, a2 in enumerate(assets):
+            if i == j:
+                matrix[a1][a2] = 1.0
+            elif j < i:
+                matrix[a1][a2] = matrix[a2][a1]  # 对称
+            else:
+                c = round(_corr(series[i], series[j]), 4)
+                matrix[a1][a2] = c
+                if abs(c) >= 0.7:
+                    high_pairs.append({"pair": f"{a1}-{a2}",
+                                       "correlation": c,
+                                       "interpretation": "高度同向" if c > 0 else "高度反向"})
+
+    return {
+        "success": True,
+        "assets": assets,
+        "sample_size": n,
+        "matrix": matrix,
+        "high_correlation_pairs": high_pairs,
+        "interpretation": {
+            ">  0.7": "高正相关（分散效果差）",
+            "0.3-0.7": "中正相关",
+            "-0.3-0.3": "低相关（适合做组合）",
+            "< -0.3": "负相关（天然对冲）",
+        },
+    }
+
+
+# ─────────────────────────────────────────────
+# Tool 10: portfolio_optimizer — 组合权重优化
+# ─────────────────────────────────────────────
+
+def portfolio_optimizer(
+    returns_data: dict,
+    method: str = "min_variance",
+    risk_free_rate: float = 0.03,
+    periods_per_year: int = 252,
+) -> dict:
+    """
+    多资产组合权重优化。
+
+    method:
+      - equal_weight:  等权重（基线）
+      - inverse_vol:   反向波动率（简易风险平价）
+      - min_variance:  最小方差（需 numpy 求协方差逆）
+      - max_sharpe:    最大化夏普（数值近似）
+    """
+    if not returns_data or not isinstance(returns_data, dict):
+        return {"success": False, "error": "returns_data 必须为字典"}
+
+    assets = list(returns_data.keys())
+    n = len(assets)
+    if n < 2:
+        return {"success": False, "error": "至少需要 2 个资产"}
+
+    series = [returns_data[a] for a in assets]
+    m = len(series[0])
+    if not all(len(s) == m for s in series):
+        return {"success": False, "error": "收益率序列长度必须一致"}
+    if m < 10:
+        return {"success": False, "error": "每个序列至少需要 10 个数据点"}
+
+    # 基础统计：均值 + 标准差
+    means = [sum(s) / m for s in series]
+    stds  = [statistics.stdev(s) for s in series]
+
+    weights = None
+    method_used = method.lower().strip()
+
+    if method_used == "equal_weight":
+        weights = [1.0 / n] * n
+
+    elif method_used == "inverse_vol":
+        # 简易风险平价：反波动率加权
+        inv = [1.0 / s if s > 0 else 0 for s in stds]
+        total = sum(inv)
+        weights = [w / total for w in inv] if total > 0 else [1.0 / n] * n
+
+    elif method_used in ("min_variance", "max_sharpe"):
+        try:
+            import numpy as np
+            R = np.array(series).T  # m x n
+            cov = np.cov(R.T, ddof=1)
+            ones = np.ones(n)
+
+            if method_used == "min_variance":
+                # w = Σ^-1 1 / (1' Σ^-1 1)
+                inv_cov = np.linalg.pinv(cov)
+                w = inv_cov @ ones
+                w = w / w.sum()
+            else:
+                # max_sharpe: 解析解 w ∝ Σ^-1 (μ - rf/N)
+                mu = np.array(means) * periods_per_year
+                rf = risk_free_rate
+                inv_cov = np.linalg.pinv(cov)
+                excess = mu - rf / periods_per_year
+                w = inv_cov @ excess
+                if w.sum() != 0:
+                    w = w / w.sum()
+                # 不允许做空：负权重置零再归一化
+                w = np.maximum(w, 0)
+                if w.sum() > 0:
+                    w = w / w.sum()
+                else:
+                    w = np.ones(n) / n
+
+            weights = [round(float(x), 4) for x in w]
+        except ImportError:
+            return {"success": False,
+                    "error": "min_variance/max_sharpe 需要 numpy",
+                    "hint": "pip install numpy 或改用 equal_weight / inverse_vol"}
+        except Exception as e:
+            return {"success": False, "error": f"优化失败: {e}",
+                    "hint": "可能数据不足或协方差矩阵奇异，改用 inverse_vol"}
+    else:
+        return {"success": False,
+                "error": f"未知 method: {method}",
+                "valid_methods": ["equal_weight", "inverse_vol",
+                                   "min_variance", "max_sharpe"]}
+
+    # 组合统计
+    port_return = sum(w * mu for w, mu in zip(weights, means)) * periods_per_year
+    # 组合波动率（需协方差）
+    try:
+        import numpy as np
+        R = np.array(series).T
+        cov = np.cov(R.T, ddof=1)
+        w_arr = np.array(weights)
+        port_vol = float(np.sqrt(w_arr @ cov @ w_arr)) * math.sqrt(periods_per_year)
+    except Exception:
+        # 无 numpy 时用近似（忽略相关性）
+        port_vol = math.sqrt(sum((w * s) ** 2 for w, s in zip(weights, stds))) \
+                   * math.sqrt(periods_per_year)
+
+    sharpe = (port_return - risk_free_rate) / port_vol if port_vol > 0 else 0
+
+    return {
+        "success": True,
+        "method": method_used,
+        "assets": assets,
+        "weights": dict(zip(assets, weights)),
+        "portfolio_metrics": {
+            "annualized_return": round(port_return, 4),
+            "annualized_volatility": round(port_vol, 4),
+            "sharpe_ratio": round(sharpe, 3),
+        },
+        "sample_size": m,
+        "disclaimer": "结果基于历史数据，不保证未来表现",
+    }
+
+
+# ─────────────────────────────────────────────
+# Tool 11: implied_volatility — 反推 IV
+# ─────────────────────────────────────────────
+
+def implied_volatility(
+    market_price: float,
+    spot: float,
+    strike: float,
+    time_to_expiry: float,
+    risk_free_rate: float,
+    option_type: str = "call",
+    max_iter: int = 100,
+    tol: float = 1e-5,
+) -> dict:
+    """
+    从期权市场价反推 Black-Scholes 隐含波动率（Newton-Raphson）。
+    """
+    if any(x <= 0 for x in [market_price, spot, strike, time_to_expiry]):
+        return {"success": False,
+                "error": "market_price/spot/strike/T 必须为正数"}
+    opt = option_type.lower()
+    if opt not in ("call", "put"):
+        return {"success": False, "error": "option_type 须为 call 或 put"}
+
+    S, K, T, r = spot, strike, time_to_expiry, risk_free_rate
+
+    def _bs_price(sigma):
+        if sigma <= 0:
+            return float('inf')
+        d1 = (math.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * math.sqrt(T))
+        d2 = d1 - sigma * math.sqrt(T)
+        if opt == "call":
+            return S * _norm_cdf(d1) - K * math.exp(-r * T) * _norm_cdf(d2)
+        return K * math.exp(-r * T) * _norm_cdf(-d2) - S * _norm_cdf(-d1)
+
+    def _vega(sigma):
+        d1 = (math.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * math.sqrt(T))
+        return S * _norm_pdf(d1) * math.sqrt(T)
+
+    # 内在价值检查（市场价不能低于内在价值）
+    intrinsic = max(S - K, 0) if opt == "call" else max(K - S, 0)
+    if market_price < intrinsic * 0.99:
+        return {"success": False,
+                "error": f"市场价 {market_price} 低于内在价值 {intrinsic:.4f}，无解",
+                "hint": "检查输入是否正确，或期权可能已无流动性"}
+
+    # Newton-Raphson 迭代，初值 σ = 0.3
+    sigma = 0.3
+    converged = False
+    for i in range(max_iter):
+        price = _bs_price(sigma)
+        diff = price - market_price
+        if abs(diff) < tol:
+            converged = True
+            break
+        v = _vega(sigma)
+        if v < 1e-10:
+            break
+        sigma = max(0.001, sigma - diff / v)
+
+    if not converged:
+        return {"success": False,
+                "error": "未收敛，请检查输入参数",
+                "last_sigma": round(sigma, 4),
+                "iterations": max_iter}
+
+    # 与历史波动率对比的语义化判断
+    if sigma < 0.15:
+        level = "极低 / 平静期"
+    elif sigma < 0.25:
+        level = "偏低"
+    elif sigma < 0.40:
+        level = "正常区间"
+    elif sigma < 0.60:
+        level = "偏高 / 市场紧张"
+    else:
+        level = "极高 / 危机或事件驱动"
+
+    return {
+        "success": True,
+        "implied_volatility": round(sigma, 4),
+        "annualized_pct": f"{sigma*100:.2f}%",
+        "level": level,
+        "iterations_used": i + 1,
+        "inputs": {
+            "market_price": market_price,
+            "spot": spot, "strike": strike,
+            "T_years": T, "risk_free": r,
+            "option_type": opt,
+        },
+        "formula": "Newton-Raphson 求解 BS_price(σ) = market_price",
+        "disclaimer": "假设欧式期权、无股息、几何布朗运动",
+    }
+
+
+# ─────────────────────────────────────────────
+# Tool 12: html_chart_render — ECharts 图表生成
+# ─────────────────────────────────────────────
+
+import uuid as _uuid
+
+# 图表输出目录
+_CHARTS_DIR = os.path.join(os.path.dirname(__file__), "static", "charts")
+os.makedirs(_CHARTS_DIR, exist_ok=True)
+
+
+# ─────────────────────────────────────────────
+# Tool 13: historical_prices — 历史 K 线（AKShare）
+# ─────────────────────────────────────────────
+
+_PRICE_CACHE_TTL = 1800  # 30 分钟
+
+
+def _hist_yahoo(symbol: str, days: int) -> dict:
+    """
+    Yahoo Finance Chart API 拉历史 K 线（全球可用，无需 API Key）。
+    返回与 historical_prices 同构的 dict 或 {success: False}。
+    """
+    market = _detect_market(symbol)
+    # symbol → Yahoo 格式
+    s_clean = symbol.upper()
+    for suf in ('.SS', '.SH', '.SZ', '.HK', '.US'):
+        s_clean = s_clean.replace(suf, '')
+
+    if market == "A":
+        if s_clean.startswith(('5', '6', '9')):
+            ysym = f"{s_clean}.SS"
+        else:
+            ysym = f"{s_clean}.SZ"
+    elif market == "HK":
+        ysym = f"{s_clean.zfill(4)}.HK"
+    elif market == "US":
+        ysym = s_clean
+    else:
+        return {"success": False, "error": "未识别市场"}
+
+    # 用精确 period1/period2 替代粗糙 range，保证拿够 days 个交易日
+    # 多拉 80% 缓冲（含周末/节假日）
+    import time as _t
+    buffer_days = int(days * 1.8) + 5
+    period2 = int(_t.time())
+    period1 = period2 - buffer_days * 86400
+
+    url = (f"https://query1.finance.yahoo.com/v8/finance/chart/"
+           f"{urllib.parse.quote(ysym)}"
+           f"?period1={period1}&period2={period2}&interval=1d")
+
+    try:
+        data = _yahoo_fetch(url, retries=1)
+        chart = (data.get("chart", {}).get("result") or [None])[0]
+        if not chart:
+            return {"success": False, "error": "Yahoo 返回空数据"}
+
+        ts_list = chart.get("timestamp", []) or []
+        quote = (chart.get("indicators", {}).get("quote") or [{}])[0]
+        opens, closes = quote.get("open", []), quote.get("close", [])
+        highs, lows = quote.get("high", []), quote.get("low", [])
+        vols = quote.get("volume", [])
+
+        valid = []
+        for i, ts in enumerate(ts_list):
+            if (i < len(closes) and closes[i] is not None
+                    and opens[i] is not None
+                    and highs[i] is not None
+                    and lows[i] is not None):
+                valid.append((
+                    datetime.datetime.fromtimestamp(ts).strftime("%Y-%m-%d"),
+                    opens[i], closes[i], highs[i], lows[i],
+                    vols[i] if i < len(vols) and vols[i] else 0,
+                ))
+        valid = valid[-days:]
+        if not valid:
+            return {"success": False, "error": "Yahoo 无有效数据点"}
+
+        market_label = {"A": "A股", "HK": "港股", "US": "美股"}[market]
+        return {
+            "success": True,
+            "symbol": s_clean,
+            "market": market_label,
+            "days_returned": len(valid),
+            "dates":  [v[0] for v in valid],
+            "open":   [float(v[1]) for v in valid],
+            "close":  [float(v[2]) for v in valid],
+            "high":   [float(v[3]) for v in valid],
+            "low":    [float(v[4]) for v in valid],
+            "volume": [int(v[5]) for v in valid],
+            "data_source": "Yahoo Finance Chart API（全球可用）",
+        }
+    except Exception as e:
+        return {"success": False, "error": f"Yahoo K 线失败: {e}"}
+
+
+def _hist_akshare(symbol: str, days: int) -> dict:
+    """AKShare 拉历史 K 线（国内源最快）"""
+    if not _AKSHARE_AVAILABLE:
+        return {"success": False, "error": "AKShare 未安装"}
+
+    market = _detect_market(symbol)
+    end_d = datetime.date.today().strftime('%Y%m%d')
+    start_d = (datetime.date.today()
+               - datetime.timedelta(days=int(days * 1.6))).strftime('%Y%m%d')
+
+    try:
+        if market == "A":
+            s = symbol.upper().replace(".SS", "").replace(".SH", "").replace(".SZ", "")
+            df = _ak.stock_zh_a_hist(symbol=s, period='daily',
+                                      start_date=start_d, end_date=end_d,
+                                      adjust='qfq')
+            label = "A股"
+        elif market == "US":
+            s = symbol.upper().replace(".US", "")
+            df = _ak.stock_us_hist(symbol=s, period='daily',
+                                    start_date=start_d, end_date=end_d,
+                                    adjust='qfq')
+            label = "美股"
+        elif market == "HK":
+            s = symbol.upper().replace(".HK", "").zfill(5)
+            df = _ak.stock_hk_hist(symbol=s, period='daily',
+                                    start_date=start_d, end_date=end_d,
+                                    adjust='qfq')
+            label = "港股"
+        else:
+            return {"success": False, "error": "未识别市场"}
+
+        if len(df) == 0:
+            return {"success": False, "error": "AKShare 返回空"}
+        df = df.tail(days)
+        return {
+            "success": True,
+            "symbol": s, "market": label,
+            "days_returned": len(df),
+            "dates":  df['日期'].astype(str).tolist(),
+            "open":   [float(x) for x in df['开盘']],
+            "close":  [float(x) for x in df['收盘']],
+            "high":   [float(x) for x in df['最高']],
+            "low":    [float(x) for x in df['最低']],
+            "volume": [int(x) for x in df['成交量']],
+            "data_source": "AKShare 东方财富日 K（前复权）",
+        }
+    except Exception as e:
+        return {"success": False, "error": f"AKShare 失败: {e}"}
+
+
+def historical_prices(symbol: str, days: int = 60) -> dict:
+    """
+    获取近 N 个交易日的历史 K 线（多源 fallback）。
+
+    数据源优先级：
+      1. AKShare（国内源最快，A 股数据最全）
+      2. Yahoo Finance（全球可用，无 Key 兜底）
+
+    返回结构统一：dates / open / close / high / low / volume / returns
+    """
+    if days < 5 or days > 500:
+        return {"success": False, "error": "days 需要在 5-500 之间"}
+
+    market = _detect_market(symbol)
+    if market == "unknown":
+        return {"success": False,
+                "error": f"未识别市场代码: {symbol}",
+                "hint": "支持 600519(A)/AAPL(US)/0700(HK)"}
+
+    cache_key = f"quant:price:{symbol.upper()}:{days}"
+    cached = cache.get(cache_key)
+    if cached:
+        return cached
+
+    sources_tried = []
+
+    # ── 优先级 1: AKShare（国内源，A股数据最全）──
+    r = _hist_akshare(symbol, days)
+    sources_tried.append({"source": "AKShare", "ok": r.get("success"),
+                          "error": r.get("error")})
+    if r.get("success"):
+        result = r
+
+    # ── 优先级 2: Yahoo Finance Fallback（全球可用）──
+    else:
+        r2 = _hist_yahoo(symbol, days)
+        sources_tried.append({"source": "Yahoo Finance",
+                              "ok": r2.get("success"),
+                              "error": r2.get("error")})
+        if r2.get("success"):
+            result = r2
+        else:
+            return {
+                "success": False,
+                "error": "所有数据源都失败",
+                "sources_tried": sources_tried,
+                "hint": ("检查 HTTP_PROXY/HTTPS_PROXY 环境变量是否误设；"
+                         "或确认代码格式正确"),
+            }
+
+    # 顺便算收益率序列，方便后续工具直接用
+    closes = result["close"]
+    result["returns"] = [round(closes[i] / closes[i-1] - 1, 6)
+                          for i in range(1, len(closes))]
+    result["sources_tried"] = sources_tried
+
+    cache.set(cache_key, result, ttl=_PRICE_CACHE_TTL)
+    return result
+
+
+def html_chart_render(
+    chart_type: str,
+    data: dict,
+    title: str = "",
+) -> dict:
+    """
+    生成 ECharts 交互式图表 HTML，保存到 static/charts/，返回访问 URL。
+
+    chart_type:
+      - "candlestick"  K 线图。data: {dates:[], ohlc:[[open,close,low,high]]}
+      - "radar"        因子雷达图。data: {indicators:[...], series:[{name, values}]}
+      - "heatmap"      相关性热力图。data: {labels:[...], matrix:[[..]]}
+      - "bar"          柱状图。data: {x:[], y:[]} 或 {x:[], series:[{name,y}]}
+      - "pie"          饼图。data: {items:[{name, value}]}
+      - "line"         折线图。data: {x:[], series:[{name, y}]}
+    """
+    ct = chart_type.lower().strip()
+    chart_id = _uuid.uuid4().hex[:8]
+    option = None
+
+    # ── 字段宽容性辅助 ──
+    def _first(d, *keys, default=None):
+        """从 dict 取第一个存在的字段值"""
+        for k in keys:
+            if isinstance(d, dict) and k in d and d[k] is not None:
+                return d[k]
+        return default
+
+    def _list_values(item):
+        """从 series 项里提取数值数组，兼容 values/value/data/y"""
+        return _first(item, "values", "value", "data", "y")
+
+    try:
+        if ct == "candlestick":
+            # ⭐ 快捷模式：data={"symbol":"512760","days":60} —— 工具内部自动拉数据
+            #    避免 LLM 把 60+ 个日期/OHLC 数组塞进 tool_calls 参数（导致 max_tokens 截断）
+            if "symbol" in data and not data.get("dates") and not data.get("ohlc"):
+                hp = historical_prices(data["symbol"],
+                                        days=int(data.get("days", 60)))
+                if not hp.get("success"):
+                    return {"success": False,
+                            "error": f"K 线快捷模式拉数失败: {hp.get('error')}",
+                            "hint": "检查 symbol 格式或网络"}
+                dates = hp["dates"]
+                # ECharts K 线顺序 [open, close, low, high]
+                ohlc = [[hp["open"][i], hp["close"][i],
+                         hp["low"][i], hp["high"][i]]
+                        for i in range(len(dates))]
+            else:
+                dates = _first(data, "dates", "x", "labels")
+                ohlc = _first(data, "ohlc", "data", "values")
+            if not dates or not ohlc:
+                return {"success": False,
+                        "error": "candlestick 需要 dates+ohlc，或快捷模式 symbol+days",
+                        "example": '{"symbol":"512760","days":60}'}
+            option = {
+                "title": {"text": title, "textStyle": {"color": "#e6edf3"}},
+                "xAxis": {"data": dates},
+                "yAxis": {"scale": True},
+                "series": [{"type": "candlestick", "data": ohlc}],
+                "tooltip": {"trigger": "axis"},
+            }
+
+        elif ct == "radar":
+            inds = _first(data, "indicators", "axes", "labels", "categories")
+            series_in = _first(data, "series", "data")
+            if not inds or not series_in:
+                return {"success": False,
+                        "error": "radar 需要 indicators 和 series",
+                        "example": ('{"indicators":["Value","Growth"],'
+                                     ' "series":[{"name":"AAPL","values":[80,75]}]}')}
+            indicator_def = [{"name": x, "max": 100} for x in inds]
+            radar_data = []
+            for s in series_in:
+                if isinstance(s, dict):
+                    name = _first(s, "name", "label", default="Series")
+                    vals = _list_values(s)
+                elif isinstance(s, list):
+                    # 兼容直接传数组：series:[[80,75,90,60,70]]
+                    name = "Series"
+                    vals = s
+                else:
+                    continue
+                if vals:
+                    radar_data.append({"name": name, "value": vals})
+            if not radar_data:
+                return {"success": False,
+                        "error": "radar series 中没有有效的 values 数组"}
+            option = {
+                "title": {"text": title, "textStyle": {"color": "#e6edf3"}},
+                "radar": {"indicator": indicator_def},
+                "series": [{"type": "radar", "data": radar_data}],
+                "tooltip": {},
+            }
+
+        elif ct == "heatmap":
+            labels = _first(data, "labels", "x", "categories")
+            mat = _first(data, "matrix", "data", "values")
+            if not labels or not mat:
+                return {"success": False,
+                        "error": "heatmap 需要 labels 和 matrix",
+                        "example": '{"labels":["A","B"], "matrix":[[1,0.7],[0.7,1]]}'}
+            cells = []
+            for i, _ in enumerate(labels):
+                for j, _ in enumerate(labels):
+                    if i < len(mat) and j < len(mat[i]):
+                        cells.append([j, i, mat[i][j]])
+            option = {
+                "title": {"text": title, "textStyle": {"color": "#e6edf3"}},
+                "xAxis": {"type": "category", "data": labels},
+                "yAxis": {"type": "category", "data": labels},
+                "visualMap": {"min": -1, "max": 1, "calculable": True,
+                              "inRange": {"color": ["#f85149", "#161b22", "#00d4aa"]}},
+                "series": [{"type": "heatmap", "data": cells,
+                             "label": {"show": True, "formatter": "{c}"}}],
+                "tooltip": {"position": "top"},
+            }
+
+        elif ct == "bar":
+            x = _first(data, "x", "labels", "categories")
+            if not x:
+                return {"success": False,
+                        "error": "bar 需要 x（类别数组）",
+                        "example": '{"x":["A","B"], "y":[10,20]}'}
+            if "series" in data and isinstance(data["series"], list):
+                series = [{"type": "bar",
+                           "name": _first(s, "name", "label", default="S"),
+                           "data": _list_values(s) or []}
+                          for s in data["series"]]
+            else:
+                ys = _first(data, "y", "values", "data")
+                series = [{"type": "bar", "data": ys or []}]
+            option = {
+                "title": {"text": title, "textStyle": {"color": "#e6edf3"}},
+                "xAxis": {"type": "category", "data": x},
+                "yAxis": {"type": "value"},
+                "series": series,
+                "tooltip": {"trigger": "axis"},
+                "legend": {"top": "bottom"} if "series" in data else None,
+            }
+
+        elif ct == "pie":
+            # 兼容 items / data，每条接受 {name|label, value}
+            items_in = _first(data, "items", "data", "series")
+            if not items_in:
+                return {"success": False,
+                        "error": "pie 需要 items 数组",
+                        "example": '{"items":[{"name":"A","value":40},{"name":"B","value":60}]}'}
+            pie_data = []
+            for it in items_in:
+                if isinstance(it, dict):
+                    pie_data.append({
+                        "name": _first(it, "name", "label", default="?"),
+                        "value": _first(it, "value", "y", default=0),
+                    })
+            option = {
+                "title": {"text": title, "textStyle": {"color": "#e6edf3"}},
+                "series": [{"type": "pie", "radius": "55%", "data": pie_data}],
+                "tooltip": {"trigger": "item"},
+            }
+
+        elif ct == "line":
+            x = _first(data, "x", "labels", "dates", "categories")
+            series_in = _first(data, "series", "data")
+            if not x or not series_in:
+                return {"success": False,
+                        "error": "line 需要 x 和 series",
+                        "example": '{"x":["1","2"], "series":[{"name":"NVDA","y":[100,105]}]}'}
+            series = [{"type": "line", "smooth": True,
+                       "name": _first(s, "name", "label", default="S"),
+                       "data": _list_values(s) or []}
+                      for s in series_in if isinstance(s, dict)]
+            option = {
+                "title": {"text": title, "textStyle": {"color": "#e6edf3"}},
+                "xAxis": {"type": "category", "data": x},
+                "yAxis": {"type": "value"},
+                "series": series,
+                "tooltip": {"trigger": "axis"},
+                "legend": {"top": "bottom"},
+            }
+
+        else:
+            return {"success": False,
+                    "error": f"未知 chart_type: {chart_type}",
+                    "valid_types": ["candlestick", "radar", "heatmap",
+                                     "bar", "pie", "line"]}
+    except Exception as e:
+        return {"success": False,
+                "error": f"图表配置异常: {type(e).__name__}: {e}",
+                "data_received": str(data)[:200]}
+
+    # 构造 HTML 页面
+    html = f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>{title or 'QuantAgent 图表'}</title>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+<style>
+  body {{ background: #0d1117; color: #e6edf3; font-family: sans-serif;
+         margin: 0; padding: 20px; }}
+  #chart {{ width: 100%; height: 90vh; }}
+  .footer {{ color: #8b949e; font-size: 12px; margin-top: 10px;
+             text-align: center; }}
+</style>
+</head>
+<body>
+  <div id="chart"></div>
+  <div class="footer">QuantAgent · 数据仅供研究参考，不构成投资建议</div>
+  <script>
+    const chart = echarts.init(document.getElementById('chart'), 'dark');
+    chart.setOption({json.dumps(option, ensure_ascii=False, default=str)});
+    window.addEventListener('resize', () => chart.resize());
+  </script>
+</body>
+</html>"""
+
+    filename = f"{ct}_{chart_id}.html"
+    filepath = os.path.join(_CHARTS_DIR, filename)
+    with open(filepath, "w", encoding="utf-8") as f:
+        f.write(html)
+
+    return {
+        "success": True,
+        "chart_type": ct,
+        "title": title,
+        "url": f"/static/charts/{filename}",
+        "filename": filename,
+        "render_hint": "前端引用 url 即可在浏览器查看交互式图表",
+    }
+
+
 TOOL_REGISTRY = {
     "market_quote":         market_quote,
     "factor_score":         factor_score,
@@ -1261,6 +2076,11 @@ TOOL_REGISTRY = {
     "market_news_search":   market_news_search,
     "trading_calendar":     trading_calendar,
     "search_research_docs": search_research_docs,
+    "correlation_matrix":   correlation_matrix,
+    "portfolio_optimizer":  portfolio_optimizer,
+    "implied_volatility":   implied_volatility,
+    "html_chart_render":    html_chart_render,
+    "historical_prices":    historical_prices,
 }
 
 TOOL_SCHEMAS = [
@@ -1301,10 +2121,16 @@ style 可选：balanced(均衡), value(价值偏好), growth(成长偏好), mome
     },
     {
         "name": "technical_indicator",
-        "description": """技术指标计算。
-支持 RSI / MACD / Bollinger Bands / SMA。
+        "description": """技术指标计算（RSI / MACD / Bollinger Bands / SMA）。
 输入：收盘价数组（时间正序，旧→新）+ 指标名。
-RSI 默认周期 14，Bollinger 默认周期 20。""",
+
+⚠️ 重要：本工具只做计算，不会自己拉数据。
+   必须先调用 `historical_prices(symbol, days=N)` 拿到 close 数组再传入。
+   各指标对数据长度要求：
+     - RSI(14):    至少 15 个价格点（建议 days=30）
+     - MACD:       至少 26 个（建议 days=40+）
+     - Bollinger:  至少 period 个（默认 period=20）
+     - SMA:        至少 period 个""",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -1398,6 +2224,165 @@ action: today (今天信息) / trading_days_between (两日期间交易日数).
         }
     },
     {
+        "name": "historical_prices",
+        "description": """拉取近 N 个交易日的历史 K 线（OHLCV + 收益率序列）。
+⚠️ 这是 technical_indicator / correlation_matrix / portfolio_optimizer 的「上游」工具。
+凡需要历史价格数组的场景，先用本工具拿数据。
+
+返回字段：dates / open / close / high / low / volume / returns
+  - close 数组直接喂给 technical_indicator
+  - returns 数组直接喂给 correlation_matrix 或 portfolio_optimizer
+  - dates + ohlc 组合可喂给 html_chart_render(chart_type='candlestick')
+
+支持市场：
+  - A 股: 600519 / 000858 / 510300 等
+  - 美股: AAPL / NVDA / TSLA
+  - 港股: 0700 / 09988
+
+days 建议：
+  - RSI/SMA: ≥ 30
+  - MACD: ≥ 30（含 EMA26 + signal 9）
+  - 布林带: ≥ 25
+  - 计算因子: 60-120
+  - 画 K 线图: 60+""",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "symbol": {"type": "string"},
+                "days":   {"type": "integer",
+                           "description": "返回最近 N 个交易日",
+                           "default": 60, "minimum": 5, "maximum": 500},
+            },
+            "required": ["symbol"],
+        }
+    },
+    {
+        "name": "correlation_matrix",
+        "description": """计算多资产收益率相关性矩阵。
+输入：{asset_name: [return_1, return_2, ...]} 字典，至少 2 个资产，每个序列 >=5 点。
+返回：对称矩阵 + 高相关性 pair 警示（|corr| >= 0.7）。
+适用：评估组合多元化效果、寻找对冲对、识别高度同涨同跌资产。""",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "returns_data": {
+                    "type": "object",
+                    "description": "资产→收益率序列的字典",
+                    "additionalProperties": {
+                        "type": "array",
+                        "items": {"type": "number"},
+                    },
+                },
+            },
+            "required": ["returns_data"],
+        }
+    },
+    {
+        "name": "portfolio_optimizer",
+        "description": """多资产组合权重优化。
+method 选项：
+  - equal_weight: 等权重（基线参考）
+  - inverse_vol:  反波动率加权（简易风险平价）
+  - min_variance: 最小方差（需历史协方差）
+  - max_sharpe:   最大夏普比率（解析解，不允许做空）
+
+返回：每个资产权重 + 组合年化收益/波动/夏普。
+样本量越大结果越稳定，建议日频 60 天以上。""",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "returns_data": {
+                    "type": "object",
+                    "description": "资产→收益率序列字典",
+                    "additionalProperties": {
+                        "type": "array",
+                        "items": {"type": "number"},
+                    },
+                },
+                "method": {
+                    "type": "string",
+                    "enum": ["equal_weight", "inverse_vol",
+                             "min_variance", "max_sharpe"],
+                    "default": "min_variance",
+                },
+                "risk_free_rate": {"type": "number", "default": 0.03},
+                "periods_per_year": {"type": "integer", "default": 252},
+            },
+            "required": ["returns_data"],
+        }
+    },
+    {
+        "name": "implied_volatility",
+        "description": """从期权市场价反推 Black-Scholes 隐含波动率（IV）。
+适用：评估期权定价是否合理、对比当前 IV 与历史水平判断市场紧张度。
+返回的 IV 越高代表市场预期未来波动越大。""",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "market_price":   {"type": "number", "description": "期权当前市场价"},
+                "spot":           {"type": "number", "description": "标的现价"},
+                "strike":         {"type": "number", "description": "行权价"},
+                "time_to_expiry": {"type": "number", "description": "到期年数（如 0.25=3月）"},
+                "risk_free_rate": {"type": "number"},
+                "option_type":    {"type": "string", "enum": ["call", "put"]},
+            },
+            "required": ["market_price", "spot", "strike",
+                         "time_to_expiry", "risk_free_rate", "option_type"],
+        }
+    },
+    {
+        "name": "html_chart_render",
+        "description": """生成 ECharts 交互式 HTML 图表，返回可访问的 URL。
+工具会按 chart_type 解析 data，字段名宽容（values/value/data/y 可互换）。
+
+▶ radar（因子雷达图）—— 最常用，配合 factor_score：
+  {
+    "indicators": ["Value", "Growth", "Momentum", "Quality", "Technical"],
+    "series": [{"name": "AAPL", "values": [80, 75, 60, 90, 70]}]
+  }
+  注：values 数组顺序必须与 indicators 对齐。
+
+▶ pie（饼图）—— 配合 portfolio_optimizer 画权重：
+  {"items": [{"name": "AAPL", "value": 0.4}, {"name": "MSFT", "value": 0.6}]}
+
+▶ heatmap（热力图）—— 配合 correlation_matrix：
+  {"labels": ["AAPL", "MSFT", "GLD"],
+   "matrix": [[1, 0.8, -0.3], [0.8, 1, -0.2], [-0.3, -0.2, 1]]}
+
+▶ candlestick（K 线图）—— ⭐ 强烈推荐快捷模式（省 token）：
+  {"symbol": "512760", "days": 60}
+  工具内部自动调 historical_prices 拉数据，无需你传一长串日期/OHLC 数组。
+  禁止手动把 60+ 日期数组塞进参数，会触发 max_tokens 截断！
+
+  仅当数据来源不是历史 K 线时才用手动模式：
+  {"dates": [...], "ohlc": [[open, close, low, high], ...]}
+
+▶ bar（柱状图）：
+  {"x": ["Q1","Q2","Q3"], "y": [100, 120, 95]}
+
+▶ line（折线图）：
+  {"x": ["1月","2月"], "series": [{"name": "NVDA", "y": [100, 105]}]}
+
+调用成功后在报告里用 Markdown 引用：
+  📊 [查看图表](URL)""",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "chart_type": {
+                    "type": "string",
+                    "enum": ["candlestick", "radar", "heatmap",
+                             "bar", "pie", "line"],
+                },
+                "data": {
+                    "type": "object",
+                    "description": "图表数据，结构按 chart_type 不同而异",
+                },
+                "title": {"type": "string", "default": ""},
+            },
+            "required": ["chart_type", "data"],
+        }
+    },
+    {
         "name": "search_research_docs",
         "description": """在内部研报/财报 PDF 库中检索相关段落（RAG）。
 适用场景：
@@ -1439,59 +2424,51 @@ action: today (今天信息) / trading_days_between (两日期间交易日数).
 # 第三部分：QuantAgent System Prompt（基于 system_prompt.txt）
 # ════════════════════════════════════════════════════════════
 
-SYSTEM_PROMPT = """你是 QuantAgent v1.0，精通量化金融与系统化交易的顶级 AI 助手。
+SYSTEM_PROMPT = """你是 QuantAgent v1.0，量化金融分析助手（多因子/期权/风险/组合/RAG）。
 
-【角色定位】
-- 量化核心：多因子模型、统计套利、动量/反转策略
-- 衍生品定价：Black-Scholes、Greeks 分析
-- 风险管理：VaR/CVaR/Sharpe/MaxDD
-- 数据严谨：所有结论必须注明数据来源与置信度
+【数据流要求】
+- 凡需要历史价格的下游计算（技术指标/相关性/组合优化/K 线图），先调 historical_prices
+- 凡需要实时价格，调 market_quote
+- 凡需要分析公司财报/研报观点，先调 search_research_docs
 
-【可用工具】
-1. market_quote        — 行情快照（MOCK 数据，明确标注）
-2. factor_score        — 多因子综合打分（0-100）
-3. technical_indicator — RSI/MACD/布林带/SMA
-4. black_scholes       — 欧式期权定价与 Greeks
-5. risk_metrics        — 组合风险指标（Sharpe/Sortino/VaR/MaxDD）
-6. market_news_search  — 财经新闻定向搜索
-7. trading_calendar    — 交易日历
-8. search_research_docs — 研报/财报 PDF 库检索（RAG），有引用价值的观点必查
+【代码类型识别 - 避免无效调用】
+- 个股代码（6 位数字开头 6/0/3）: 全套工具可用（factor_score / technical_indicator / news 等）
+- ETF/LOF/基金代码（5xxxxx / 15xxxx / 159xxx / 16xxxx）:
+    ❌ 不要调 factor_score（无财务报表，会快速报错但浪费一轮）
+    ✅ 直接 historical_prices + technical_indicator + market_news_search
+- 中文主题词（"芯片ETF" 等非代码）:
+    ✅ 先 market_news_search 找具体代码，再走代码分析路径
 
-【强制工作原则】
-✅ 数据驱动：任何数值结论必须来自工具调用，禁止凭记忆估算
-✅ 多工具协同：复杂任务并行调用多个工具，再综合分析
-✅ 标注数据来源：MOCK 数据必须明示 [MOCK DATA]，实时数据注明截止时间
-✅ 置信度标签：🟢高置信 / 🟡中置信 / 🔴低置信
-✅ 双语术语：专业词汇中英对照（如「夏普比率 Sharpe Ratio」）
+【工具协同建议】
+- 复杂任务**并行调用多工具**（一次决策里多个 tool_calls），减少轮次
+- 数据源标识：data_source 字段写"实时计算"/"实时行情"是真数据，直接引用；
+  写 [MOCK DATA] 才需明示"演示数据"
+- 工具失败读 hint 字段后纠正参数重试
 
-【禁止行为】
-❌ 不使用"一定涨/跌"、"保证收益"等绝对化表述
-❌ 不在数据缺失时编造具体数值，标注 [DATA UNAVAILABLE]
-❌ 不省略风险提示
-❌ 不推荐超出常识的杠杆比例
+【禁止】
+- 不用"一定涨/跌"、"保证收益"等绝对化表述
+- 不编造数据，缺数据标注 [DATA UNAVAILABLE]
+- 不省略风险提示
 
-【输出格式（报告类问题）】
-使用 Markdown 结构：
+【报告输出格式（仅"分析"类问题）】
+```
+# 📊 [标题]
+**风险等级**：🟢低 / 🟡中 / 🔴高
 
-# 📊 [报告标题]
-**生成时间**：YYYY-MM-DD HH:MM (CST) | **风险等级**：🟢/🟡/🔴
+## 核心结论 / Key Takeaways
+- 3-5 条要点
 
-## 一、核心结论 / Key Takeaways
-- 3-5 条要点，先中文后英文
+## 量化分析 / Quantitative Analysis
+[数据 + 计算 + 数据源]
 
-## 二、量化分析 / Quantitative Analysis
-[因子得分、指标计算、数据引用]
-
-## 三、风险提示 / Risk Warnings
-[必须包含]
-
-## 四、操作参考 / Actionable Reference
-[方向性建议 + 计算依据]
+## 风险提示 / Risk Warnings
+[必含]
 
 ---
-⚠️ **免责声明**：本报告基于量化模型输出，仅供研究参考，不构成投资建议。
-历史收益不代表未来表现，量化模型存在失效风险。投资有风险，入市需谨慎。
-"""
+⚠️ 仅供研究参考，不构成投资建议。
+```
+
+简短问题（如"现在几点"、"AAPL 多少钱"）直接回答即可，不必套报告格式。"""
 
 
 # ════════════════════════════════════════════════════════════
@@ -1531,15 +2508,135 @@ def _to_openai_tools(anthropic_schemas: list) -> list:
 _OPENAI_TOOLS = _to_openai_tools(TOOL_SCHEMAS)
 
 
-def _truncate_observation(obs: dict, obs_str: str, max_len: int = 3000) -> str:
-    """工具返回过大时按字段截断"""
+def _truncate_observation(obs: dict, obs_str: str, max_len: int = 2500) -> str:
+    """
+    工具返回过大时按字段裁剪。
+    ⚠️ 注意：historical_prices 的 close/dates 等数组不裁剪 ——
+       它们是下游工具的必需输入，裁了就无法调用 technical_indicator。
+    """
     if len(obs_str) <= max_len:
         return obs_str
+
+    # 新闻类（多源聚合容易超长）：限 top-3
     for k in ("results", "news", "quotes"):
-        if obs.get(k):
+        if isinstance(obs.get(k), list) and len(obs[k]) > 3:
             obs[k] = obs[k][:3]
             obs["truncated"] = True
+
+    # 新闻 content/summary 字段过长再截
+    for list_field in ("results", "news"):
+        items = obs.get(list_field)
+        if isinstance(items, list):
+            for item in items:
+                if isinstance(item, dict):
+                    for tk in ("content", "summary", "title"):
+                        v = item.get(tk)
+                        if isinstance(v, str) and len(v) > 200:
+                            item[tk] = v[:200] + "..."
+
     return json.dumps(obs, ensure_ascii=False, default=str)
+
+
+def _generate_followups(messages: list) -> list:
+    """
+    基于近几轮对话生成 3 个用户可能接着想问的问题。
+    单独再调用一次 LLM（轻量 prompt + max_tokens 限制），成本约 0.002 元/次。
+    失败时静默返回 []，不影响主流程。
+    """
+    # 抽取最近的 user + assistant 对话片段（控制 prompt 长度）
+    recent = []
+    for m in reversed(messages):
+        if m.get("role") not in ("user", "assistant"):
+            continue
+        content = m.get("content")
+        if not isinstance(content, str) or not content.strip():
+            continue
+        # 截断过长的 assistant 报告（只保留前 600 字符给上下文）
+        snippet = content if len(content) < 600 else content[:600] + "..."
+        recent.insert(0, {"role": m["role"], "content": snippet})
+        if len(recent) >= 4:
+            break
+
+    if not recent:
+        return []
+
+    sys_prompt = (
+        "你是量化分析对话的「问题推荐器」。基于以下用户与 Agent 的对话，"
+        "推断用户接下来可能想问的 3 个紧密相关的问题。\n"
+        "要求：\n"
+        "1. 每个问题 ≤ 25 个字\n"
+        "2. 紧扣前文上下文，可深入挖掘或横向扩展\n"
+        "3. 不要重复用户已问过的问题\n"
+        "4. 偏量化分析视角（涉及具体股票/指标/对比/风险等）\n"
+        "5. 只输出 JSON 数组，格式：[\"问题1\",\"问题2\",\"问题3\"]，"
+        "不要任何前后缀解释。"
+    )
+
+    try:
+        resp = client.chat.completions.create(
+            model=DEEPSEEK_MODEL,
+            messages=[
+                {"role": "system", "content": sys_prompt},
+                *recent,
+                {"role": "user",
+                 "content": "请基于以上对话生成 3 个 follow-up 问题（JSON 数组）"},
+            ],
+            max_tokens=200,
+            temperature=0.7,
+        )
+        text = (resp.choices[0].message.content or "").strip()
+        # 提取 JSON 数组（容忍模型偶尔加解释）
+        match = re.search(r'\[.*?\]', text, re.DOTALL)
+        if not match:
+            return []
+        items = json.loads(match.group(0))
+        if not isinstance(items, list):
+            return []
+        cleaned = [str(x).strip() for x in items if x and isinstance(x, str)]
+        return cleaned[:3]
+    except Exception:
+        return []
+
+
+def _sanitize_messages(messages: list) -> list:
+    """
+    清洗历史：移除「悬空」的 assistant.tool_calls（没对应 tool 响应的）。
+    通常由用户中途取消请求导致。
+    原地修改并返回 messages。
+    """
+    if not messages:
+        return messages
+
+    cleaned = []
+    i = 0
+    while i < len(messages):
+        m = messages[i]
+        if m.get("role") == "assistant" and m.get("tool_calls"):
+            expected = {tc["id"] for tc in m["tool_calls"]}
+            # 看后面紧跟着的 tool 消息
+            j = i + 1
+            following = []
+            while j < len(messages) and messages[j].get("role") == "tool":
+                following.append(messages[j])
+                j += 1
+            covered = {t.get("tool_call_id") for t in following}
+
+            if expected <= covered:
+                # 完整闭环，原样保留
+                cleaned.append(m)
+                cleaned.extend(following)
+            else:
+                # 不完整 —— 跳过这个 assistant 和后面的 tool 残片
+                # （保留之前的 user message，让 LLM 当从未发生）
+                pass
+            i = j
+        else:
+            cleaned.append(m)
+            i += 1
+
+    # 原地替换
+    messages[:] = cleaned
+    return messages
 
 
 def stream_quant_agent(messages: list, max_iterations: int = 15):
@@ -1551,91 +2648,149 @@ def stream_quant_agent(messages: list, max_iterations: int = 15):
     if not messages or messages[0].get("role") != "system":
         messages.insert(0, {"role": "system", "content": SYSTEM_PROMPT})
 
+    # 防御：清洗历史中可能存在的悬空 tool_calls（来自上次取消请求）
+    _sanitize_messages(messages)
+
     for iteration in range(1, max_iterations + 1):
+        # ── 流式调用 DeepSeek，边接收边推送给前端 ──
         try:
-            response = client.chat.completions.create(
+            stream = client.chat.completions.create(
                 model=DEEPSEEK_MODEL,
                 messages=messages,
                 tools=_OPENAI_TOOLS,
-                max_tokens=4096,
+                max_tokens=8000,
+                stream=True,
             )
         except Exception as e:
             yield {"type": "error", "error": f"API 调用失败: {e}"}
             return
 
-        choice = response.choices[0]
-        msg = choice.message
-        finish = choice.finish_reason
+        # 流式累积器
+        content_buf = ""
+        finish = None
+        tool_calls_buf = []   # [{id, name, arguments}, ...] 按 index 累积
 
-        # ── 模型给出最终答案 ──
-        if finish == "stop":
-            text = msg.content or ""
-            messages.append({"role": "assistant", "content": text})
-            yield {"type": "final", "text": text, "iterations": iteration}
+        try:
+            for chunk in stream:
+                if not chunk.choices:
+                    continue
+                choice = chunk.choices[0]
+                delta = choice.delta
+                if choice.finish_reason:
+                    finish = choice.finish_reason
+
+                if delta and delta.content:
+                    content_buf += delta.content
+                    yield {"type": "content_delta",
+                           "text": delta.content,
+                           "iteration": iteration}
+
+                if delta and delta.tool_calls:
+                    for tc_delta in delta.tool_calls:
+                        idx = tc_delta.index
+                        while len(tool_calls_buf) <= idx:
+                            tool_calls_buf.append({"id": "", "name": "",
+                                                    "arguments": ""})
+                        if tc_delta.id:
+                            tool_calls_buf[idx]["id"] = tc_delta.id
+                        if tc_delta.function:
+                            if tc_delta.function.name:
+                                tool_calls_buf[idx]["name"] = tc_delta.function.name
+                            if tc_delta.function.arguments:
+                                tool_calls_buf[idx]["arguments"] += tc_delta.function.arguments
+        except Exception as e:
+            yield {"type": "error", "error": f"流式接收失败: {e}"}
             return
 
-        # ── 工具调用 ──
-        if finish == "tool_calls" and msg.tool_calls:
-            # 调工具前的思考（可能为空）
-            if msg.content and msg.content.strip():
+        # ── finish_reason 分支 ──
+        if finish == "stop":
+            messages.append({"role": "assistant", "content": content_buf})
+            yield {"type": "final", "text": content_buf,
+                   "iterations": iteration}
+            # final 之后异步生成 follow-up 建议（不影响主答案显示）
+            followups = _generate_followups(messages)
+            if followups:
+                yield {"type": "suggestions", "items": followups}
+            return
+
+        if finish == "length":
+            warning = ("\n\n---\n\n⚠️ **本回复因长度限制被截断**，"
+                       "建议把问题拆分成几个小问题分别提问。")
+            messages.append({"role": "assistant", "content": content_buf})
+            yield {"type": "final", "text": content_buf + warning,
+                   "iterations": iteration, "truncated": True}
+            followups = _generate_followups(messages)
+            if followups:
+                yield {"type": "suggestions", "items": followups}
+            return
+
+        if finish == "tool_calls" and tool_calls_buf:
+            # 流式过程中如果有思考文本，已通过 content_delta 推过了
+            # 这里发个 thought 总结（兼容老前端）
+            if content_buf.strip():
                 yield {"type": "thought",
-                       "text": msg.content.strip(),
+                       "text": content_buf.strip(),
                        "iteration": iteration}
 
-            # 把模型这一轮的完整回复入历史
-            messages.append({
+            # 预构造 assistant 消息
+            assistant_msg = {
                 "role": "assistant",
-                "content": msg.content or "",
+                "content": content_buf,
                 "tool_calls": [
-                    {
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {
-                            "name": tc.function.name,
-                            "arguments": tc.function.arguments,
-                        },
-                    }
-                    for tc in msg.tool_calls
+                    {"id": tc["id"], "type": "function",
+                     "function": {"name": tc["name"],
+                                   "arguments": tc["arguments"]}}
+                    for tc in tool_calls_buf
                 ],
-            })
+            }
+            tool_msgs = []
 
-            # 逐个工具执行
-            for tc in msg.tool_calls:
+            for tc in tool_calls_buf:
                 try:
-                    args = json.loads(tc.function.arguments)
+                    args = json.loads(tc["arguments"]) if tc["arguments"] else {}
                 except json.JSONDecodeError:
                     args = None
 
-                yield {
-                    "type": "tool_call",
-                    "name": tc.function.name,
-                    "input": args if isinstance(args, dict) else {},
-                    "id": tc.id,
-                }
+                yield {"type": "tool_call",
+                       "name": tc["name"],
+                       "input": args if isinstance(args, dict) else {},
+                       "id": tc["id"]}
 
                 if not isinstance(args, dict):
-                    obs = {"success": False,
-                           "error": "工具参数不是有效 JSON 对象",
-                           "raw_arguments": tc.function.arguments[:200]}
+                    # 通常是 max_tokens 截断导致 JSON 不完整
+                    truncated_hint = ""
+                    if tc["name"] == "html_chart_render":
+                        truncated_hint = (
+                            " 推荐改用快捷模式："
+                            "html_chart_render(chart_type='candlestick', "
+                            "data={'symbol':'XXXXXX','days':60})，"
+                            "不要手动传 dates/ohlc 数组，会被截断。"
+                        )
+                    obs = {
+                        "success": False,
+                        "error_type": "args_json_parse_failed",
+                        "error": "工具参数 JSON 不完整（可能被 max_tokens 截断）",
+                        "raw_arguments_preview": tc["arguments"][:200] + "...",
+                        "hint": "请简化参数（少传大数组）或重新尝试。" + truncated_hint,
+                    }
                 else:
-                    obs = dispatch_tool(tc.function.name, args)
+                    obs = dispatch_tool(tc["name"], args)
 
                 obs_str = json.dumps(obs, ensure_ascii=False, default=str)
                 obs_str = _truncate_observation(obs, obs_str)
 
-                is_error = not obs.get("success", True)
-                yield {
-                    "type": "tool_result",
-                    "name": tc.function.name,
-                    "result": obs,
-                    "is_error": is_error,
-                }
+                yield {"type": "tool_result",
+                       "name": tc["name"],
+                       "result": obs,
+                       "is_error": not obs.get("success", True)}
 
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tc.id,
-                    "content": obs_str,
-                })
+                tool_msgs.append({"role": "tool",
+                                   "tool_call_id": tc["id"],
+                                   "content": obs_str})
+
+            # 原子提交
+            messages.append(assistant_msg)
+            messages.extend(tool_msgs)
             continue
 
         # 兜底：异常 finish_reason（length / content_filter 等）

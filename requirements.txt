@@ -5,6 +5,9 @@ pydantic>=2.0.0
 python-dotenv>=1.0.0
 python-multipart>=0.0.20
 
+# 可选：Redis（缓存 + 会话持久化）
+redis>=5.0.0
+
 # 可选：A 股深度数据
 akshare>=1.18.0
 

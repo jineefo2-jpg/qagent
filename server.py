@@ -22,6 +22,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from quant_agent import stream_quant_agent
+from cache import cache  # Redis 或内存缓存
 
 BASE_DIR = Path(__file__).parent
 STATIC_DIR = BASE_DIR / "static"
@@ -30,45 +31,89 @@ app = FastAPI(title="QuantAgent Web", version="1.0")
 
 
 # ════════════════════════════════════════════════════════════
-# 会话存储（内存版，重启即失）
-#   生产环境可替换为 Redis / SQLite / Postgres
+# 会话存储（Redis 或内存，跨进程/重启持久）
 # ════════════════════════════════════════════════════════════
 
+SESSION_TTL = 86400 * 7    # 会话保留 7 天
+SESSION_INDEX_KEY = "quant:session:index"  # 维护活跃会话 ID 列表
+
+
 class Session:
-    """单个会话：完整 Claude 消息历史 + 用于 UI 展示的简化历史"""
+    """单个会话：LLM 消息历史 + UI 展示历史，全部 JSON 可序列化"""
 
     def __init__(self, sid: str, title: str = "新对话"):
         self.id = sid
         self.title = title
         self.created_at = datetime.now().isoformat(timespec="seconds")
-        self.messages = []   # Claude API 历史（含 tool_use / tool_result 原始对象）
-        self.display = []    # UI 展示历史（纯字典，可序列化）
+        self.messages = []   # DeepSeek/OpenAI API 历史
+        self.display = []    # UI 展示历史
 
-    def to_summary(self):
+    def to_dict(self) -> dict:
         return {
             "id": self.id,
             "title": self.title,
+            "created_at": self.created_at,
+            "messages": self.messages,
+            "display": self.display,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "Session":
+        s = cls(data["id"], data.get("title", "新对话"))
+        s.created_at = data.get("created_at", s.created_at)
+        s.messages = data.get("messages", [])
+        s.display = data.get("display", [])
+        return s
+
+    def to_summary(self):
+        return {
+            "id": self.id, "title": self.title,
             "created_at": self.created_at,
             "message_count": len(self.display),
         }
 
     def to_detail(self):
         return {
-            "id": self.id,
-            "title": self.title,
+            "id": self.id, "title": self.title,
             "created_at": self.created_at,
             "display": self.display,
         }
 
 
-SESSIONS: dict[str, Session] = {}
+def _session_key(sid: str) -> str:
+    return f"quant:session:{sid}"
+
+
+def save_session(s: Session):
+    """持久化到 Redis/内存，同时维护索引"""
+    cache.set(_session_key(s.id), s.to_dict(), ttl=SESSION_TTL)
+    # 索引（用于列表）：存所有活跃 session id
+    index = cache.get(SESSION_INDEX_KEY) or []
+    if s.id not in index:
+        index.append(s.id)
+        cache.set(SESSION_INDEX_KEY, index, ttl=SESSION_TTL)
+
+
+def load_session(sid: str) -> Optional[Session]:
+    data = cache.get(_session_key(sid))
+    if not data:
+        return None
+    return Session.from_dict(data)
 
 
 def get_session(sid: str) -> Session:
-    s = SESSIONS.get(sid)
+    s = load_session(sid)
     if not s:
         raise HTTPException(404, f"Session {sid} not found")
     return s
+
+
+def delete_session_storage(sid: str):
+    cache.delete(_session_key(sid))
+    index = cache.get(SESSION_INDEX_KEY) or []
+    if sid in index:
+        index.remove(sid)
+        cache.set(SESSION_INDEX_KEY, index, ttl=SESSION_TTL)
 
 
 # ════════════════════════════════════════════════════════════
@@ -83,7 +128,19 @@ class ChatRequest(BaseModel):
 @app.get("/api/sessions")
 def list_sessions():
     """列出所有会话（最新在前）"""
-    items = [s.to_summary() for s in SESSIONS.values()]
+    index = cache.get(SESSION_INDEX_KEY) or []
+    items = []
+    stale = []
+    for sid in index:
+        s = load_session(sid)
+        if s:
+            items.append(s.to_summary())
+        else:
+            stale.append(sid)
+    # 清理失效索引项（TTL 过期后）
+    if stale:
+        fresh = [i for i in index if i not in stale]
+        cache.set(SESSION_INDEX_KEY, fresh, ttl=SESSION_TTL)
     items.sort(key=lambda x: x["created_at"], reverse=True)
     return items
 
@@ -93,7 +150,7 @@ def create_session():
     """新建会话"""
     sid = uuid.uuid4().hex[:10]
     session = Session(sid)
-    SESSIONS[sid] = session
+    save_session(session)
     return session.to_detail()
 
 
@@ -106,7 +163,7 @@ def session_detail(sid: str):
 @app.delete("/api/sessions/{sid}")
 def delete_session(sid: str):
     """删除会话"""
-    SESSIONS.pop(sid, None)
+    delete_session_storage(sid)
     return {"ok": True}
 
 
@@ -137,6 +194,9 @@ def chat(sid: str, body: ChatRequest):
     if body.attachment:
         display_user["attachment"] = body.attachment
     session.display.append(display_user)
+
+    # 用户消息阶段先持久化一次（防止网络中断丢失）
+    save_session(session)
 
     # 2. 准备本轮 assistant 的展示记录（边流边填充）
     assistant_turn = {
@@ -180,6 +240,9 @@ def chat(sid: str, body: ChatRequest):
                     assistant_turn["content"] = event["text"]
                     assistant_turn["iterations"] = event["iterations"]
 
+                elif event["type"] == "suggestions":
+                    assistant_turn["suggestions"] = event["items"]
+
                 elif event["type"] == "error":
                     assistant_turn["content"] = f"❌ {event['error']}"
 
@@ -187,11 +250,17 @@ def chat(sid: str, body: ChatRequest):
                 payload = json.dumps(event, ensure_ascii=False, default=str)
                 yield f"data: {payload}\n\n"
 
-            # 流结束，存档
+            # 流结束，存档 + 持久化
             session.display.append(assistant_turn)
+            save_session(session)
             yield f"data: {json.dumps({'type': 'done'})}\n\n"
 
         except Exception as e:
+            # 异常也尝试保存当前状态
+            try:
+                save_session(session)
+            except Exception:
+                pass
             err = {"type": "error", "error": f"服务端异常: {e}"}
             yield f"data: {json.dumps(err, ensure_ascii=False)}\n\n"
 

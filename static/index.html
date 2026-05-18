@@ -240,6 +240,12 @@
   }
   .msg-content ul, .msg-content ol { padding-left: 24px; margin: 8px 0; }
 
+  /* 流式渲染期间防止半成品 markdown 抖动 */
+  .msg-content > *:first-child { margin-top: 0; }
+  .msg-content > *:last-child { margin-bottom: 0; }
+  .msg-content table { table-layout: fixed; }
+  .msg-content pre { white-space: pre-wrap; word-break: break-word; }
+
   /* ── 工具执行卡片 ── */
   .tool-trace {
     margin-top: 12px;
@@ -361,6 +367,11 @@
   }
   .send-btn:hover { opacity: 0.85; }
   .send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .send-btn.cancel-mode {
+    background: var(--danger);
+    color: #fff;
+  }
+  .send-btn.cancel-mode:hover { opacity: 0.85; }
 
   .upload-btn {
     width: 36px;
@@ -473,6 +484,84 @@
     text-align: center;
   }
 
+  /* ── 图表加载失败占位 ── */
+  .chart-failed-notice {
+    margin-top: 12px;
+    padding: 12px 16px;
+    background: rgba(248, 81, 73, 0.04);
+    border: 1px dashed var(--border);
+    border-radius: 8px;
+    color: var(--text-muted);
+    font-size: 12px;
+    text-align: center;
+    line-height: 1.5;
+  }
+  .chart-failed-notice::before {
+    content: '📊 ';
+    opacity: 0.6;
+  }
+
+  /* ── Follow-up 建议 chip（answer 下方）── */
+  .suggestions {
+    margin-top: 14px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .suggestions-label {
+    width: 100%;
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-bottom: 2px;
+  }
+  .suggestion-chip {
+    padding: 7px 12px;
+    background: var(--bg-elev-2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 16px;
+    font-size: 12px;
+    cursor: pointer;
+    transition: all 0.15s;
+    text-align: left;
+    line-height: 1.4;
+    max-width: 100%;
+    font-family: inherit;
+  }
+  .suggestion-chip:hover {
+    border-color: var(--primary);
+    color: var(--primary);
+    background: rgba(0, 212, 170, 0.08);
+  }
+  .suggestion-chip::before {
+    content: '💡 ';
+    opacity: 0.6;
+    margin-right: 2px;
+  }
+
+  /* ── 流式进度指示器（常驻直到 final 事件）── */
+  .msg-status {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 6px 12px;
+    margin-top: 10px;
+    background: rgba(0, 212, 170, 0.08);
+    border: 1px solid var(--primary-dim);
+    border-radius: 14px;
+    font-size: 12px;
+    color: var(--primary);
+  }
+  .msg-status .status-text {
+    margin-left: 6px;
+    font-weight: 500;
+  }
+  .msg-status.error-state {
+    background: rgba(248, 81, 73, 0.08);
+    border-color: var(--danger);
+    color: var(--danger);
+  }
+
   /* ── Loading 状态 ── */
   .loading-dot {
     display: inline-block;
@@ -531,9 +620,6 @@
           <button class="example-btn" onclick="useExample(this)">
             苹果股票 213 美元，行权价 220、3个月到期的看涨期权，无风险利率 4.5%，IV 28%，给我理论价格和 Greeks
           </button>
-          <button class="example-btn" onclick="useExample(this)">
-            收益率 [0.012,-0.008,0.015,0.003,-0.021,0.008,0.011,-0.005,0.018,-0.012,0.007,0.022,-0.015,0.009,0.013,-0.018,0.025,0.004,-0.009,0.016,0.011,-0.007,0.019,-0.013,0.008,0.014,-0.022,0.017,0.006,0.020]，全套风险指标
-          </button>
         </div>
       </div>
     </div>
@@ -551,7 +637,7 @@
                   rows="1"
                   onkeydown="handleKey(event)"
                   oninput="autoResize(this)"></textarea>
-        <button class="send-btn" id="sendBtn" onclick="sendMessage()">发送</button>
+        <button class="send-btn" id="sendBtn" onclick="onSendBtnClick()">发送</button>
       </div>
       <div class="input-hint">
         ⚠️ 仅供研究参考，不构成投资建议
@@ -566,6 +652,40 @@
 // ════════════════════════════════════════════════════════════
 let currentSession = null;
 let isStreaming = false;
+let currentAbortController = null;  // 当前请求的 AbortController
+
+// marked 配置：单换行也转 <br>，启用 GFM，所有链接新窗口打开
+if (window.marked) {
+  marked.use({
+    breaks: true,
+    gfm: true,
+    hooks: {
+      postprocess(html) {
+        // 给所有 <a> 加 target=_blank（K 线图等不会替换聊天页）
+        return html.replace(
+          /<a (?![^>]*\btarget=)/g,
+          '<a target="_blank" rel="noopener" '
+        );
+      }
+    }
+  });
+}
+
+// 流式期间节流渲染 markdown（避免每个 token 都重排）
+function scheduleMarkdownRender(contentDom) {
+  if (contentDom._renderScheduled) return;
+  contentDom._renderScheduled = true;
+  // 80ms 节流：人眼感受流畅，性能可控
+  setTimeout(() => {
+    contentDom._renderScheduled = false;
+    if (!contentDom._streaming) return;  // 已结束就不渲染了
+    try {
+      contentDom.innerHTML = marked.parse(contentDom._raw || '');
+    } catch (e) {
+      contentDom.textContent = contentDom._raw || '';
+    }
+  }, 80);
+}
 
 // ════════════════════════════════════════════════════════════
 // 会话管理
@@ -653,13 +773,27 @@ function renderMessage(m) {
     ? '<span class="badge">U</span> 你'
     : '<span class="badge">Q</span> QuantAgent';
 
-  // 只展示失败的工具调用；成功调用对用户隐藏
+  // 只展示真失败的工具调用；静默错误（factor_score / html_chart_render）不显示红卡
+  const SILENT_ERROR_TOOLS = new Set(['factor_score', 'html_chart_render']);
   let toolsHtml = '';
   if (m.tool_calls && m.tool_calls.length) {
     toolsHtml = m.tool_calls
-      .filter(tc => tc.is_error)
+      .filter(tc => tc.is_error && !SILENT_ERROR_TOOLS.has(tc.name))
       .map(tc => renderToolTrace(tc))
       .join('');
+  }
+
+  // html_chart_render 失败时的占位提示（仅 assistant 消息）
+  let chartFailHtml = '';
+  if (m.role === 'assistant' && Array.isArray(m.tool_calls)) {
+    const failedCharts = m.tool_calls.filter(
+      tc => tc.name === 'html_chart_render' && tc.is_error
+    );
+    if (failedCharts.length) {
+      chartFailHtml = '<div class="chart-failed-notice">'
+        + '此处图表未能加载，您可以让我重新生成或换种方式分析'
+        + '</div>';
+    }
   }
 
   const content = m.role === 'assistant'
@@ -676,11 +810,24 @@ function renderMessage(m) {
       </div>`;
   }
 
+  // 历史回放：assistant 消息携带的 follow-up 建议
+  let suggestionsHtml = '';
+  if (m.role === 'assistant' && Array.isArray(m.suggestions) && m.suggestions.length) {
+    suggestionsHtml = '<div class="suggestions">' +
+      '<span class="suggestions-label">💬 继续提问</span>' +
+      m.suggestions.map(q =>
+        `<button class="suggestion-chip" onclick="useSuggestion(this)">${escapeHtml(q)}</button>`
+      ).join('') +
+      '</div>';
+  }
+
   div.innerHTML = `
     <div class="msg-role">${roleLabel}</div>
     ${attachmentHtml}
     <div class="msg-content">${content}</div>
+    ${chartFailHtml}
     ${toolsHtml}
+    ${suggestionsHtml}
   `;
   msgs.appendChild(div);
   return div;
@@ -720,6 +867,36 @@ function renderToolTrace(tc) {
 // 发送消息（SSE 流式）
 // ════════════════════════════════════════════════════════════
 
+function onSendBtnClick() {
+  // 执行中点击 = 取消；空闲点击 = 发送
+  if (isStreaming) {
+    cancelCurrentRequest();
+  } else {
+    sendMessage();
+  }
+}
+
+function cancelCurrentRequest() {
+  if (currentAbortController) {
+    currentAbortController.abort();
+    showToast('已取消请求', 'info', 1500);
+  }
+}
+
+function setSendBtnMode(mode) {
+  // mode: 'send' | 'cancel'
+  const btn = document.getElementById('sendBtn');
+  if (mode === 'cancel') {
+    btn.textContent = '取消';
+    btn.classList.add('cancel-mode');
+    btn.disabled = false;
+  } else {
+    btn.textContent = '发送';
+    btn.classList.remove('cancel-mode');
+    btn.disabled = false;
+  }
+}
+
 async function sendMessage() {
   if (isStreaming) return;
   const ta = document.getElementById('input');
@@ -730,7 +907,8 @@ async function sendMessage() {
   if (!currentSession) await createSession();
 
   isStreaming = true;
-  document.getElementById('sendBtn').disabled = true;
+  setSendBtnMode('cancel');
+  currentAbortController = new AbortController();
 
   // 先尝试上传附件（如果有）
   let attachmentMeta = null;
@@ -771,7 +949,17 @@ async function sendMessage() {
     tool_calls: [],
   });
   const contentDom = assistantDom.querySelector('.msg-content');
-  contentDom.innerHTML = '<span class="loading-dot"></span><span class="loading-dot"></span><span class="loading-dot"></span>';
+  contentDom.innerHTML = '';  // 清空，状态指示器会在下面创建
+
+  // 常驻状态指示器 —— 整个流式过程都显示，告诉用户「还在跑」
+  const statusDom = document.createElement('div');
+  statusDom.className = 'msg-status';
+  statusDom.innerHTML = `
+    <span class="loading-dot"></span>
+    <span class="loading-dot"></span>
+    <span class="loading-dot"></span>
+    <span class="status-text">思考中…</span>`;
+  assistantDom.appendChild(statusDom);
 
   const tracesByName = {};  // 用于流式拼回工具结果
 
@@ -783,6 +971,7 @@ async function sendMessage() {
         message: serverMessage,
         attachment: attachmentMeta,
       }),
+      signal: currentAbortController.signal,
     });
 
     if (!resp.ok) {
@@ -809,7 +998,7 @@ async function sendMessage() {
         handleEvent(event, assistantDom, contentDom, tracesByName);
         if (event.type === 'final') finalContent = event.text;
       }
-      scrollToBottom();
+      // 流式输出不自动下滑，由用户手动决定
     }
 
     if (finalContent) {
@@ -817,24 +1006,64 @@ async function sendMessage() {
     }
 
   } catch (e) {
-    contentDom.innerHTML = `<p style="color:var(--danger)">网络错误：${e.message}</p>`;
+    if (e.name === 'AbortError') {
+      contentDom.innerHTML += `<p style="color:var(--warning);margin-top:8px;">⏸ 已取消（仍可继续追问）</p>`;
+    } else {
+      contentDom.innerHTML = `<p style="color:var(--danger)">网络错误：${e.message}</p>`;
+    }
   } finally {
     isStreaming = false;
-    document.getElementById('sendBtn').disabled = false;
+    currentAbortController = null;
+    setSendBtnMode('send');
+    // 兜底清理：无论怎么结束都移除状态指示器
+    assistantDom.querySelector('.msg-status')?.remove();
     await loadSessions();
-    scrollToBottom();
   }
 }
 
+// 友好的工具名映射（给用户看的中文）
+const TOOL_LABELS = {
+  market_quote:         '实时行情',
+  factor_score:         '因子打分',
+  technical_indicator:  '技术指标',
+  black_scholes:        '期权定价',
+  implied_volatility:   '隐含波动率',
+  risk_metrics:         '风险指标',
+  correlation_matrix:   '相关性矩阵',
+  portfolio_optimizer:  '组合优化',
+  market_news_search:   '搜索财经新闻',
+  trading_calendar:     '交易日历',
+  search_research_docs: '检索研报',
+  historical_prices:    '历史 K 线',
+  html_chart_render:    '生成图表',
+};
+
+function setStatus(assistantDom, text, isError = false) {
+  const statusDom = assistantDom.querySelector('.msg-status');
+  if (!statusDom) return;
+  const tx = statusDom.querySelector('.status-text');
+  if (tx) tx.textContent = text;
+  if (isError) statusDom.classList.add('error-state');
+}
+
 function handleEvent(event, assistantDom, contentDom, tracesByName) {
-  if (event.type === 'thought') {
-    // 在内容区追加思考片段
-    const t = document.createElement('div');
-    t.className = 'thought';
-    t.textContent = '💭 ' + event.text;
-    contentDom.parentElement.appendChild(t);
+  if (event.type === 'content_delta') {
+    // 流式 token：累加 + 节流 markdown 渲染（避免每个 token 重排）
+    if (!contentDom._streaming) {
+      contentDom._streaming = true;
+      contentDom.innerHTML = '';
+      contentDom._raw = '';
+    }
+    contentDom._raw += event.text;
+    scheduleMarkdownRender(contentDom);
+    setStatus(assistantDom, '✍️ 正在生成回复…');
+  }
+  else if (event.type === 'thought') {
+    setStatus(assistantDom, '🤔 思考中…');
   }
   else if (event.type === 'tool_call') {
+    const label = TOOL_LABELS[event.name] || event.name;
+    setStatus(assistantDom, `🔧 调用「${label}」…`);
     // 只在 JS 中记录待处理的调用，不在 UI 上显示卡片
     tracesByName[event.id] = {
       name: event.name,
@@ -842,8 +1071,11 @@ function handleEvent(event, assistantDom, contentDom, tracesByName) {
     };
   }
   else if (event.type === 'tool_result') {
-    // 成功调用：完全隐藏；失败调用：渲染错误卡片
-    if (event.is_error) {
+    const label = TOOL_LABELS[event.name] || event.name;
+    // 这些"错误"是引导/部分失败，不该当失败展示红卡
+    const SILENT_ERRORS = new Set(['factor_score', 'html_chart_render']);
+    if (event.is_error && !SILENT_ERRORS.has(event.name)) {
+      // 真失败 → 显示错误卡片，状态变红
       const pending = Object.values(tracesByName).find(p => p.name === event.name) || {};
       const wrapper = document.createElement('div');
       wrapper.innerHTML = renderToolTrace({
@@ -853,21 +1085,66 @@ function handleEvent(event, assistantDom, contentDom, tracesByName) {
         is_error: true,
       });
       assistantDom.appendChild(wrapper.firstElementChild);
+      setStatus(assistantDom, `⚠️「${label}」失败，继续…`, true);
+    } else if (event.is_error) {
+      // 静默错误
+      setStatus(assistantDom, `✅「${label}」完成，处理中…`);
+      // html_chart_render 失败 → 在消息里加占位提示（每次一个，去重）
+      if (event.name === 'html_chart_render') {
+        if (!assistantDom.querySelector('.chart-failed-notice')) {
+          const notice = document.createElement('div');
+          notice.className = 'chart-failed-notice';
+          notice.textContent = '此处图表未能加载，您可以让我重新生成或换种方式分析';
+          assistantDom.appendChild(notice);
+        }
+      }
+    } else {
+      setStatus(assistantDom, `✅「${label}」完成，处理中…`);
     }
-    // 无论成功失败都从待处理列表移除
+    // 从待处理列表移除
     for (const [id, p] of Object.entries(tracesByName)) {
       if (p.name === event.name) { delete tracesByName[id]; break; }
     }
   }
   else if (event.type === 'final') {
-    // 清掉 loading，渲染最终答案
+    // 流结束 → 关掉流式标记（让晚到的节流定时器变 noop），最终一次性渲染
+    contentDom._streaming = false;
+    contentDom._raw = '';
+    contentDom._renderScheduled = false;
     contentDom.innerHTML = marked.parse(event.text);
-    // 清掉中间 thought 块
     assistantDom.querySelectorAll('.thought').forEach(t => t.remove());
+    const statusDom = assistantDom.querySelector('.msg-status');
+    if (statusDom) statusDom.remove();
+  }
+  else if (event.type === 'suggestions') {
+    // 在 assistant 消息底部追加 3 个建议 chip
+    if (Array.isArray(event.items) && event.items.length) {
+      const sg = document.createElement('div');
+      sg.className = 'suggestions';
+      sg.innerHTML = '<span class="suggestions-label">💬 继续提问</span>' +
+        event.items.map(q =>
+          `<button class="suggestion-chip" onclick="useSuggestion(this)">${escapeHtml(q)}</button>`
+        ).join('');
+      assistantDom.appendChild(sg);
+    }
   }
   else if (event.type === 'error') {
     contentDom.innerHTML = `<p style="color:var(--danger)">❌ ${event.error}</p>`;
+    const statusDom = assistantDom.querySelector('.msg-status');
+    if (statusDom) statusDom.remove();
   }
+}
+
+// 点击建议 chip → 填入输入框并发送
+function useSuggestion(btn) {
+  if (isStreaming) return;
+  const text = btn.textContent.trim();
+  const ta = document.getElementById('input');
+  ta.value = text;
+  autoResize(ta);
+  // 移除当前消息的建议块，避免回头再点
+  btn.closest('.suggestions')?.remove();
+  sendMessage();
 }
 
 // ════════════════════════════════════════════════════════════
