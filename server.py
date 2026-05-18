@@ -16,13 +16,16 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi import FastAPI, HTTPException, UploadFile, File, Header
 from fastapi.responses import StreamingResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from quant_agent import stream_quant_agent
 from cache import cache  # Redis 或内存缓存
+
+# 当 X-Device-Id 缺失时的兜底（不应该出现，前端总会发）
+_DEFAULT_DEVICE = "default"
 
 BASE_DIR = Path(__file__).parent
 STATIC_DIR = BASE_DIR / "static"
@@ -35,7 +38,11 @@ app = FastAPI(title="QuantAgent Web", version="1.0")
 # ════════════════════════════════════════════════════════════
 
 SESSION_TTL = 86400 * 7    # 会话保留 7 天
-SESSION_INDEX_KEY = "quant:session:index"  # 维护活跃会话 ID 列表
+
+
+def _index_key(device_id: str) -> str:
+    """每个设备一份会话 ID 索引"""
+    return f"quant:session:index:{device_id or _DEFAULT_DEVICE}"
 
 
 class Session:
@@ -80,40 +87,42 @@ class Session:
         }
 
 
-def _session_key(sid: str) -> str:
-    return f"quant:session:{sid}"
+def _session_key(device_id: str, sid: str) -> str:
+    """每个设备的会话存储 key"""
+    return f"quant:session:{device_id or _DEFAULT_DEVICE}:{sid}"
 
 
-def save_session(s: Session):
-    """持久化到 Redis/内存，同时维护索引"""
-    cache.set(_session_key(s.id), s.to_dict(), ttl=SESSION_TTL)
-    # 索引（用于列表）：存所有活跃 session id
-    index = cache.get(SESSION_INDEX_KEY) or []
+def save_session(device_id: str, s: Session):
+    """持久化到 Redis/内存，同时维护该设备的索引"""
+    cache.set(_session_key(device_id, s.id), s.to_dict(), ttl=SESSION_TTL)
+    idx_key = _index_key(device_id)
+    index = cache.get(idx_key) or []
     if s.id not in index:
         index.append(s.id)
-        cache.set(SESSION_INDEX_KEY, index, ttl=SESSION_TTL)
+        cache.set(idx_key, index, ttl=SESSION_TTL)
 
 
-def load_session(sid: str) -> Optional[Session]:
-    data = cache.get(_session_key(sid))
+def load_session(device_id: str, sid: str) -> Optional[Session]:
+    data = cache.get(_session_key(device_id, sid))
     if not data:
         return None
     return Session.from_dict(data)
 
 
-def get_session(sid: str) -> Session:
-    s = load_session(sid)
+def get_session(device_id: str, sid: str) -> Session:
+    s = load_session(device_id, sid)
     if not s:
         raise HTTPException(404, f"Session {sid} not found")
     return s
 
 
-def delete_session_storage(sid: str):
-    cache.delete(_session_key(sid))
-    index = cache.get(SESSION_INDEX_KEY) or []
+def delete_session_storage(device_id: str, sid: str):
+    cache.delete(_session_key(device_id, sid))
+    idx_key = _index_key(device_id)
+    index = cache.get(idx_key) or []
     if sid in index:
         index.remove(sid)
-        cache.set(SESSION_INDEX_KEY, index, ttl=SESSION_TTL)
+        cache.set(idx_key, index, ttl=SESSION_TTL)
 
 
 # ════════════════════════════════════════════════════════════
@@ -126,56 +135,55 @@ class ChatRequest(BaseModel):
 
 
 @app.get("/api/sessions")
-def list_sessions():
-    """列出所有会话（最新在前）"""
-    index = cache.get(SESSION_INDEX_KEY) or []
+def list_sessions(x_device_id: Optional[str] = Header(None)):
+    """列出当前设备的所有会话（最新在前）"""
+    device_id = x_device_id or _DEFAULT_DEVICE
+    idx_key = _index_key(device_id)
+    index = cache.get(idx_key) or []
     items = []
     stale = []
     for sid in index:
-        s = load_session(sid)
+        s = load_session(device_id, sid)
         if s:
             items.append(s.to_summary())
         else:
             stale.append(sid)
-    # 清理失效索引项（TTL 过期后）
     if stale:
         fresh = [i for i in index if i not in stale]
-        cache.set(SESSION_INDEX_KEY, fresh, ttl=SESSION_TTL)
+        cache.set(idx_key, fresh, ttl=SESSION_TTL)
     items.sort(key=lambda x: x["created_at"], reverse=True)
     return items
 
 
 @app.post("/api/sessions")
-def create_session():
-    """新建会话"""
+def create_session(x_device_id: Optional[str] = Header(None)):
+    """新建会话，绑定到当前设备"""
+    device_id = x_device_id or _DEFAULT_DEVICE
     sid = uuid.uuid4().hex[:10]
     session = Session(sid)
-    save_session(session)
+    save_session(device_id, session)
     return session.to_detail()
 
 
 @app.get("/api/sessions/{sid}")
-def session_detail(sid: str):
-    """获取单个会话详情（含历史消息）"""
-    return get_session(sid).to_detail()
+def session_detail(sid: str, x_device_id: Optional[str] = Header(None)):
+    device_id = x_device_id or _DEFAULT_DEVICE
+    return get_session(device_id, sid).to_detail()
 
 
 @app.delete("/api/sessions/{sid}")
-def delete_session(sid: str):
-    """删除会话"""
-    delete_session_storage(sid)
+def delete_session(sid: str, x_device_id: Optional[str] = Header(None)):
+    device_id = x_device_id or _DEFAULT_DEVICE
+    delete_session_storage(device_id, sid)
     return {"ok": True}
 
 
 @app.post("/api/sessions/{sid}/chat")
-def chat(sid: str, body: ChatRequest):
-    """
-    发送消息，SSE 流式返回 Agent 执行过程。
-
-    前端按行解析 `data: {...}\\n\\n`，事件类型见 stream_quant_agent。
-    完成后服务端会自动把这一轮追加到 session.display。
-    """
-    session = get_session(sid)
+def chat(sid: str, body: ChatRequest,
+         x_device_id: Optional[str] = Header(None)):
+    """发送消息，SSE 流式返回 Agent 执行过程"""
+    device_id = x_device_id or _DEFAULT_DEVICE
+    session = get_session(device_id, sid)
 
     if not body.message.strip():
         raise HTTPException(400, "message 不能为空")
@@ -196,7 +204,7 @@ def chat(sid: str, body: ChatRequest):
     session.display.append(display_user)
 
     # 用户消息阶段先持久化一次（防止网络中断丢失）
-    save_session(session)
+    save_session(device_id, session)
 
     # 2. 准备本轮 assistant 的展示记录（边流边填充）
     assistant_turn = {
@@ -252,13 +260,13 @@ def chat(sid: str, body: ChatRequest):
 
             # 流结束，存档 + 持久化
             session.display.append(assistant_turn)
-            save_session(session)
+            save_session(device_id, session)
             yield f"data: {json.dumps({'type': 'done'})}\n\n"
 
         except Exception as e:
             # 异常也尝试保存当前状态
             try:
-                save_session(session)
+                save_session(device_id, session)
             except Exception:
                 pass
             err = {"type": "error", "error": f"服务端异常: {e}"}

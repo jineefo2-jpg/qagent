@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>QuantAgent · 量化分析助手</title>
 <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 <style>
@@ -584,11 +584,130 @@
   ::-webkit-scrollbar-track { background: transparent; }
   ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
   ::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+
+  /* ═══════════════════════════════════════════════════════
+     移动端响应式适配（≤ 768px）
+     ═══════════════════════════════════════════════════════ */
+
+  /* 默认隐藏汉堡按钮，仅移动端显示 */
+  .mobile-menu-btn {
+    display: none;
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 6px 10px;
+    border-radius: 6px;
+    font-size: 16px;
+    cursor: pointer;
+  }
+  .sidebar-mask {
+    display: none;
+    position: fixed;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    background: rgba(0,0,0,0.5);
+    z-index: 998;
+  }
+
+  @media (max-width: 768px) {
+    body { overflow: auto; }
+    html, body { height: auto; min-height: 100vh; }
+
+    .app { height: 100vh; }
+
+    /* 侧边栏改成抽屉（默认隐藏，加 .open 才显示） */
+    .sidebar {
+      position: fixed;
+      top: 0; left: 0;
+      width: 80vw;
+      max-width: 320px;
+      height: 100%;
+      transform: translateX(-100%);
+      transition: transform 0.25s ease;
+      z-index: 999;
+      box-shadow: 2px 0 12px rgba(0,0,0,0.4);
+    }
+    .sidebar.open { transform: translateX(0); }
+    .sidebar-mask.show { display: block; }
+
+    /* 主区域占满 */
+    .chat-area { width: 100%; }
+
+    /* 汉堡按钮显示 */
+    .mobile-menu-btn { display: inline-block; }
+
+    /* header 紧凑 */
+    .chat-header {
+      padding: 10px 12px;
+      gap: 8px;
+    }
+    .chat-title { font-size: 14px; }
+    .chat-meta { display: none; }  /* 移动端隐藏次要信息 */
+
+    /* 消息区减小内边距 */
+    .messages {
+      padding: 16px 12px;
+      padding-bottom: 160px;  /* 给底部输入区留位 */
+    }
+
+    /* 输入区固定底部 + 安全区 */
+    .input-area {
+      padding: 10px 12px env(safe-area-inset-bottom, 10px);
+      position: sticky;
+      bottom: 0;
+    }
+    .input-wrap {
+      padding: 6px;
+      gap: 6px;
+    }
+    textarea {
+      font-size: 16px;  /* iOS 16+ 避免 input focus 自动放大 */
+      padding: 6px;
+      min-height: 28px;
+    }
+    .send-btn {
+      padding: 8px 12px;
+      font-size: 13px;
+      min-width: 56px;
+    }
+    .upload-btn { width: 36px; height: 36px; }
+    .input-hint { font-size: 10px; }
+
+    /* 工具卡片紧凑 */
+    .tool-trace-body pre { font-size: 10px; }
+
+    /* 消息气泡内边距减小 */
+    .msg-content { padding: 12px 14px; font-size: 14px; }
+    .msg { margin-bottom: 16px; }
+
+    /* 建议 chip 一行一个 */
+    .suggestion-chip {
+      width: 100%;
+      text-align: left;
+    }
+
+    /* 图表/上传卡片 */
+    .attachment-chip { max-width: 100%; }
+
+    /* 空状态例子按钮 */
+    .empty-state { padding: 40px 0; }
+    .empty-state h2 { font-size: 18px; }
+    .example-btn { font-size: 12px; padding: 10px 12px; }
+  }
+
+  /* 平板（768-1024px）：保留侧边栏但缩窄 */
+  @media (min-width: 769px) and (max-width: 1024px) {
+    .sidebar { width: 220px; }
+    .messages { padding: 20px 8%; }
+  }
 </style>
 </head>
 <body>
 
 <div class="app">
+  <!-- 移动端遮罩（点击关闭侧边栏）-->
+  <div class="sidebar-mask" id="sidebarMask" onclick="toggleSidebar(false)"></div>
+
   <!-- 侧边栏 -->
   <aside class="sidebar">
     <div class="sidebar-header">
@@ -605,7 +724,8 @@
   <!-- 对话主区 -->
   <main class="chat-area">
     <header class="chat-header">
-      <div class="chat-title" id="chatTitle">未选择会话</div>
+      <button class="mobile-menu-btn" onclick="toggleSidebar()" aria-label="菜单">☰</button>
+      <div class="chat-title" id="chatTitle" style="flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">未选择会话</div>
       <div class="chat-meta" id="chatMeta"></div>
     </header>
 
@@ -658,6 +778,29 @@ let currentSession = null;
 let isStreaming = false;
 let currentAbortController = null;  // 当前请求的 AbortController
 
+// 设备 ID：本浏览器 localStorage 唯一标识，让会话不跨设备共享
+function getDeviceId() {
+  let id = localStorage.getItem('quant_device_id');
+  if (!id) {
+    // crypto.randomUUID 现代浏览器都有
+    id = (crypto.randomUUID && crypto.randomUUID())
+         || ('dev-' + Math.random().toString(36).slice(2, 14)
+                    + Date.now().toString(36));
+    localStorage.setItem('quant_device_id', id);
+  }
+  return id;
+}
+const DEVICE_ID = getDeviceId();
+
+// 统一封装：所有 fetch 自动带上 X-Device-Id
+async function api(url, options = {}) {
+  options.headers = {
+    ...(options.headers || {}),
+    'X-Device-Id': DEVICE_ID,
+  };
+  return fetch(url, options);
+}
+
 // marked 配置：单换行也转 <br>，启用 GFM，所有链接新窗口打开
 if (window.marked) {
   marked.use({
@@ -696,7 +839,7 @@ function scheduleMarkdownRender(contentDom) {
 // ════════════════════════════════════════════════════════════
 
 async function loadSessions() {
-  const r = await fetch('/api/sessions');
+  const r = await api('/api/sessions');
   const sessions = await r.json();
   renderSessionList(sessions);
   return sessions;
@@ -718,11 +861,12 @@ function renderSessionList(sessions) {
 }
 
 async function createSession() {
-  const r = await fetch('/api/sessions', { method: 'POST' });
+  const r = await api('/api/sessions', { method: 'POST' });
   const session = await r.json();
   currentSession = session.id;
   await loadSessions();
   await loadSessionDetail(session.id);
+  if (window.innerWidth <= 768) toggleSidebar(false);
 }
 
 async function switchSession(sid) {
@@ -730,11 +874,22 @@ async function switchSession(sid) {
   currentSession = sid;
   await loadSessions();
   await loadSessionDetail(sid);
+  // 手机端切换会话后自动收起侧边栏
+  if (window.innerWidth <= 768) toggleSidebar(false);
+}
+
+// 移动端侧边栏抽屉控制
+function toggleSidebar(force) {
+  const sidebar = document.querySelector('.sidebar');
+  const mask = document.getElementById('sidebarMask');
+  const open = (typeof force === 'boolean') ? force : !sidebar.classList.contains('open');
+  sidebar.classList.toggle('open', open);
+  mask.classList.toggle('show', open);
 }
 
 async function deleteSession(sid) {
   if (!confirm('删除该会话？')) return;
-  await fetch('/api/sessions/' + sid, { method: 'DELETE' });
+  await api('/api/sessions/' + sid, { method: 'DELETE' });
   if (currentSession === sid) {
     currentSession = null;
     showEmptyState();
@@ -743,7 +898,7 @@ async function deleteSession(sid) {
 }
 
 async function loadSessionDetail(sid) {
-  const r = await fetch('/api/sessions/' + sid);
+  const r = await api('/api/sessions/' + sid);
   const detail = await r.json();
   document.getElementById('chatTitle').textContent = detail.title;
   document.getElementById('chatMeta').textContent =
@@ -777,8 +932,8 @@ function renderMessage(m) {
     ? '<span class="badge">U</span> 你'
     : '<span class="badge">Q</span> QuantAgent';
 
-  // 只展示真失败的工具调用；静默错误（factor_score / html_chart_render）不显示红卡
-  const SILENT_ERROR_TOOLS = new Set(['factor_score', 'html_chart_render']);
+  // 只展示真失败的工具调用；静默错误不显示红卡
+  const SILENT_ERROR_TOOLS = new Set(['factor_score', 'html_chart_render', 'historical_prices']);
   let toolsHtml = '';
   if (m.tool_calls && m.tool_calls.length) {
     toolsHtml = m.tool_calls
@@ -787,17 +942,21 @@ function renderMessage(m) {
       .join('');
   }
 
-  // html_chart_render 失败时的占位提示（仅 assistant 消息）
+  // 静默失败的占位提示（assistant 消息）
   let chartFailHtml = '';
   if (m.role === 'assistant' && Array.isArray(m.tool_calls)) {
-    const failedCharts = m.tool_calls.filter(
-      tc => tc.name === 'html_chart_render' && tc.is_error
-    );
-    if (failedCharts.length) {
-      chartFailHtml = '<div class="chart-failed-notice">'
-        + '此处图表未能加载，您可以让我重新生成或换种方式分析'
-        + '</div>';
-    }
+    const NOTICES = {
+      'html_chart_render': '此处图表未能加载，您可以让我重新生成或换种方式分析',
+      'historical_prices': '历史 K 线数据未能获取，请稍后重试或换个代码',
+    };
+    const shownTools = new Set();
+    chartFailHtml = m.tool_calls
+      .filter(tc => tc.is_error && NOTICES[tc.name] && !shownTools.has(tc.name))
+      .map(tc => {
+        shownTools.add(tc.name);
+        return `<div class="chart-failed-notice">${NOTICES[tc.name]}</div>`;
+      })
+      .join('');
   }
 
   const content = m.role === 'assistant'
@@ -968,7 +1127,7 @@ async function sendMessage() {
   const tracesByName = {};  // 用于流式拼回工具结果
 
   try {
-    const resp = await fetch(`/api/sessions/${currentSession}/chat`, {
+    const resp = await api(`/api/sessions/${currentSession}/chat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -1077,7 +1236,7 @@ function handleEvent(event, assistantDom, contentDom, tracesByName) {
   else if (event.type === 'tool_result') {
     const label = TOOL_LABELS[event.name] || event.name;
     // 这些"错误"是引导/部分失败，不该当失败展示红卡
-    const SILENT_ERRORS = new Set(['factor_score', 'html_chart_render']);
+    const SILENT_ERRORS = new Set(['factor_score', 'html_chart_render', 'historical_prices']);
     if (event.is_error && !SILENT_ERRORS.has(event.name)) {
       // 真失败 → 显示错误卡片，状态变红
       const pending = Object.values(tracesByName).find(p => p.name === event.name) || {};
@@ -1093,14 +1252,18 @@ function handleEvent(event, assistantDom, contentDom, tracesByName) {
     } else if (event.is_error) {
       // 静默错误
       setStatus(assistantDom, `✅「${label}」完成，处理中…`);
-      // html_chart_render 失败 → 在消息里加占位提示（每次一个，去重）
-      if (event.name === 'html_chart_render') {
-        if (!assistantDom.querySelector('.chart-failed-notice')) {
-          const notice = document.createElement('div');
-          notice.className = 'chart-failed-notice';
-          notice.textContent = '此处图表未能加载，您可以让我重新生成或换种方式分析';
-          assistantDom.appendChild(notice);
-        }
+      // 静默失败 → 在消息里加占位提示（每次一个，去重）
+      const NOTICES = {
+        'html_chart_render': '此处图表未能加载，您可以让我重新生成或换种方式分析',
+        'historical_prices': '历史 K 线数据未能获取，请稍后重试或换个代码',
+      };
+      const noticeText = NOTICES[event.name];
+      if (noticeText && !assistantDom.querySelector(`.silent-notice[data-tool="${event.name}"]`)) {
+        const notice = document.createElement('div');
+        notice.className = 'silent-notice chart-failed-notice';
+        notice.dataset.tool = event.name;
+        notice.textContent = noticeText;
+        assistantDom.appendChild(notice);
       }
     } else {
       setStatus(assistantDom, `✅「${label}」完成，处理中…`);
@@ -1243,7 +1406,7 @@ async function uploadAttachmentIfAny() {
   const formData = new FormData();
   formData.append('file', file);
   try {
-    const r = await fetch('/api/upload_pdf', { method: 'POST', body: formData });
+    const r = await api('/api/upload_pdf', { method: 'POST', body: formData });
     const result = await r.json();
     if (!result.success) {
       showToast(`❌ ${file.name}: ${result.error || '上传失败'}`, 'error');

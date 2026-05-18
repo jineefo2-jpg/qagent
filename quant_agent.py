@@ -36,7 +36,9 @@ socket.setdefaulttimeout(15)
 try:
     from dotenv import load_dotenv
     from pathlib import Path
-    load_dotenv(Path(__file__).parent / ".env")
+    # override=True：.env 优先级高于已有系统环境变量
+    # 避免外部 shell 误设空值导致 .env 被无视
+    load_dotenv(Path(__file__).parent / ".env", override=True)
 except ImportError:
     pass  # 没装 dotenv 时静默跳过，回退到系统环境变量
 
@@ -77,6 +79,14 @@ try:
 except ImportError:
     _ak = None
     _AKSHARE_AVAILABLE = False
+
+# yfinance：自动处理 Yahoo Cookie/Crumb 认证，比直接 HTTP 稳（pip install yfinance）
+try:
+    import yfinance as _yf
+    _YFINANCE_AVAILABLE = True
+except ImportError:
+    _yf = None
+    _YFINANCE_AVAILABLE = False
 
 
 # ════════════════════════════════════════════════════════════
@@ -1156,24 +1166,44 @@ def _extract_primary_term(query: str) -> str:
 
 
 def _yahoo_fetch(url: str, retries: int = 1) -> dict:
-    """带一次 429 重试的 GET 封装"""
+    """
+    带重试的 Yahoo Finance GET。
+    用浏览器级 headers 降低 403/429 概率。
+    """
     import time
+    headers = {
+        "User-Agent": ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                       "AppleWebKit/537.36 (KHTML, like Gecko) "
+                       "Chrome/120.0.0.0 Safari/537.36"),
+        "Accept": "application/json, text/javascript, */*; q=0.01",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://finance.yahoo.com/",
+        "Origin": "https://finance.yahoo.com",
+        "Connection": "keep-alive",
+    }
     last_err = None
-    for attempt in range(retries + 1):
-        try:
-            req = urllib.request.Request(
-                url,
-                headers={"User-Agent": _YAHOO_UA, "Accept": "application/json"},
-            )
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                return json.loads(resp.read().decode("utf-8"))
-        except urllib.error.HTTPError as e:
-            last_err = e
-            if e.code == 429 and attempt < retries:
-                time.sleep(2)   # 限流：等 2 秒重试
-                continue
-            raise
-    raise last_err  # 不会到这
+    # 失败时切换 query1/query2 重试一次（403 时常常切换子域名就好）
+    urls_to_try = [url]
+    if "query1.finance.yahoo.com" in url:
+        urls_to_try.append(url.replace("query1.", "query2."))
+
+    for attempt_url in urls_to_try:
+        for attempt in range(retries + 1):
+            try:
+                req = urllib.request.Request(attempt_url, headers=headers)
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    return json.loads(resp.read().decode("utf-8"))
+            except urllib.error.HTTPError as e:
+                last_err = e
+                if e.code == 429 and attempt < retries:
+                    time.sleep(2)
+                    continue
+                # 403/404 直接换下一个 URL
+                break
+            except Exception as e:
+                last_err = e
+                break
+    raise last_err
 
 
 def _news_yahoo(primary: str, max_results: int = 5):
@@ -1824,6 +1854,111 @@ def _hist_yahoo(symbol: str, days: int) -> dict:
         return {"success": False, "error": f"Yahoo K 线失败: {e}"}
 
 
+def _hist_yfinance(symbol: str, days: int) -> dict:
+    """
+    yfinance 库（pip install yfinance）：
+    自动处理 Yahoo Cookie/Crumb 认证，比直接 HTTP 稳。
+    """
+    if not _YFINANCE_AVAILABLE:
+        return {"success": False, "error": "yfinance 未安装"}
+
+    market = _detect_market(symbol)
+    s_clean = symbol.upper()
+    for suf in ('.SS', '.SH', '.SZ', '.HK', '.US'):
+        s_clean = s_clean.replace(suf, '')
+
+    # 转 Yahoo ticker 格式
+    if market == "A":
+        ysym = f"{s_clean}.SS" if s_clean.startswith(('5','6','9')) else f"{s_clean}.SZ"
+    elif market == "HK":
+        ysym = f"{s_clean.zfill(4)}.HK"
+    elif market == "US":
+        ysym = s_clean
+    else:
+        return {"success": False, "error": "未识别市场"}
+
+    try:
+        ticker = _yf.Ticker(ysym)
+        # yfinance period 选项: 1d/5d/1mo/3mo/6mo/1y/2y/5y/10y/ytd/max
+        if days <= 30:    period = "1mo"
+        elif days <= 90:  period = "3mo"
+        elif days <= 180: period = "6mo"
+        elif days <= 365: period = "1y"
+        elif days <= 730: period = "2y"
+        else:             period = "5y"
+
+        df = ticker.history(period=period, interval="1d",
+                             auto_adjust=True, raise_errors=False)
+        if df is None or df.empty:
+            return {"success": False, "error": "yfinance 返回空"}
+
+        df = df.tail(days)
+        market_label = {"A": "A股", "HK": "港股", "US": "美股"}[market]
+        return {
+            "success": True,
+            "symbol": s_clean,
+            "market": market_label,
+            "days_returned": len(df),
+            "dates":  [d.strftime("%Y-%m-%d") for d in df.index],
+            "open":   [float(x) for x in df['Open']],
+            "close":  [float(x) for x in df['Close']],
+            "high":   [float(x) for x in df['High']],
+            "low":    [float(x) for x in df['Low']],
+            "volume": [int(x) for x in df['Volume'].fillna(0)],
+            "data_source": "yfinance（Yahoo 官方认证）",
+        }
+    except Exception as e:
+        return {"success": False, "error": f"yfinance: {e}"}
+
+
+def _hist_sina(symbol: str, days: int = 60) -> dict:
+    """
+    新浪财经 K 线接口（A 股专用 fallback）。
+    与 AKShare 内部走的东方财富 endpoint 不同，多一条备路。
+    """
+    market = _detect_market(symbol)
+    if market != "A":
+        return {"success": False, "error": "新浪 K 线仅支持 A 股"}
+
+    prefix = _sina_prefix(symbol)
+    if not prefix or not prefix.startswith(('sh', 'sz')):
+        return {"success": False, "error": "无效 A 股代码"}
+
+    try:
+        # scale=240 表示日 K，datalen 多拉 20%
+        datalen = min(int(days * 1.2) + 10, 500)
+        url = (f"https://quotes.sina.cn/cn/api/json_v2.php/"
+               f"CN_MarketDataService.getKLineData"
+               f"?symbol={prefix}&scale=240&ma=no&datalen={datalen}")
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "Mozilla/5.0",
+            "Referer": "https://finance.sina.com.cn",
+        })
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+
+        if not isinstance(data, list) or not data:
+            return {"success": False, "error": "新浪 K 线返回空"}
+
+        # 返回结构: [{day, open, high, low, close, volume}, ...]
+        data = data[-days:]
+        return {
+            "success": True,
+            "symbol": prefix[2:],
+            "market": "A股",
+            "days_returned": len(data),
+            "dates":  [d["day"] for d in data],
+            "open":   [float(d["open"]) for d in data],
+            "close":  [float(d["close"]) for d in data],
+            "high":   [float(d["high"]) for d in data],
+            "low":    [float(d["low"]) for d in data],
+            "volume": [int(float(d["volume"])) for d in data],
+            "data_source": "新浪财经日 K",
+        }
+    except Exception as e:
+        return {"success": False, "error": f"新浪 K 线失败: {e}"}
+
+
 def _hist_akshare(symbol: str, days: int) -> dict:
     """AKShare 拉历史 K 线（国内源最快）"""
     if not _AKSHARE_AVAILABLE:
@@ -1900,30 +2035,51 @@ def historical_prices(symbol: str, days: int = 60) -> dict:
         return cached
 
     sources_tried = []
+    result = None
 
-    # ── 优先级 1: AKShare（国内源，A股数据最全）──
+    # ── 优先级 1: AKShare（数据最全，A 股最快）──
     r = _hist_akshare(symbol, days)
     sources_tried.append({"source": "AKShare", "ok": r.get("success"),
                           "error": r.get("error")})
     if r.get("success"):
         result = r
 
-    # ── 优先级 2: Yahoo Finance Fallback（全球可用）──
-    else:
-        r2 = _hist_yahoo(symbol, days)
-        sources_tried.append({"source": "Yahoo Finance",
+    # ── 优先级 2: 新浪 K 线（A 股专属 fallback，避免与 AKShare 同时挂）──
+    if result is None and market == "A":
+        r2 = _hist_sina(symbol, days)
+        sources_tried.append({"source": "新浪财经",
                               "ok": r2.get("success"),
                               "error": r2.get("error")})
         if r2.get("success"):
             result = r2
-        else:
-            return {
-                "success": False,
-                "error": "所有数据源都失败",
-                "sources_tried": sources_tried,
-                "hint": ("检查 HTTP_PROXY/HTTPS_PROXY 环境变量是否误设；"
-                         "或确认代码格式正确"),
-            }
+
+    # ── 优先级 3: yfinance 库（处理 Yahoo 官方认证，比直接 HTTP 稳）──
+    if result is None and _YFINANCE_AVAILABLE:
+        r3 = _hist_yfinance(symbol, days)
+        sources_tried.append({"source": "yfinance",
+                              "ok": r3.get("success"),
+                              "error": r3.get("error")})
+        if r3.get("success"):
+            result = r3
+
+    # ── 优先级 4: Yahoo Finance Chart API（裸 HTTP 兜底）──
+    if result is None:
+        r4 = _hist_yahoo(symbol, days)
+        sources_tried.append({"source": "Yahoo Finance",
+                              "ok": r4.get("success"),
+                              "error": r4.get("error")})
+        if r4.get("success"):
+            result = r4
+
+    if result is None:
+        return {
+            "success": False,
+            "error": "所有数据源都失败",
+            "sources_tried": sources_tried,
+            "hint": ("1) 检查 HTTP_PROXY/HTTPS_PROXY 环境变量；"
+                     "2) 确认代码格式（A股 600519 / 美股 AAPL / 港股 0700）；"
+                     "3) 等几分钟避开 Yahoo 限流"),
+        }
 
     # 顺便算收益率序列，方便后续工具直接用
     closes = result["close"]

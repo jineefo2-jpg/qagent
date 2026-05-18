@@ -11,6 +11,9 @@ redis>=5.0.0
 # 可选：A 股深度数据
 akshare>=1.18.0
 
+# 可选：Yahoo Finance 官方认证（美股/港股 K 线最稳定）
+yfinance>=0.2.0
+
 # RAG：研报/财报 PDF 检索
 chromadb>=1.5.0
 pymupdf>=1.26.0
