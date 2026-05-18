@@ -45,6 +45,31 @@ except ImportError:
 from openai import OpenAI
 from cache import cache  # 统一缓存层（Redis 或内存）
 
+# 服务端 markdown 渲染（让 QQ/微信浏览器零依赖渲染美观 HTML）
+try:
+    import markdown as _md
+    _MD_AVAILABLE = True
+except ImportError:
+    _MD_AVAILABLE = False
+
+
+def render_markdown_to_html(text: str) -> str:
+    """把 markdown 文本转成 HTML，所有 <a> 自动加 target=_blank。失败回退到 <pre>。"""
+    if not text:
+        return ""
+    if not _MD_AVAILABLE:
+        # 没装 markdown 库时退化为纯文本
+        from html import escape
+        return f'<pre style="white-space:pre-wrap;">{escape(text)}</pre>'
+    try:
+        html = _md.markdown(text, extensions=['fenced_code', 'tables', 'nl2br'])
+        # 给所有 <a> 加 target=_blank（避免链接跳转覆盖聊天页）
+        html = re.sub(r'<a (?![^>]*\btarget=)', '<a target="_blank" rel="noopener" ', html)
+        return html
+    except Exception as e:
+        from html import escape
+        return f'<pre style="white-space:pre-wrap;">{escape(text)}</pre>'
+
 # ════════════════════════════════════════════════════════════
 # LLM 客户端：DeepSeek（OpenAI 协议兼容）
 # ════════════════════════════════════════════════════════════
@@ -2967,9 +2992,12 @@ def stream_quant_agent(messages: list, max_iterations: int = 15):
         # ── finish_reason 分支 ──
         if finish == "stop":
             messages.append({"role": "assistant", "content": content_buf})
-            yield {"type": "final", "text": content_buf,
-                   "iterations": iteration}
-            # final 之后异步生成 follow-up 建议（不影响主答案显示）
+            yield {
+                "type": "final",
+                "text": content_buf,
+                "text_html": render_markdown_to_html(content_buf),  # 服务端渲染好
+                "iterations": iteration,
+            }
             followups = _generate_followups(messages)
             if followups:
                 yield {"type": "suggestions", "items": followups}
@@ -2978,9 +3006,15 @@ def stream_quant_agent(messages: list, max_iterations: int = 15):
         if finish == "length":
             warning = ("\n\n---\n\n⚠️ **本回复因长度限制被截断**，"
                        "建议把问题拆分成几个小问题分别提问。")
+            full_text = content_buf + warning
             messages.append({"role": "assistant", "content": content_buf})
-            yield {"type": "final", "text": content_buf + warning,
-                   "iterations": iteration, "truncated": True}
+            yield {
+                "type": "final",
+                "text": full_text,
+                "text_html": render_markdown_to_html(full_text),
+                "iterations": iteration,
+                "truncated": True,
+            }
             followups = _generate_followups(messages)
             if followups:
                 yield {"type": "suggestions", "items": followups}
