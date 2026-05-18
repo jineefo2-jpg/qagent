@@ -4,7 +4,23 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>QuantAgent · 量化分析助手</title>
-<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<script>
+  // 加载 marked.js 之前先检测浏览器 —— QQ/UC/微信等老内核直接跳过加载
+  (function() {
+    try {
+      var ua = (navigator.userAgent || '').toLowerCase();
+      var isLegacy = /mqqbrowser|qqbrowser|ucbrowser|micromessenger|xiaomi|liebao|sogoumobile|baiduboxapp/.test(ua)
+                  || location.search.indexOf('compat=1') >= 0;
+      window.__LEGACY_BROWSER__ = isLegacy;
+      if (!isLegacy) {
+        // 只在现代浏览器加载 marked.js（避免它在老内核里崩）
+        document.write('<scr' + 'ipt src="https://cdn.jsdelivr.net/npm/marked@4.3.0/marked.min.js"><\/scr' + 'ipt>');
+      }
+    } catch (_) {
+      window.__LEGACY_BROWSER__ = true;
+    }
+  })();
+</script>
 <style>
   :root {
     --bg:          #0d1117;
@@ -478,6 +494,7 @@
 
   .input-hint {
     margin-top: 6px;
+    padding-bottom: 10px;
     font-size: 11px;
     color: var(--text-muted);
     text-align: center;
@@ -771,13 +788,30 @@
 
 <script>
 // ════════════════════════════════════════════════════════════
-// 全局错误捕获（手机调试用，避免页面挂死）
+// 全局错误捕获（手机调试用：直接显示在屏幕上）
 // ════════════════════════════════════════════════════════════
-window.addEventListener('error', (e) => {
-  console.warn('[GlobalError]', e.message, 'at', e.filename, ':', e.lineno);
+function _dbgShow(msg) {
+  // 等 toast 函数定义后再用；先粗暴 alert 兜底
+  if (typeof showToast === 'function') {
+    showToast(msg, 'error', 8000);
+  } else {
+    setTimeout(function() {
+      var box = document.createElement('div');
+      box.style.cssText = 'position:fixed;bottom:20px;left:10px;right:10px;z-index:9999;background:#f85149;color:#fff;padding:10px;border-radius:6px;font-size:11px;word-break:break-all;';
+      box.textContent = msg;
+      document.body.appendChild(box);
+      setTimeout(function() { box.remove(); }, 10000);
+    }, 100);
+  }
+}
+window.addEventListener('error', function(e) {
+  console.warn('[GlobalError]', e.message, '@', e.filename, ':', e.lineno);
+  _dbgShow('[JS Err] ' + (e.message || 'unknown') + ' @ ' + (e.lineno || '?'));
 });
-window.addEventListener('unhandledrejection', (e) => {
+window.addEventListener('unhandledrejection', function(e) {
+  var msg = (e.reason && e.reason.message) ? e.reason.message : String(e.reason || 'unknown');
   console.warn('[UnhandledRejection]', e.reason);
+  _dbgShow('[Promise] ' + msg);
 });
 
 // ════════════════════════════════════════════════════════════
@@ -819,42 +853,75 @@ async function api(url, options = {}) {
   return fetch(url, options);
 }
 
-// marked 配置：单换行也转 <br>，启用 GFM，所有链接新窗口打开
-if (window.marked) {
+// 复用 head 里已检测好的标志（如果未加载到 marked，也强制兼容模式）
+var LEGACY_MODE = !!window.__LEGACY_BROWSER__ || !window.marked;
+console.info('LEGACY_MODE =', LEGACY_MODE,
+             '| has marked =', !!window.marked,
+             '| UA:', navigator.userAgent);
+
+// marked v4 配置（仅现代浏览器用）
+if (window.marked && !LEGACY_MODE) {
   try {
-    marked.use({
-      breaks: true,
-      gfm: true,
-      hooks: {
-        postprocess(html) {
-          // 容错：html 可能是 undefined/null（极端情况）
-          if (typeof html !== 'string') return html || '';
-          try {
-            return html.replace(
-              /<a (?![^>]*\btarget=)/g,
-              '<a target="_blank" rel="noopener" '
-            );
-          } catch (_) {
-            return html;
-          }
-        }
-      }
-    });
+    if (typeof marked.setOptions === 'function') {
+      marked.setOptions({ breaks: true, gfm: true });
+    } else if (typeof marked.use === 'function') {
+      marked.use({ breaks: true, gfm: true });
+    }
   } catch (e) {
-    console.warn('marked.use 配置失败:', e);
+    console.warn('marked 配置失败，自动切兼容模式:', e);
+    LEGACY_MODE = true;
   }
 }
 
-// 安全的 markdown 渲染封装：输入兜底为字符串，异常 fallback 到纯文本
-function safeMarkdown(text) {
-  const src = (text == null) ? '' : String(text);
-  if (!window.marked || !marked.parse) return escapeHtml(src);
+// 兼容模式下的纯文本渲染（保留换行 + 自动识别 url）
+function _plainTextRender(src) {
+  var safe = escapeHtml(src);
+  // 把 http(s):// 链接转成可点击
+  safe = safe.replace(
+    /(https?:\/\/[^\s<>"']+)/g,
+    '<a href="$1" target="_blank" rel="noopener" style="color:var(--primary);">$1</a>'
+  );
+  return '<div style="white-space:pre-wrap;word-break:break-word;">' + safe + '</div>';
+}
+
+// 把 LLM 误生成的绝对 URL 改回相对路径
+// 例：http://localhost:8001/static/charts/x.html → /static/charts/x.html
+function _normalizeUrls(src) {
   try {
-    return marked.parse(src);
-  } catch (e) {
-    console.warn('marked.parse 失败，回退纯文本:', e);
-    return '<pre style="white-space:pre-wrap;">' + escapeHtml(src) + '</pre>';
+    return src.replace(
+      /https?:\/\/[^\/\s)]+(\/static\/[^\s)\]"']+)/g,
+      '$1'
+    );
+  } catch (_) { return src; }
+}
+
+// 安全的 markdown 渲染封装
+function safeMarkdown(text) {
+  var src = (text == null) ? '' : String(text);
+  if (!src) return '';
+  src = _normalizeUrls(src);
+
+  // 老浏览器直接走纯文本（避免 marked 内部 substring 类崩溃）
+  if (LEGACY_MODE) return _plainTextRender(src);
+
+  if (!window.marked || typeof marked.parse !== 'function') {
+    return _plainTextRender(src);
   }
+  var html;
+  try {
+    html = marked.parse(src);
+  } catch (e) {
+    console.warn('marked.parse 失败，本次降级:', e);
+    // 一旦失败，永久切到兼容模式，后续不再尝试
+    LEGACY_MODE = true;
+    return _plainTextRender(src);
+  }
+  if (typeof html !== 'string') return _plainTextRender(src);
+  try {
+    html = html.replace(/<a (?![^>]*\btarget=)/g,
+                         '<a target="_blank" rel="noopener" ');
+  } catch (_) {}
+  return html;
 }
 
 // 流式期间节流渲染 markdown（避免每个 token 都重排）
@@ -995,9 +1062,17 @@ function renderMessage(m) {
       .join('');
   }
 
-  const content = m.role === 'assistant'
-    ? safeMarkdown(m.content)
-    : escapeHtml(m.content);
+  // assistant 消息优先用服务端预渲染的 content_html（QQ/微信浏览器零依赖展示）
+  let content;
+  if (m.role === 'assistant') {
+    if (m.content_html && typeof m.content_html === 'string') {
+      content = m.content_html;
+    } else {
+      content = safeMarkdown(m.content);
+    }
+  } else {
+    content = escapeHtml(m.content);
+  }
 
   // 用户消息可携带附件（来自上传）
   let attachmentHtml = '';
@@ -1071,7 +1146,13 @@ function onSendBtnClick() {
   if (isStreaming) {
     cancelCurrentRequest();
   } else {
-    sendMessage();
+    // 兜底：sendMessage 是 async，确保 reject 也能被捕获并展示
+    Promise.resolve(sendMessage()).catch(function(e) {
+      var msg = (e && e.message) ? e.message : String(e);
+      _dbgShow('[Send Err] ' + msg);
+      isStreaming = false;
+      try { setSendBtnMode('send'); } catch(_) {}
+    });
   }
 }
 
@@ -1178,44 +1259,101 @@ async function sendMessage() {
       return;
     }
 
+    // 兼容性检测：老浏览器（QQ X5 等）可能没有 ReadableStream
+    if (!resp.body || typeof resp.body.getReader !== 'function') {
+      // 降级：用 resp.text() 一次性读完，按 SSE 格式手动解析
+      const txt = await resp.text();
+      const chunks = (txt || '').split('\n\n');
+      let fallbackFinal = null;
+      for (const chunk of chunks) {
+        if (!chunk || chunk.indexOf('data: ') !== 0) continue;
+        try {
+          const event = JSON.parse(chunk.slice(6));
+          try { handleEvent(event, assistantDom, contentDom, tracesByName); }
+          catch (he) { console.warn('handleEvent failed:', he); }
+          if (event && event.type === 'final') fallbackFinal = event;
+        } catch (_) { /* 单条解析失败跳过 */ }
+      }
+      // 兜底渲染
+      if (fallbackFinal &&
+          (!contentDom.innerHTML || !contentDom.innerHTML.trim())) {
+        if (fallbackFinal.text_html) {
+          contentDom.innerHTML = fallbackFinal.text_html;
+        } else if (fallbackFinal.text) {
+          contentDom.innerHTML = safeMarkdown(fallbackFinal.text);
+        }
+      }
+      return;
+    }
+
     const reader = resp.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
-    let finalContent = '';
+    let finalEvent = null;   // 保留 final 事件，DOM 空时兜底渲染
 
     while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-
-      buffer += decoder.decode(value, { stream: true });
-      const chunks = buffer.split('\n\n');
-      buffer = chunks.pop();
-
-      for (const chunk of chunks) {
-        if (!chunk.startsWith('data: ')) continue;
-        const event = JSON.parse(chunk.slice(6));
-        handleEvent(event, assistantDom, contentDom, tracesByName);
-        if (event.type === 'final') finalContent = event.text;
+      let chunkResult;
+      try {
+        chunkResult = await reader.read();
+      } catch (re) {
+        console.warn('reader.read failed:', re);
+        break;
       }
-      // 流式输出不自动下滑，由用户手动决定
+      const done = chunkResult && chunkResult.done;
+      const value = chunkResult && chunkResult.value;
+      if (done) break;
+      if (!value) continue;
+
+      try {
+        buffer += decoder.decode(value, { stream: true });
+      } catch (de) { console.warn('decode failed:', de); continue; }
+
+      const chunks = buffer.split('\n\n');
+      buffer = chunks.pop() || '';
+
+      for (let i = 0; i < chunks.length; i++) {
+        const chunk = chunks[i];
+        if (!chunk || chunk.indexOf('data: ') !== 0) continue;
+        let event;
+        try {
+          event = JSON.parse(chunk.slice(6));
+        } catch (pe) {
+          console.warn('JSON.parse failed for chunk:', chunk.slice(0, 50));
+          continue;
+        }
+        try {
+          handleEvent(event, assistantDom, contentDom, tracesByName);
+        } catch (he) {
+          console.warn('handleEvent failed:', he, 'event:', event);
+        }
+        if (event && event.type === 'final') finalEvent = event;
+      }
     }
 
-    if (finalContent) {
-      contentDom.innerHTML = safeMarkdown(finalContent);
+    // 兜底：handleEvent('final') 没成功渲染时（DOM 空），手动补一下
+    if (finalEvent && (!contentDom.innerHTML || !contentDom.innerHTML.trim())) {
+      if (finalEvent.text_html && typeof finalEvent.text_html === 'string') {
+        contentDom.innerHTML = finalEvent.text_html;
+      } else if (finalEvent.text) {
+        contentDom.innerHTML = safeMarkdown(finalEvent.text);
+      }
     }
 
   } catch (e) {
-    if (e.name === 'AbortError') {
+    if (e && e.name === 'AbortError') {
       contentDom.innerHTML += `<p style="color:var(--warning);margin-top:8px;">⏸ 已取消（仍可继续追问）</p>`;
     } else {
-      contentDom.innerHTML = `<p style="color:var(--danger)">网络错误：${e.message}</p>`;
+      var emsg = (e && e.message) ? e.message : String(e);
+      contentDom.innerHTML = `<p style="color:var(--danger)">网络错误：${escapeHtml(emsg)}</p>`;
+      console.warn('sendMessage error:', e);
     }
   } finally {
     isStreaming = false;
     currentAbortController = null;
     setSendBtnMode('send');
     // 兜底清理：无论怎么结束都移除状态指示器
-    assistantDom.querySelector('.msg-status')?.remove();
+    var _sd = assistantDom.querySelector('.msg-status');
+    if (_sd) _sd.remove();
     await loadSessions();
   }
 }
@@ -1276,7 +1414,13 @@ function handleEvent(event, assistantDom, contentDom, tracesByName) {
                                      'historical_prices', 'market_news_search']);
     if (event.is_error && !SILENT_ERRORS.has(event.name)) {
       // 真失败 → 显示错误卡片，状态变红
-      const pending = Object.values(tracesByName).find(p => p.name === event.name) || {};
+      var pending = {};
+      try {
+        var _vals = Object.keys(tracesByName).map(function(k){ return tracesByName[k]; });
+        for (var i = 0; i < _vals.length; i++) {
+          if (_vals[i] && _vals[i].name === event.name) { pending = _vals[i]; break; }
+        }
+      } catch (_) {}
       const wrapper = document.createElement('div');
       wrapper.innerHTML = renderToolTrace({
         name: event.name,
@@ -1312,11 +1456,16 @@ function handleEvent(event, assistantDom, contentDom, tracesByName) {
     }
   }
   else if (event.type === 'final') {
-    // 流结束 → 关掉流式标记（让晚到的节流定时器变 noop），最终一次性渲染
+    // 流结束 → 关掉流式标记，最终一次性渲染
     contentDom._streaming = false;
     contentDom._raw = '';
     contentDom._renderScheduled = false;
-    contentDom.innerHTML = safeMarkdown(event.text);
+    // 优先用服务端预渲染的 HTML（兼容性最佳），否则前端再渲一遍
+    if (event.text_html && typeof event.text_html === 'string') {
+      contentDom.innerHTML = event.text_html;
+    } else {
+      contentDom.innerHTML = safeMarkdown(event.text);
+    }
     assistantDom.querySelectorAll('.thought').forEach(t => t.remove());
     const statusDom = assistantDom.querySelector('.msg-status');
     if (statusDom) statusDom.remove();
@@ -1348,7 +1497,8 @@ function useSuggestion(btn) {
   ta.value = text;
   autoResize(ta);
   // 移除当前消息的建议块，避免回头再点
-  btn.closest('.suggestions')?.remove();
+  var _sg = btn.closest('.suggestions');
+  if (_sg) _sg.remove();
   sendMessage();
 }
 

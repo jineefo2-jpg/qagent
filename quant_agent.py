@@ -53,12 +53,30 @@ except ImportError:
     _MD_AVAILABLE = False
 
 
+def _normalize_chart_urls(text: str) -> str:
+    """
+    把 LLM 误生成的绝对 URL 改成相对路径。
+    例：http://localhost:8001/static/charts/xxx.html → /static/charts/xxx.html
+        https://任意域/static/charts/xxx.html → /static/charts/xxx.html
+    避免老浏览器 / 跨设备访问时跳到错误地址。
+    """
+    if not text:
+        return text
+    # 匹配 http(s)://host[:port]/static/... → /static/...
+    return re.sub(
+        r'https?://[^/\s)]+(/static/[^)\s\]"\']+)',
+        r'\1',
+        text,
+    )
+
+
 def render_markdown_to_html(text: str) -> str:
     """把 markdown 文本转成 HTML，所有 <a> 自动加 target=_blank。失败回退到 <pre>。"""
     if not text:
         return ""
+    # 先把 LLM 可能拼错的绝对 URL 规范化（兜底）
+    text = _normalize_chart_urls(text)
     if not _MD_AVAILABLE:
-        # 没装 markdown 库时退化为纯文本
         from html import escape
         return f'<pre style="white-space:pre-wrap;">{escape(text)}</pre>'
     try:
@@ -66,7 +84,7 @@ def render_markdown_to_html(text: str) -> str:
         # 给所有 <a> 加 target=_blank（避免链接跳转覆盖聊天页）
         html = re.sub(r'<a (?![^>]*\btarget=)', '<a target="_blank" rel="noopener" ', html)
         return html
-    except Exception as e:
+    except Exception:
         from html import escape
         return f'<pre style="white-space:pre-wrap;">{escape(text)}</pre>'
 
@@ -2650,8 +2668,11 @@ method 选项：
 ▶ line（折线图）：
   {"x": ["1月","2月"], "series": [{"name": "NVDA", "y": [100, 105]}]}
 
-调用成功后在报告里用 Markdown 引用：
-  📊 [查看图表](URL)""",
+⚠️ 调用成功后在报告里引用 url 时：
+  ✅ 正确：[查看 K 线图](/static/charts/xxx.html)   ← 直接用工具返回的 url 字段，相对路径
+  ❌ 错误：[查看](http://localhost:8001/static/...)  ← 千万别加 host/端口！会变死链
+  ❌ 错误：[查看](https://example.com/static/...)
+  浏览器会自动用当前域名解析相对路径，无需拼接 host。""",
         "input_schema": {
             "type": "object",
             "properties": {
