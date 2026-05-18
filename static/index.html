@@ -1028,7 +1028,8 @@ function renderMessage(m) {
   // 只展示真失败的工具调用；静默错误不显示红卡
   const SILENT_ERROR_TOOLS = new Set(['factor_score', 'html_chart_render',
                                        'historical_prices', 'market_news_search',
-                                       'technical_indicator']);
+                                       'technical_indicator', 'earnings_calendar',
+                                       'economic_calendar', 'stock_announcements']);
   let toolsHtml = '';
   if (m.tool_calls && m.tool_calls.length) {
     toolsHtml = m.tool_calls
@@ -1045,6 +1046,9 @@ function renderMessage(m) {
       'historical_prices': '历史 K 线数据未能获取，请稍后重试或换个代码',
       'market_news_search': '未能检索到相关新闻，可换个关键词或股票代码再试',
       'technical_indicator': '技术指标计算所需历史数据不足，已自动跳过此项',
+      'earnings_calendar': '财报日历数据暂未取到，请稍后或换个市场/代码再试',
+      'economic_calendar': '经济日历数据源暂时不可用，请稍后再试',
+      'stock_announcements': '公告数据暂未取到，请稍后再试',
     };
     const shownTools = new Set();
     chartFailHtml = m.tool_calls
@@ -1446,7 +1450,8 @@ function handleEvent(event, assistantDom, contentDom, tracesByName) {
     // 这些"错误"是引导/部分失败，不该当失败展示红卡
     const SILENT_ERRORS = new Set(['factor_score', 'html_chart_render',
                                      'historical_prices', 'market_news_search',
-                                     'technical_indicator']);
+                                     'technical_indicator', 'earnings_calendar',
+                                     'economic_calendar', 'stock_announcements']);
     if (event.is_error && !SILENT_ERRORS.has(event.name)) {
       // 真失败 → 显示错误卡片，状态变红
       var pending = {};
@@ -1474,6 +1479,9 @@ function handleEvent(event, assistantDom, contentDom, tracesByName) {
         'historical_prices': '历史 K 线数据未能获取，请稍后重试或换个代码',
         'market_news_search': '未能检索到相关新闻，可换个关键词或股票代码再试',
         'technical_indicator': '技术指标计算所需历史数据不足，已自动跳过此项',
+        'earnings_calendar': '财报日历数据暂未取到，请稍后或换个市场/代码再试',
+        'economic_calendar': '经济日历数据源暂时不可用，请稍后再试',
+        'stock_announcements': '公告数据暂未取到，请稍后再试',
       };
       const noticeText = NOTICES[event.name];
       if (noticeText && !assistantDom.querySelector(`.silent-notice[data-tool="${event.name}"]`)) {

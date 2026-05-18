@@ -80,9 +80,48 @@ def _notify(alert: dict, quote: dict):
 
     if channel.startswith("webhook:"):
         url = channel[len("webhook:"):]
+        # 自动识别企业微信机器人 webhook，用其专用 JSON 格式
+        is_wxwork = "qyapi.weixin.qq.com" in url
+        # 自动识别飞书 webhook
+        is_feishu = "open.feishu.cn" in url
+        # 自动识别钉钉
+        is_dingtalk = "oapi.dingtalk.com" in url
+
         try:
-            data = json.dumps({"alert": alert, "quote": quote,
-                                "message": msg}).encode("utf-8")
+            if is_wxwork:
+                # 企业微信：markdown 消息体
+                payload = {
+                    "msgtype": "markdown",
+                    "markdown": {
+                        "content": (
+                            f"## ⚠️ {alert['symbol']} 触发告警\n"
+                            f">条件：`{alert['condition']}`\n"
+                            f">现价：<font color=\"warning\">{quote.get('price')}</font>\n"
+                            f">涨跌：{quote.get('change_pct')}%\n"
+                            f">时间：{time.strftime('%Y-%m-%d %H:%M:%S')}"
+                        )
+                    }
+                }
+            elif is_feishu:
+                # 飞书机器人：interactive 卡片
+                payload = {
+                    "msg_type": "text",
+                    "content": {"text": msg}
+                }
+            elif is_dingtalk:
+                # 钉钉机器人
+                payload = {
+                    "msgtype": "markdown",
+                    "markdown": {
+                        "title": f"QuantAgent 告警: {alert['symbol']}",
+                        "text": msg.replace("\n", "  \n"),
+                    }
+                }
+            else:
+                # 通用 webhook
+                payload = {"alert": alert, "quote": quote, "message": msg}
+
+            data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
             req = urllib.request.Request(
                 url, data=data,
                 headers={"Content-Type": "application/json"},
