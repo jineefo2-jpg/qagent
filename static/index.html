@@ -1035,7 +1035,8 @@ function renderMessage(m) {
 
   // 只展示真失败的工具调用；静默错误不显示红卡
   const SILENT_ERROR_TOOLS = new Set(['factor_score', 'html_chart_render',
-                                       'historical_prices', 'market_news_search']);
+                                       'historical_prices', 'market_news_search',
+                                       'technical_indicator']);
   let toolsHtml = '';
   if (m.tool_calls && m.tool_calls.length) {
     toolsHtml = m.tool_calls
@@ -1051,6 +1052,7 @@ function renderMessage(m) {
       'html_chart_render': '此处图表未能加载，您可以让我重新生成或换种方式分析',
       'historical_prices': '历史 K 线数据未能获取，请稍后重试或换个代码',
       'market_news_search': '未能检索到相关新闻，可换个关键词或股票代码再试',
+      'technical_indicator': '技术指标计算所需历史数据不足，已自动跳过此项',
     };
     const shownTools = new Set();
     chartFailHtml = m.tool_calls
@@ -1184,54 +1186,41 @@ async function sendMessage() {
   const hasFile = !!pendingAttachment;
   if (!text && !hasFile) return;
 
-  if (!currentSession) await createSession();
-
+  // ⭐ 第一时间给视觉反馈：清空输入 + 渲染用户气泡 + 状态条
+  //   所有「await 网络请求」都放到后面，避免点完发送看似卡住
   isStreaming = true;
   setSendBtnMode('cancel');
   currentAbortController = new AbortController();
 
-  // 先尝试上传附件（如果有）
-  let attachmentMeta = null;
-  let displayContent = text;
-  let serverMessage = text;
-  if (hasFile) {
-    const filename = pendingAttachment.name;
-    const sizeKB = (pendingAttachment.size / 1024).toFixed(1);
-    const upRes = await uploadAttachmentIfAny();
-    if (!upRes) {
-      // 上传失败，中止整次发送
-      isStreaming = false;
-      document.getElementById('sendBtn').disabled = false;
-      return;
-    }
-    attachmentMeta = { name: upRes.filename, size_kb: upRes.size_kb,
-                       chunks: upRes.chunks_added };
-    // 给模型的消息：附带文件提示，让它知道可以用 search_research_docs
-    serverMessage = `[附件 PDF：${upRes.filename}，已索引 ${upRes.chunks_added} 段] ${text || '请阅读这份文档并给出分析'}`;
-    clearAttachment();
-  }
+  // 暂存附件文件（后面才真正上传）
+  const filePending = pendingAttachment;
+  const filePreviewMeta = filePending ? {
+    name: filePending.name,
+    size_kb: +(filePending.size / 1024).toFixed(1),
+    chunks: 0,   // 上传完成后再更新
+  } : null;
 
+  // 立即清空输入框
   ta.value = '';
   autoResize(ta);
+  if (filePending) clearAttachment();
 
-  // 用户消息立刻渲染（含附件 chip 展示）
+  // 立即渲染用户消息气泡
   renderMessage({
     role: 'user',
-    content: displayContent || '请阅读这份文档并给出分析',
-    attachment: attachmentMeta,
+    content: text || '请阅读这份文档并给出分析',
+    attachment: filePreviewMeta,
   });
   scrollToBottom();
 
-  // 占位 assistant 消息
+  // 立即渲染 assistant 占位 + 状态条
   const assistantDom = renderMessage({
     role: 'assistant',
     content: '',
     tool_calls: [],
   });
   const contentDom = assistantDom.querySelector('.msg-content');
-  contentDom.innerHTML = '';  // 清空，状态指示器会在下面创建
-
-  // 常驻状态指示器 —— 整个流式过程都显示，告诉用户「还在跑」
+  contentDom.innerHTML = '';
   const statusDom = document.createElement('div');
   statusDom.className = 'msg-status';
   statusDom.innerHTML = `
@@ -1241,9 +1230,54 @@ async function sendMessage() {
     <span class="status-text">思考中…</span>`;
   assistantDom.appendChild(statusDom);
 
-  const tracesByName = {};  // 用于流式拼回工具结果
+  const tracesByName = {};
+
+  // ↓ 这里之后才开始真正的异步工作
+  let attachmentMeta = null;
+  let serverMessage = text;
 
   try {
+    // 1. 如果还没有会话，轻量创建（不刷 DOM，不调 loadSessionDetail —— 否则会清掉刚渲染的气泡）
+    if (!currentSession) {
+      setStatus(assistantDom, '正在创建会话…');
+      const _r = await api('/api/sessions', { method: 'POST' });
+      const _s = await _r.json();
+      currentSession = _s.id;
+      // 侧边栏列表稍后随 SSE finally 阶段的 loadSessions 自然刷新
+    }
+
+    // 2. 如果有附件，上传 + 入库
+    if (filePending) {
+      setStatus(assistantDom, `📎 上传 ${filePending.name}…`);
+      // 临时把 pendingAttachment 设回来供 uploadAttachmentIfAny 用
+      pendingAttachment = filePending;
+      const upRes = await uploadAttachmentIfAny();
+      pendingAttachment = null;
+      if (!upRes) {
+        contentDom.innerHTML = '<p style="color:var(--danger)">附件上传失败，请重试</p>';
+        var _sd0 = assistantDom.querySelector('.msg-status');
+        if (_sd0) _sd0.remove();
+        return;
+      }
+      attachmentMeta = { name: upRes.filename, size_kb: upRes.size_kb,
+                         chunks: upRes.chunks_added };
+      // 实时更新已渲染的用户气泡里的附件 chip
+      try {
+        var allMsgs = document.querySelectorAll('.msg.user');
+        var lastUser = allMsgs[allMsgs.length - 1];
+        var att = lastUser && lastUser.querySelector('.msg-attachment');
+        if (att) {
+          att.innerHTML = '📄 ' + escapeHtml(attachmentMeta.name)
+            + ' <span style="color:var(--text-muted)"> · '
+            + attachmentMeta.size_kb + ' KB · ' + attachmentMeta.chunks + ' 段</span>';
+        }
+      } catch (_) {}
+      serverMessage = `[附件 PDF：${upRes.filename}，已索引 ${upRes.chunks_added} 段] ${text || '请阅读这份文档并给出分析'}`;
+    }
+
+    setStatus(assistantDom, '🤔 思考中…');
+
+    // 3. SSE 请求
     const resp = await api(`/api/sessions/${currentSession}/chat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1411,7 +1445,8 @@ function handleEvent(event, assistantDom, contentDom, tracesByName) {
     const label = TOOL_LABELS[event.name] || event.name;
     // 这些"错误"是引导/部分失败，不该当失败展示红卡
     const SILENT_ERRORS = new Set(['factor_score', 'html_chart_render',
-                                     'historical_prices', 'market_news_search']);
+                                     'historical_prices', 'market_news_search',
+                                     'technical_indicator']);
     if (event.is_error && !SILENT_ERRORS.has(event.name)) {
       // 真失败 → 显示错误卡片，状态变红
       var pending = {};
@@ -1438,6 +1473,7 @@ function handleEvent(event, assistantDom, contentDom, tracesByName) {
         'html_chart_render': '此处图表未能加载，您可以让我重新生成或换种方式分析',
         'historical_prices': '历史 K 线数据未能获取，请稍后重试或换个代码',
         'market_news_search': '未能检索到相关新闻，可换个关键词或股票代码再试',
+        'technical_indicator': '技术指标计算所需历史数据不足，已自动跳过此项',
       };
       const noticeText = NOTICES[event.name];
       if (noticeText && !assistantDom.querySelector(`.silent-notice[data-tool="${event.name}"]`)) {

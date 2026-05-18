@@ -2544,12 +2544,14 @@ action: today (今天信息) / trading_days_between (两日期间交易日数).
   - 美股: AAPL / NVDA / TSLA
   - 港股: 0700 / 09988
 
-days 建议：
-  - RSI/SMA: ≥ 30
-  - MACD: ≥ 30（含 EMA26 + signal 9）
-  - 布林带: ≥ 25
-  - 计算因子: 60-120
-  - 画 K 线图: 60+""",
+days 建议（自然日，工具内部会换算成交易日）：
+  - RSI/SMA: ≥ 45 （保证 ≥30 个交易日）
+  - MACD:    ≥ 50 （保证 ≥35 个交易日，覆盖 EMA26+signal9）
+  - 布林带:  ≥ 40
+  - 因子:    60-120
+  - K 线图:  60-90
+⚠️ 实际拿到的交易日数 ≈ days × 0.7（去掉周末/节假日）。
+   想算 MACD 至少传 days=50，不要传 30。""",
         "input_schema": {
             "type": "object",
             "properties": {
