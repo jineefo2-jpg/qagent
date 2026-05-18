@@ -183,6 +183,84 @@ def _sina_prefix(symbol: str):
     return None
 
 
+def _quote_yfinance(symbol: str):
+    """
+    yfinance 获取实时行情（Yahoo Finance 官方认证，美股/港股最权威）。
+    A 股也支持但延迟较大，A 股优先用新浪。
+    """
+    if not _YFINANCE_AVAILABLE:
+        return None
+
+    market = _detect_market(symbol)
+    s_clean = symbol.upper()
+    for suf in ('.SS', '.SH', '.SZ', '.HK', '.US'):
+        s_clean = s_clean.replace(suf, '')
+
+    if market == "A":
+        ysym = f"{s_clean}.SS" if s_clean.startswith(('5','6','9')) else f"{s_clean}.SZ"
+    elif market == "HK":
+        ysym = f"{s_clean.zfill(4)}.HK"
+    elif market == "US":
+        ysym = s_clean
+    else:
+        return None
+
+    try:
+        ticker = _yf.Ticker(ysym)
+        fi = ticker.fast_info  # 比 ticker.info 快 5x
+        # fast_info 字段名在不同 yfinance 版本里有差异，多种 fallback
+        def _get(*keys):
+            for k in keys:
+                try:
+                    v = fi[k] if hasattr(fi, '__getitem__') else getattr(fi, k, None)
+                    if v is not None: return v
+                except Exception:
+                    continue
+            return None
+
+        last = _get('lastPrice', 'last_price', 'regularMarketPrice')
+        prev = _get('previousClose', 'previous_close', 'regular_market_previous_close')
+        if last is None:
+            return None
+
+        market_label = {"A": "A股", "HK": "港股", "US": "美股"}[market]
+        change_pct = ((float(last) / float(prev) - 1) * 100) if prev else 0.0
+
+        # 获取公司名（fast_info 没有，需 ticker.info，但很慢；这里跳过）
+        name = s_clean
+
+        return {
+            "symbol": s_clean,
+            "name": name,
+            "market": market_label,
+            "price": float(last),
+            "prev_close": float(prev) if prev else None,
+            "open": _safe_float(_get('open')),
+            "high": _safe_float(_get('dayHigh', 'day_high', 'high')),
+            "low": _safe_float(_get('dayLow', 'day_low', 'low')),
+            "volume": _safe_int(_get('lastVolume', 'last_volume', 'regularMarketVolume')),
+            "change_pct": round(change_pct, 4),
+            "as_of": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "data_source": "Yahoo Finance 官方（yfinance）",
+        }
+    except Exception:
+        return None
+
+
+def _safe_float(v):
+    try:
+        return float(v) if v is not None else None
+    except Exception:
+        return None
+
+
+def _safe_int(v):
+    try:
+        return int(v) if v is not None else None
+    except Exception:
+        return None
+
+
 def _quote_sina(symbol: str):
     """新浪财经实时行情（A/HK/US 通用）"""
     prefix = _sina_prefix(symbol)
@@ -295,6 +373,82 @@ def _news_eastmoney(keyword: str, max_results: int = 5):
                 "summary": content[:200],
                 "source_api": "eastmoney",
             })
+        return news
+    except Exception:
+        return []
+
+
+def _news_seeking_alpha(symbol: str, max_results: int = 5):
+    """
+    Seeking Alpha 个股专业分析 RSS（per-ticker，质量高）。
+    适合美股，深度文章为主，覆盖个股新闻 + 分析师观点。
+    """
+    if not symbol:
+        return []
+    try:
+        url = f"https://seekingalpha.com/api/sa/combined/{symbol.upper()}.xml"
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                          "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0",
+        })
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            xml_text = resp.read().decode("utf-8", errors="ignore")
+
+        import xml.etree.ElementTree as ET
+        root = ET.fromstring(xml_text)
+        items = root.findall('.//item')
+        news = []
+        for it in items[:max_results]:
+            title = (it.findtext('title') or '').strip()
+            link = (it.findtext('link') or '').strip()
+            pub = (it.findtext('pubDate') or '').strip()
+            desc = (it.findtext('description') or '').strip()
+            desc = re.sub(r'<[^>]+>', '', desc)[:200]
+            if title:
+                news.append({
+                    "title": title,
+                    "publisher": "Seeking Alpha",
+                    "link": link,
+                    "published_at": pub,
+                    "summary": desc,
+                    "source_api": "seeking_alpha",
+                    "related_tickers": [symbol.upper()],
+                })
+        return news
+    except Exception:
+        return []
+
+
+def _news_marketwatch(max_results: int = 5):
+    """
+    MarketWatch Top Stories（综合美股市场新闻，不依赖 ticker）。
+    适合「美股动态」「标普走势」这种宏观查询。
+    """
+    try:
+        url = "https://feeds.content.dowjones.io/public/rss/mw_topstories"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            xml_text = resp.read().decode("utf-8", errors="ignore")
+
+        import xml.etree.ElementTree as ET
+        root = ET.fromstring(xml_text)
+        items = root.findall('.//item')
+        news = []
+        for it in items[:max_results]:
+            title = (it.findtext('title') or '').strip()
+            link = (it.findtext('link') or '').strip()
+            pub = (it.findtext('pubDate') or '').strip()
+            desc = (it.findtext('description') or '').strip()
+            desc = re.sub(r'<[^>]+>', '', desc)[:200]
+            if title:
+                news.append({
+                    "title": title,
+                    "publisher": "MarketWatch",
+                    "link": link,
+                    "published_at": pub,
+                    "summary": desc,
+                    "source_api": "marketwatch",
+                })
         return news
     except Exception:
         return []
@@ -475,34 +629,78 @@ def market_quote(symbol: str) -> dict:
         result["from_cache"] = True
         return result
 
+    # 按市场路由数据源（A 股优先国内权威；美股/港股优先 Yahoo 系）
+    market = _detect_market(symbol_raw)
     sources_tried = []
 
-    # ── 1. 新浪财经实时行情（A/HK/US 通用）──
-    sina = _quote_sina(symbol_raw)
-    sources_tried.append({"source": "新浪财经",
-                          "ok": sina is not None})
-    if sina:
-        result = {
+    def _build_result(q, data_source):
+        return {
             "success": True,
-            "symbol": sina["symbol"],
-            "name": sina["name"],
-            "market": sina["market"],
-            "price": sina["price"],
-            "change_pct": sina["change_pct"],
-            "open": sina.get("open"),
-            "high": sina.get("high"),
-            "low": sina.get("low"),
-            "prev_close": sina.get("prev_close"),
-            "volume": sina.get("volume"),
-            "amount_cny": sina.get("amount_cny"),
-            "as_of": sina.get("as_of"),
-            "data_source": "新浪财经实时行情",
+            "symbol": q["symbol"],
+            "name": q.get("name", q["symbol"]),
+            "market": q["market"],
+            "price": q["price"],
+            "change_pct": q["change_pct"],
+            "open": q.get("open"),
+            "high": q.get("high"),
+            "low": q.get("low"),
+            "prev_close": q.get("prev_close"),
+            "volume": q.get("volume"),
+            "amount_cny": q.get("amount_cny"),
+            "as_of": q.get("as_of"),
+            "data_source": data_source,
             "sources_tried": sources_tried,
         }
-        cache.set(cache_key, result, ttl=_QUOTE_CACHE_TTL)
-        return result
 
-    # ── 2. MOCK 兜底（仅在 Sina 完全无返回时）──
+    # ── A 股：新浪优先（国内最快最准）→ yfinance 兜底 ──
+    if market == "A":
+        sina = _quote_sina(symbol_raw)
+        sources_tried.append({"source": "新浪财经", "ok": sina is not None})
+        if sina:
+            result = _build_result(sina, "新浪财经实时行情")
+            cache.set(cache_key, result, ttl=_QUOTE_CACHE_TTL)
+            return result
+        # 兜底 yfinance
+        yf_q = _quote_yfinance(symbol_raw)
+        sources_tried.append({"source": "yfinance", "ok": yf_q is not None})
+        if yf_q:
+            result = _build_result(yf_q, "Yahoo Finance 官方（yfinance）")
+            cache.set(cache_key, result, ttl=_QUOTE_CACHE_TTL)
+            return result
+
+    # ── 美股 / 港股：yfinance 优先（Yahoo 官方）→ 新浪兜底 ──
+    elif market in ("US", "HK"):
+        yf_q = _quote_yfinance(symbol_raw)
+        sources_tried.append({"source": "yfinance（Yahoo 官方）",
+                              "ok": yf_q is not None})
+        if yf_q:
+            result = _build_result(yf_q, "Yahoo Finance 官方（yfinance）")
+            cache.set(cache_key, result, ttl=_QUOTE_CACHE_TTL)
+            return result
+        # 兜底新浪
+        sina = _quote_sina(symbol_raw)
+        sources_tried.append({"source": "新浪财经", "ok": sina is not None})
+        if sina:
+            result = _build_result(sina, "新浪财经实时行情（兜底）")
+            cache.set(cache_key, result, ttl=_QUOTE_CACHE_TTL)
+            return result
+
+    # ── 未知市场：新浪 + yfinance 都试 ──
+    else:
+        sina = _quote_sina(symbol_raw)
+        sources_tried.append({"source": "新浪财经", "ok": sina is not None})
+        if sina:
+            result = _build_result(sina, "新浪财经实时行情")
+            cache.set(cache_key, result, ttl=_QUOTE_CACHE_TTL)
+            return result
+        yf_q = _quote_yfinance(symbol_raw)
+        sources_tried.append({"source": "yfinance", "ok": yf_q is not None})
+        if yf_q:
+            result = _build_result(yf_q, "Yahoo Finance 官方（yfinance）")
+            cache.set(cache_key, result, ttl=_QUOTE_CACHE_TTL)
+            return result
+
+    # ── 最终兜底 MOCK ──
     s_upper = symbol_raw.upper()
     quote = MOCK_QUOTES.get(s_upper)
     sources_tried.append({"source": "MOCK", "ok": quote is not None})
@@ -517,7 +715,7 @@ def market_quote(symbol: str) -> dict:
             "market_cap_billion_usd": quote["market_cap_b"],
             "data_source": "[MOCK DATA] 演示数据，非实时",
             "sources_tried": sources_tried,
-            "warning": "新浪行情接口未返回，已降级至 MOCK 数据",
+            "warning": "所有真实数据源未返回，已降级至 MOCK 数据",
         }
 
     return {
@@ -575,6 +773,113 @@ def _fetch_kline_df(s: str, days: int = 120):
         return _ak.stock_zh_a_hist(symbol=s, period='daily',
                                     start_date=start_d, end_date=end_d,
                                     adjust='qfq')
+    except Exception:
+        return None
+
+
+def _compute_factors_yfinance(symbol: str):
+    """
+    用 yfinance 拉取美股/港股的真实财务数据，计算 5 因子。
+    成功返回 dict（含 factors + raw），失败返回 None。
+    """
+    if not _YFINANCE_AVAILABLE:
+        return None
+
+    market = _detect_market(symbol)
+    s_clean = symbol.upper()
+    for suf in ('.SS', '.SH', '.SZ', '.HK', '.US'):
+        s_clean = s_clean.replace(suf, '')
+
+    if market == "HK":
+        ysym = f"{s_clean.zfill(4)}.HK"
+    elif market == "US":
+        ysym = s_clean
+    else:
+        return None  # A 股走 AKShare 路径
+
+    cache_key = f"quant:factor:yf:{s_clean}"
+    cached = cache.get(cache_key)
+    if cached:
+        return cached
+
+    factors = {}
+    raw = {}
+
+    try:
+        ticker = _yf.Ticker(ysym)
+        info = ticker.info  # 拉财务基本面
+        if not info or not isinstance(info, dict):
+            return None
+
+        # ── Value 因子：PE / PB 低 → 分高 ──
+        pe = info.get('trailingPE') or info.get('forwardPE')
+        pb = info.get('priceToBook')
+        if pe and pe > 0:
+            raw["pe"] = round(pe, 2)
+            # PE 12-30 是合理区间，越低越好
+            factors["value"] = max(0, min(100, 100 - pe * 2))
+        if pb and pb > 0:
+            raw["pb"] = round(pb, 2)
+            if "value" not in factors:
+                factors["value"] = max(0, min(100, 80 - pb * 5))
+
+        # ── Quality 因子：ROE + 毛利率 ──
+        roe = info.get('returnOnEquity')  # 已是小数（如 0.30 = 30%）
+        if roe:
+            raw["roe_pct"] = round(roe * 100, 2)
+            factors["quality"] = max(0, min(100, roe * 400))
+        margin = info.get('profitMargins')
+        if margin:
+            raw["profit_margin_pct"] = round(margin * 100, 2)
+            if "quality" not in factors:
+                factors["quality"] = max(0, min(100, margin * 300))
+
+        # ── Growth 因子：营收/盈利增速 ──
+        rev_g = info.get('revenueGrowth')
+        earn_g = info.get('earningsGrowth')
+        if rev_g is not None or earn_g is not None:
+            g_values = [g * 100 for g in [rev_g, earn_g] if g is not None]
+            avg_g = sum(g_values) / len(g_values) if g_values else 0
+            raw["revenue_growth_pct"] = round(rev_g * 100, 2) if rev_g else None
+            raw["earnings_growth_pct"] = round(earn_g * 100, 2) if earn_g else None
+            factors["growth"] = max(0, min(100, 50 + avg_g * 1.5))
+
+        # ── Momentum + Technical 因子：从 historical_prices 取 ──
+        try:
+            hist = ticker.history(period="3mo", interval="1d", auto_adjust=True)
+            if len(hist) >= 20:
+                cur = float(hist['Close'].iloc[-1])
+                start = float(hist['Close'].iloc[0])
+                ret_3m = (cur / start - 1) * 100
+                raw["return_3m_pct"] = round(ret_3m, 2)
+                factors["momentum"] = max(0, min(100, 50 + ret_3m * 1.67))
+
+                ma60 = float(hist['Close'].tail(60).mean()
+                              if len(hist) >= 60 else hist['Close'].mean())
+                tech_pct = (cur / ma60 - 1) * 100
+                raw["vs_ma60_pct"] = round(tech_pct, 2)
+                factors["technical"] = max(0, min(100, 50 + tech_pct * 2))
+        except Exception:
+            pass
+
+        # 附加元信息
+        raw["market_cap_b"] = round(info.get('marketCap', 0) / 1e9, 1) if info.get('marketCap') else None
+        raw["sector"] = info.get('sector')
+        raw["industry"] = info.get('industry')
+        raw["name"] = info.get('shortName') or info.get('longName') or s_clean
+
+        if not factors:
+            return None
+
+        result = {
+            "factors": {k: round(v, 1) for k, v in factors.items()},
+            "raw": raw,
+            "computed_at": datetime.datetime.now().strftime('%Y-%m-%d %H:%M'),
+            "note": "yfinance 数据，PE/PB/ROE 为 Yahoo 最近期值",
+        }
+        cache.set(cache_key, result, ttl=_FACTOR_CACHE_TTL)
+        return result
+
     except Exception:
         return None
 
@@ -728,18 +1033,25 @@ def factor_score(symbol: str, style: str = "balanced") -> dict:
                                    "market_news_search"],
         }
 
-    # ── 优先尝试 AKShare 真因子（A 股可用）──
+    # ── 按市场路由：A 股走 AKShare，美股/港股走 yfinance ──
     market = _detect_market(symbol)
-    real = _compute_factors_akshare(symbol) if market == "A" else None
+    real = None
+    real_source = None
+    if market == "A":
+        real = _compute_factors_akshare(symbol)
+        real_source = "AKShare 实时计算"
+    elif market in ("US", "HK"):
+        real = _compute_factors_yfinance(symbol)
+        real_source = "yfinance 实时计算（Yahoo 官方）"
 
     if real:
-        # 真因子覆盖缺失的字段（部分接口失败时用 MOCK 兜底剩余字段）
-        raw = {**MOCK_FACTOR_RAW.get(symbol, {
-            "value": 50, "growth": 50, "momentum": 50,
-            "quality": 50, "technical": 50,
-        }), **real["factors"]}
+        # 真因子覆盖默认值；缺失字段用中性 50 兜底
+        raw = {**{"value": 50, "growth": 50, "momentum": 50,
+                  "quality": 50, "technical": 50},
+               **MOCK_FACTOR_RAW.get(symbol, {}),
+               **real["factors"]}
         is_mock = False
-        data_source = f"AKShare 实时计算（{len(real['factors'])}/5 因子真值）"
+        data_source = f"{real_source}（{len(real['factors'])}/5 因子真值）"
         real_meta = {
             "real_factors_count": len(real["factors"]),
             "real_factor_names": list(real["factors"].keys()),
@@ -748,14 +1060,15 @@ def factor_score(symbol: str, style: str = "balanced") -> dict:
             "note": real["note"],
         }
     else:
-        # 全 MOCK 兜底（非 A 股 / AKShare 不可用 / 没数据）
+        # 全 MOCK 兜底
         raw = MOCK_FACTOR_RAW.get(symbol)
         if not raw:
             return {
                 "success": False,
                 "error_type": "no_data",
                 "error": f"'{symbol}' 真实因子计算失败且 MOCK 库无此代码",
-                "hint": "A 股代码应能拿到 AKShare 数据；美股/港股暂仅 MOCK 库内可用",
+                "hint": ("A 股代码应能拿到 AKShare 数据；"
+                         "美股/港股需要 yfinance 能取到 ticker.info"),
                 "available_in_mock": list(MOCK_FACTOR_RAW.keys()),
             }
         is_mock = True
@@ -1314,27 +1627,35 @@ def market_news_search(query: str, max_results: int = 5) -> dict:
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     tasks = {}
-    with ThreadPoolExecutor(max_workers=6) as ex:
+    with ThreadPoolExecutor(max_workers=8) as ex:
         # 1. Yahoo Search API（quotes 元信息 + 通用新闻）
         tasks["Yahoo Finance"] = ex.submit(_news_yahoo, primary, max_results)
 
-        # 2. Yahoo Finance per-ticker RSS（无 key，美股最佳，全球可用）
+        # 2. Yahoo per-ticker RSS（美股 ticker 精准命中）
         if market in ("US", "HK"):
             tasks["Yahoo RSS"] = ex.submit(_news_yahoo_rss, primary, max_results)
 
-        # 3. Google News RSS（全球免费，任意关键词都好用）
+        # 3. ⭐ Seeking Alpha per-ticker（美股专业分析，新增）
+        if market == "US":
+            tasks["Seeking Alpha"] = ex.submit(_news_seeking_alpha, primary, max_results)
+
+        # 4. ⭐ MarketWatch 综合美股新闻（不依赖 ticker，宏观查询时补强，新增）
+        if market in ("US", "unknown"):
+            tasks["MarketWatch"] = ex.submit(_news_marketwatch, max_results)
+
+        # 5. Google News RSS（全球免费，任意关键词都好用）
         if market in ("US", "HK", "unknown"):
             tasks["Google News"] = ex.submit(_news_google_rss, primary, max_results)
 
-        # 4. 东方财富（A 股 / 港股 / 中文 query）—— 不再受 market 局限
+        # 6. 东方财富（A 股 / 港股 / 中文 query）
         if market in ("A", "HK", "unknown") or has_chinese_query:
             tasks["东方财富"] = ex.submit(_news_eastmoney, domestic_term, max_results)
 
-        # 5. Finnhub（需 key，美股/港股深度）
+        # 7. Finnhub（需 key，美股/港股深度）
         if FINNHUB_API_KEY and market in ("US", "HK"):
             tasks["Finnhub"] = ex.submit(_news_finnhub, primary, max_results)
 
-        # 6. AKShare（A 股 OR 中文 query，喂中文关键词）
+        # 8. AKShare（A 股 OR 中文 query，喂中文关键词）
         if _AKSHARE_AVAILABLE and (market == "A" or has_chinese_query):
             tasks["AKShare"] = ex.submit(_news_akshare, domestic_term, max_results)
 
@@ -1381,11 +1702,11 @@ def market_news_search(query: str, max_results: int = 5) -> dict:
         # A 股优先国内源
         if market == "A" and src in ("eastmoney", "akshare"):
             score += 30
-        # 美股优先 ticker 精准源（Yahoo RSS / Finnhub）> 通用新闻 > Yahoo Search
+        # 美股优先 ticker 精准源（Yahoo RSS / Seeking Alpha / Finnhub）> 通用 > Yahoo Search
         elif market == "US":
-            if src in ("yahoo_rss", "finnhub"):
+            if src in ("yahoo_rss", "seeking_alpha", "finnhub"):
                 score += 40
-            elif src == "google_news_rss":
+            elif src in ("google_news_rss", "marketwatch"):
                 score += 30
             elif src == "yahoo":
                 score += 10
@@ -1815,6 +2136,552 @@ import uuid as _uuid
 # 图表输出目录
 _CHARTS_DIR = os.path.join(os.path.dirname(__file__), "static", "charts")
 os.makedirs(_CHARTS_DIR, exist_ok=True)
+
+
+# ═══════════════════════════════════════════════════════════
+# Tool 14-17：日历 / 公告 / 持仓 / 告警（Phase 1 新增）
+# ═══════════════════════════════════════════════════════════
+
+# ─── Tool 14: 经济日历（宏观事件）────────────────────────
+# Investing.com 国家 ID 映射（常用）
+_INVESTING_COUNTRY_IDS = {
+    "US": 5, "China": 37, "EU": 72, "Japan": 35,
+    "UK": 4, "Germany": 17, "France": 22, "Australia": 25,
+    "Canada": 6, "Switzerland": 12, "India": 14, "Korea": 41,
+    "HK": 39, "Brazil": 32, "Russia": 56,
+}
+_INVESTING_DEFAULT_COUNTRIES = [5, 37, 72, 35, 4]  # US/CN/EU/JP/UK
+
+
+def _economic_investing(days_forward: int) -> dict:
+    """
+    Investing.com 经济日历（最全免费源，无需 key）。
+    POST getCalendarFilteredData 端点，解析返回的 HTML 表格。
+    """
+    try:
+        today = datetime.date.today()
+        end = today + datetime.timedelta(days=int(days_forward))
+
+        # 构造表单数据
+        form = []
+        for cid in _INVESTING_DEFAULT_COUNTRIES:
+            form.append(("country[]", str(cid)))
+        for imp in (2, 3):  # 只要中/高重要性
+            form.append(("importance[]", str(imp)))
+        form.extend([
+            ("dateFrom", today.strftime("%Y-%m-%d")),
+            ("dateTo",   end.strftime("%Y-%m-%d")),
+            ("timeZone", "8"),    # UTC+8 中国时区
+            ("timeFilter", "timeRemain"),
+            ("currentTab", "custom"),
+            ("limit_from", "0"),
+        ])
+        body = urllib.parse.urlencode(form).encode("utf-8")
+
+        url = "https://www.investing.com/economic-calendar/Service/getCalendarFilteredData"
+        req = urllib.request.Request(url, data=body, method="POST",
+            headers={
+                "User-Agent": ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0"),
+                "X-Requested-With": "XMLHttpRequest",
+                "Referer": "https://www.investing.com/economic-calendar/",
+                "Accept": "application/json",
+                "Content-Type": "application/x-www-form-urlencoded",
+            })
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+
+        html = data.get("data", "")
+        if not html:
+            return None
+
+        # 解析 HTML 表格行
+        from html import unescape
+        # 正则提取每个事件行（更稳定，避免 BeautifulSoup 依赖）
+        events = []
+        current_date = ""
+        # the-day 行：日期标题
+        # event rows: <tr id="eventRowId_xxx" ... data-event-datetime="YYYY/MM/DD HH:MM:SS">
+        for m in re.finditer(
+            r'<tr[^>]*class="[^"]*theDay[^"]*"[^>]*>([^<]+)</td></tr>'
+            r'|<tr[^>]*data-event-datetime="([^"]+)"[^>]*>(.*?)</tr>',
+            html, re.DOTALL
+        ):
+            if m.group(1):
+                current_date = unescape(m.group(1)).strip()
+                continue
+            dt_str = m.group(2)  # "2026/05/18 10:00:00"
+            row_html = m.group(3)
+
+            # 提取字段
+            country = re.search(r'title="([^"]+)" class="ceFlags', row_html)
+            event = re.search(r'event ">([^<]+)', row_html) \
+                    or re.search(r'class="left event[^>]*>(?:\s*<a[^>]*>)?([^<]+)',
+                                  row_html)
+            actual = re.search(r'class="[^"]*act[^"]*">([^<]*)</td>', row_html)
+            forecast = re.search(r'class="[^"]*fore[^"]*">([^<]*)</td>', row_html)
+            previous = re.search(r'class="[^"]*prev[^"]*">([^<]*)</td>', row_html)
+            # 重要性：sentiment 单元格里 grayFullBullishIcon 数量（1/2/3）
+            sent_block = re.search(
+                r'class="[^"]*sentiment[^"]*"[^>]*>(.*?)</td>',
+                row_html, re.DOTALL)
+            imp_count = len(re.findall(r'grayFullBullishIcon',
+                                        sent_block.group(1))) if sent_block else 0
+            imp_match = imp_count if imp_count > 0 else None
+
+            try:
+                dt = datetime.datetime.strptime(dt_str, "%Y/%m/%d %H:%M:%S")
+                date_str = dt.strftime("%Y-%m-%d")
+                time_str = dt.strftime("%H:%M")
+            except Exception:
+                continue
+
+            events.append({
+                "date":       date_str,
+                "time":       time_str,
+                "country":    unescape((country.group(1) if country else "")).strip(),
+                "event":      unescape((event.group(1) if event else "")).strip(),
+                "previous":   unescape((previous.group(1) if previous else "")).strip(),
+                "forecast":   unescape((forecast.group(1) if forecast else "")).strip(),
+                "actual":     unescape((actual.group(1) if actual else "")).strip(),
+                "importance": imp_match,
+            })
+
+        events.sort(key=lambda x: (x["date"], x["time"]))
+        return {
+            "success": True,
+            "from": today.strftime("%Y-%m-%d"),
+            "to": end.strftime("%Y-%m-%d"),
+            "event_count": len(events),
+            "events": events[:60],
+            "data_source": "Investing.com 经济日历",
+            "note": "重要性 3=高 / 2=中；时区 UTC+8（北京时间）",
+        }
+    except Exception:
+        return None
+
+
+def _economic_finnhub(days_forward: int) -> dict:
+    """Finnhub 经济日历（免费 API，覆盖全球，质量高）"""
+    if not FINNHUB_API_KEY:
+        return None
+    try:
+        today = datetime.date.today()
+        end = today + datetime.timedelta(days=int(days_forward))
+        url = (f"https://finnhub.io/api/v1/calendar/economic"
+               f"?from={today}&to={end}&token={FINNHUB_API_KEY}")
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        items = data.get("economicCalendar", []) or []
+        # impact: low/medium/high → 数字
+        imp_map = {"low": 1, "medium": 2, "high": 3}
+        events = []
+        for e in items:
+            events.append({
+                "date":       e.get("time", "")[:10],
+                "time":       e.get("time", "")[11:16],
+                "country":    e.get("country", ""),
+                "event":      e.get("event", ""),
+                "previous":   str(e.get("prev", "") or ""),
+                "forecast":   str(e.get("estimate", "") or ""),
+                "actual":     str(e.get("actual", "") or ""),
+                "importance": imp_map.get((e.get("impact") or "").lower(), None),
+                "unit":       e.get("unit", ""),
+            })
+        events.sort(key=lambda x: (x["date"], x["time"]))
+        return {
+            "success": True,
+            "from": str(today),
+            "to": str(end),
+            "event_count": len(events),
+            "events": events[:50],
+            "data_source": "Finnhub Economic Calendar",
+            "note": "重要性 3=高 / 2=中 / 1=低",
+        }
+    except Exception:
+        return None
+
+
+def economic_calendar(days_forward: int = 7) -> dict:
+    """
+    全球经济日历（FOMC/CPI/PMI/利率决议等）。
+    源优先级：
+      1. Investing.com（最全，无需 key）
+      2. Finnhub（需 key 时启用）
+      3. AKShare 百度（最终兜底）
+    """
+    # 优先级 1: Investing.com
+    iv = _economic_investing(days_forward)
+    if iv and iv.get("event_count", 0) > 0:
+        return iv
+
+    # 优先级 2: Finnhub（如配了 key）
+    fh = _economic_finnhub(days_forward)
+    if fh and fh.get("event_count", 0) > 0:
+        return fh
+
+    if not _AKSHARE_AVAILABLE:
+        return {"success": False, "error": "AKShare 未安装，无法获取经济日历"}
+    try:
+        df = _ak.news_economic_baidu()
+        if len(df) == 0:
+            return {"success": False, "error": "未获取到经济日历数据"}
+
+        # 接口数据时间窗口波动较大（百度有时只给近期/有时滚动未来）
+        # 策略：取「今天 ± days_forward」范围内的所有事件，过去的也保留
+        today = datetime.date.today()
+        win = max(int(days_forward), 1)
+        lo = today - datetime.timedelta(days=win)
+        hi = today + datetime.timedelta(days=win)
+        events = []
+        for _, row in df.iterrows():
+            try:
+                d_str = str(row.get('日期', ''))
+                if not d_str or d_str == 'nan':
+                    continue
+                d = datetime.datetime.strptime(d_str, '%Y-%m-%d').date()
+                if d < lo or d > hi:
+                    continue
+                # 重要性 1-3，过滤低重要性减少噪音
+                importance = row.get('重要性')
+                events.append({
+                    "date":       d_str,
+                    "time":       str(row.get('时间', '')),
+                    "country":    str(row.get('地区', '')),
+                    "event":      str(row.get('事件', '')),
+                    "previous":   str(row.get('前值', '')),
+                    "forecast":   str(row.get('预期', '')),
+                    "actual":     str(row.get('公布', '')),
+                    "importance": int(importance) if importance == importance else None,
+                })
+            except Exception:
+                continue
+        # 按日期+时间排序
+        events.sort(key=lambda e: (e["date"], e["time"]))
+        return {
+            "success": True,
+            "from": str(lo),
+            "to": str(hi),
+            "event_count": len(events),
+            "events": events[:40],
+            "data_source": "百度财经（AKShare）",
+            "note": "重要性 3=高 / 2=中 / 1=低；'公布' 有值表示已发布",
+        }
+    except Exception as e:
+        return {"success": False, "error": f"获取失败: {e}"}
+
+
+# ─── Tool 15: 财报日历（业绩预告 + 美股财报日 ）────────
+def earnings_calendar(market: str = "A",
+                       date: str = None,
+                       symbol: str = None) -> dict:
+    """
+    A 股业绩预告 / 美股财报日历。
+    market='A' + date='YYYYMMDD'：返回该季度业绩预告列表
+    market='US' + symbol：返回美股下次财报日
+    """
+    market = (market or "A").upper()
+
+    if market == "A":
+        if not _AKSHARE_AVAILABLE:
+            return {"success": False, "error": "需要 AKShare"}
+        try:
+            # 用户传 date 就用；否则自动选「最近过去的季度末日期」
+            if date and len(date) == 8 and date.isdigit():
+                q_date = date
+            else:
+                today = datetime.date.today()
+                year = today.year
+                today_str = today.strftime("%Y%m%d")
+                cuts = [f"{year}0331", f"{year}0630",
+                        f"{year}0930", f"{year}1231"]
+                past_cuts = [c for c in cuts if c <= today_str]
+                q_date = past_cuts[-1] if past_cuts else f"{year-1}1231"
+
+            df = _ak.stock_yjyg_em(date=q_date)
+            if symbol:
+                df = df[df['股票代码'].astype(str).str.contains(symbol)]
+            df = df.head(30)
+            items = []
+            for _, r in df.iterrows():
+                items.append({
+                    "symbol":   str(r.get('股票代码', '')),
+                    "name":     str(r.get('股票简称', '')),
+                    "indicator": str(r.get('预测指标', '')),
+                    "change":    str(r.get('业绩变动', '')),
+                    "value":     str(r.get('预测数值', '')),
+                })
+            return {
+                "success": True,
+                "market": "A股",
+                "report_date": q_date,
+                "count": len(items),
+                "items": items,
+                "data_source": "东方财富业绩预告（AKShare）",
+            }
+        except Exception as e:
+            return {"success": False, "error": f"获取失败: {e}"}
+
+    elif market == "US":
+        if not symbol:
+            return {"success": False,
+                    "error": "美股财报日历需提供 symbol（如 AAPL）"}
+        if not _YFINANCE_AVAILABLE:
+            return {"success": False, "error": "需要 yfinance"}
+        try:
+            ticker = _yf.Ticker(symbol.upper())
+            cal = ticker.calendar
+            if cal is None or (hasattr(cal, 'empty') and cal.empty):
+                return {"success": False,
+                        "error": f"{symbol} 暂无财报日历数据"}
+            # cal 可能是 dict 或 DataFrame
+            result = {
+                "success": True,
+                "market": "美股",
+                "symbol": symbol.upper(),
+                "data_source": "Yahoo Finance（yfinance）",
+            }
+            if isinstance(cal, dict):
+                result["earnings_date"] = str(cal.get('Earnings Date', ''))
+                result["eps_estimate"] = cal.get('Earnings Average')
+                result["revenue_estimate"] = cal.get('Revenue Average')
+            else:
+                # DataFrame
+                result["raw"] = cal.to_dict() if hasattr(cal, 'to_dict') else str(cal)
+            return result
+        except Exception as e:
+            return {"success": False, "error": f"获取失败: {e}"}
+
+    return {"success": False, "error": f"未知 market: {market}"}
+
+
+# ─── Tool 16: 个股公告（巨潮 / SEC EDGAR）──────────────
+def stock_announcements(symbol: str, days: int = 30) -> dict:
+    """
+    个股近期公告。
+    A 股：巨潮资讯网（AKShare）
+    美股：SEC EDGAR（直接 HTTP）
+    """
+    market = _detect_market(symbol)
+
+    if market == "A":
+        if not _AKSHARE_AVAILABLE:
+            return {"success": False, "error": "需要 AKShare"}
+        try:
+            s = symbol.replace(".SS", "").replace(".SH", "").replace(".SZ", "")
+            df = _ak.stock_zh_a_disclosure_report_cninfo(symbol=s, market='沪深京')
+            df = df.head(int(days))
+            items = []
+            for _, r in df.iterrows():
+                items.append({
+                    "date":  str(r.get('公告时间', '')),
+                    "title": str(r.get('公告标题', '')),
+                    "link":  str(r.get('公告链接', '')),
+                })
+            return {
+                "success": True,
+                "symbol": s,
+                "market": "A股",
+                "count": len(items),
+                "items": items,
+                "data_source": "巨潮资讯网（AKShare）",
+            }
+        except Exception as e:
+            return {"success": False, "error": f"巨潮获取失败: {e}"}
+
+    elif market == "US":
+        # SEC EDGAR full-text search API
+        try:
+            s = symbol.upper().replace(".US", "")
+            url = (f"https://efts.sec.gov/LATEST/search-index?"
+                   f"q=%22{s}%22&dateRange=custom&forms=10-K,10-Q,8-K"
+                   f"&startdt={(datetime.date.today() - datetime.timedelta(days=days)).strftime('%Y-%m-%d')}"
+                   f"&enddt={datetime.date.today().strftime('%Y-%m-%d')}")
+            req = urllib.request.Request(url, headers={
+                "User-Agent": "QuantAgent research@example.com",
+            })
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            hits = data.get("hits", {}).get("hits", [])[:int(days)]
+            items = []
+            for h in hits:
+                src = h.get("_source", {})
+                items.append({
+                    "date":  src.get("file_date"),
+                    "type":  src.get("form"),
+                    "title": src.get("display_names", [s])[0],
+                    "link":  f"https://www.sec.gov/Archives/edgar/data/{src.get('cik')}/{h.get('_id', '')}",
+                })
+            return {
+                "success": True,
+                "symbol": s,
+                "market": "美股",
+                "count": len(items),
+                "items": items,
+                "data_source": "SEC EDGAR",
+            }
+        except Exception as e:
+            return {"success": False, "error": f"SEC 获取失败: {e}"}
+
+    return {"success": False,
+            "error": f"未识别市场: {symbol}",
+            "hint": "支持 A股(600519) / 美股(AAPL)"}
+
+
+# ─── Tool 17: 持仓追踪（按设备隔离）────────────────────
+def _portfolio_key(device_id: str) -> str:
+    return f"quant:portfolio:{device_id or 'default'}"
+
+
+def portfolio_manage(action: str,
+                      device_id: str = "default",
+                      holdings: list = None,
+                      symbol: str = None) -> dict:
+    """
+    持仓管理。
+    action: 'set'   全量覆盖持仓
+            'add'   加单只
+            'remove' 删单只
+            'list'  查看
+            'summary' 含估值的汇总（自动拉行情）
+    holdings (set 用): [{"symbol": "600519", "qty": 100, "cost": 1600}]
+    """
+    key = _portfolio_key(device_id)
+    holdings_cur = cache.get(key) or []
+
+    if action == "list":
+        return {"success": True, "device_id": device_id,
+                "count": len(holdings_cur), "holdings": holdings_cur}
+
+    if action == "set":
+        if not isinstance(holdings, list):
+            return {"success": False, "error": "set 需提供 holdings 列表"}
+        clean = [{"symbol": str(h.get("symbol", "")).upper(),
+                  "qty": float(h.get("qty", 0)),
+                  "cost": float(h.get("cost", 0))} for h in holdings if h.get("symbol")]
+        cache.set(key, clean, ttl=86400 * 30)
+        return {"success": True, "message": f"已保存 {len(clean)} 只持仓",
+                "holdings": clean}
+
+    if action == "add":
+        if not symbol:
+            return {"success": False, "error": "add 需提供 symbol"}
+        new_h = {"symbol": symbol.upper(),
+                 "qty": float((holdings and holdings[0] and holdings[0].get('qty', 0)) or 0),
+                 "cost": float((holdings and holdings[0] and holdings[0].get('cost', 0)) or 0)}
+        holdings_cur = [h for h in holdings_cur if h["symbol"] != symbol.upper()]
+        holdings_cur.append(new_h)
+        cache.set(key, holdings_cur, ttl=86400 * 30)
+        return {"success": True, "message": f"已加入/更新 {symbol}",
+                "holdings": holdings_cur}
+
+    if action == "remove":
+        if not symbol:
+            return {"success": False, "error": "remove 需提供 symbol"}
+        before = len(holdings_cur)
+        holdings_cur = [h for h in holdings_cur if h["symbol"] != symbol.upper()]
+        cache.set(key, holdings_cur, ttl=86400 * 30)
+        return {"success": True,
+                "message": f"已删除 {symbol}（影响 {before - len(holdings_cur)} 行）",
+                "holdings": holdings_cur}
+
+    if action == "summary":
+        if not holdings_cur:
+            return {"success": True, "empty": True,
+                    "message": "持仓为空。先用 action='set' 导入持仓"}
+        total_cost = 0
+        total_value = 0
+        details = []
+        for h in holdings_cur:
+            q = market_quote(h["symbol"])
+            price = q.get("price", 0) if q.get("success") else 0
+            cost_total = h["cost"] * h["qty"]
+            value_total = price * h["qty"]
+            pnl = value_total - cost_total
+            pnl_pct = (pnl / cost_total * 100) if cost_total > 0 else 0
+            total_cost += cost_total
+            total_value += value_total
+            details.append({
+                "symbol": h["symbol"],
+                "qty": h["qty"],
+                "cost": h["cost"],
+                "current_price": price,
+                "value": round(value_total, 2),
+                "pnl": round(pnl, 2),
+                "pnl_pct": round(pnl_pct, 2),
+            })
+        total_pnl = total_value - total_cost
+        return {
+            "success": True,
+            "total_holdings": len(details),
+            "total_cost": round(total_cost, 2),
+            "total_value": round(total_value, 2),
+            "total_pnl": round(total_pnl, 2),
+            "total_pnl_pct": round(total_pnl / total_cost * 100, 2) if total_cost > 0 else 0,
+            "holdings": details,
+        }
+
+    return {"success": False, "error": f"未知 action: {action}",
+            "valid_actions": ["set", "add", "remove", "list", "summary"]}
+
+
+# ─── Tool 18: 价格告警 CRUD（执行触发由后台任务负责）────
+def _alert_key(device_id: str) -> str:
+    return f"quant:alert:{device_id or 'default'}"
+
+
+def alert_manage(action: str,
+                  device_id: str = "default",
+                  symbol: str = None,
+                  condition: str = None,
+                  channel: str = "log",
+                  alert_id: str = None) -> dict:
+    """
+    告警管理。后台 APScheduler 会定时扫描已触发的告警。
+    action: 'create' / 'list' / 'delete'
+    condition 示例: 'price>=1500'  / 'change_pct<=-3'
+    channel: 'log'（仅记录，演示用）/ 'webhook:https://...'
+    """
+    key = _alert_key(device_id)
+    alerts = cache.get(key) or []
+
+    if action == "list":
+        return {"success": True, "count": len(alerts), "alerts": alerts}
+
+    if action == "create":
+        if not symbol or not condition:
+            return {"success": False,
+                    "error": "create 需 symbol + condition",
+                    "example": "create symbol='600519' condition='price>=1500'"}
+        aid = str(int(_time.time() * 1000))
+        new_alert = {
+            "id": aid,
+            "symbol": symbol.upper(),
+            "condition": condition,
+            "channel": channel,
+            "created_at": datetime.datetime.now().isoformat(timespec="seconds"),
+            "triggered": False,
+        }
+        alerts.append(new_alert)
+        cache.set(key, alerts, ttl=86400 * 30)
+        return {"success": True,
+                "message": f"已创建告警 #{aid}",
+                "alert": new_alert,
+                "note": "后台调度器尚未启用 —— 需手动运行 scripts/alert_worker.py 才会触发"}
+
+    if action == "delete":
+        if not alert_id:
+            return {"success": False, "error": "delete 需 alert_id"}
+        before = len(alerts)
+        alerts = [a for a in alerts if a["id"] != alert_id]
+        cache.set(key, alerts, ttl=86400 * 30)
+        return {"success": True,
+                "message": f"已删除告警（影响 {before - len(alerts)} 条）",
+                "remaining": len(alerts)}
+
+    return {"success": False, "error": f"未知 action: {action}",
+            "valid_actions": ["create", "list", "delete"]}
 
 
 # ─────────────────────────────────────────────
@@ -2386,6 +3253,11 @@ TOOL_REGISTRY = {
     "implied_volatility":   implied_volatility,
     "html_chart_render":    html_chart_render,
     "historical_prices":    historical_prices,
+    "economic_calendar":    economic_calendar,
+    "earnings_calendar":    earnings_calendar,
+    "stock_announcements":  stock_announcements,
+    "portfolio_manage":     portfolio_manage,
+    "alert_manage":         alert_manage,
 }
 
 TOOL_SCHEMAS = [
@@ -2561,6 +3433,99 @@ days 建议（自然日，工具内部会换算成交易日）：
                            "default": 60, "minimum": 5, "maximum": 500},
             },
             "required": ["symbol"],
+        }
+    },
+    {
+        "name": "economic_calendar",
+        "description": """获取未来 N 天的全球经济日历（FOMC/CPI/PMI/利率决议等）。
+返回：日期、时间、国家、事件、前值、预期值。
+适用：用户问「下周有什么重要数据」「美联储下次议息」等。""",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "days_forward": {"type": "integer", "default": 7,
+                                  "description": "未来 N 天，默认 7"},
+            },
+        }
+    },
+    {
+        "name": "earnings_calendar",
+        "description": """财报/业绩预告日历。
+A 股: market='A' + date='YYYYMMDD' → 该季度业绩预告（含预测变动幅度）
+美股: market='US' + symbol='AAPL' → 下次财报日 + EPS/营收预期
+适用：「下次特斯拉财报哪天」「茅台一季度预告变动」""",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "market": {"type": "string", "enum": ["A", "US"],
+                            "default": "A"},
+                "date":   {"type": "string",
+                           "description": "A 股用，季度报告日 YYYYMMDD"},
+                "symbol": {"type": "string",
+                           "description": "美股用，如 AAPL"},
+            },
+        }
+    },
+    {
+        "name": "stock_announcements",
+        "description": """个股近期公告。
+A 股：巨潮资讯网（年报/中报/季报/重大事项）
+美股：SEC EDGAR（10-K / 10-Q / 8-K）
+返回标题 + 日期 + 原文链接。""",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "symbol": {"type": "string"},
+                "days":   {"type": "integer", "default": 30},
+            },
+            "required": ["symbol"],
+        }
+    },
+    {
+        "name": "portfolio_manage",
+        "description": """持仓管理（按用户设备隔离）。
+action 枚举：
+  - list:    查看当前持仓
+  - set:     全量覆盖（holdings=[{symbol,qty,cost}, ...]）
+  - add:     加单只（symbol + holdings=[{qty, cost}]）
+  - remove:  删单只（symbol）
+  - summary: 估值汇总（自动拉行情算市值/盈亏）
+
+device_id 由 server 自动从 X-Device-Id 注入，工具调用时**留空即可**。""",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string",
+                            "enum": ["list", "set", "add", "remove", "summary"]},
+                "device_id": {"type": "string", "default": "default"},
+                "symbol":    {"type": "string"},
+                "holdings":  {"type": "array",
+                              "items": {"type": "object"},
+                              "description": "[{symbol, qty, cost}]"},
+            },
+            "required": ["action"],
+        }
+    },
+    {
+        "name": "alert_manage",
+        "description": """价格告警 CRUD。
+action 枚举：
+  - create:  建告警，需 symbol + condition（如 'price>=1500'/'change_pct<=-3'）
+  - list:    查看所有告警
+  - delete:  按 alert_id 删
+⚠️ 告警触发依赖后台 scheduler（脚本 scripts/alert_worker.py），尚未运行时只会创建记录。""",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "action":    {"type": "string", "enum": ["create", "list", "delete"]},
+                "device_id": {"type": "string", "default": "default"},
+                "symbol":    {"type": "string"},
+                "condition": {"type": "string",
+                              "description": "如 'price>=1500'"},
+                "channel":   {"type": "string", "default": "log"},
+                "alert_id":  {"type": "string"},
+            },
+            "required": ["action"],
         }
     },
     {

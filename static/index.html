@@ -749,14 +749,6 @@
       <div class="empty-state">
         <h2>📊 QuantAgent 量化分析助手</h2>
         <p>多因子打分 · 期权定价 · 风险评估 · 财经搜索</p>
-        <div class="examples">
-          <button class="example-btn" onclick="useExample(this)">
-            帮我分析下英伟达 NVDA，要现价行情和多因子打分，用成长股风格的权重
-          </button>
-          <button class="example-btn" onclick="useExample(this)">
-            苹果股票 213 美元，行权价 220、3个月到期的看涨期权，无风险利率 4.5%，IV 28%，给我理论价格和 Greeks
-          </button>
-        </div>
       </div>
     </div>
 
@@ -1243,7 +1235,15 @@ async function sendMessage() {
       const _r = await api('/api/sessions', { method: 'POST' });
       const _s = await _r.json();
       currentSession = _s.id;
-      // 侧边栏列表稍后随 SSE finally 阶段的 loadSessions 自然刷新
+      // 立即把标题同步到 header（与服务端逻辑一致：用户消息前 30 字）
+      const _t = (text || '附件分析');
+      const _title = _t.slice(0, 30) + (_t.length > 30 ? '...' : '');
+      try {
+        document.getElementById('chatTitle').textContent = _title;
+        document.getElementById('chatMeta').textContent = '刚创建';
+      } catch (_) {}
+      // 立即刷一次侧边栏（让用户看到新会话出现在菜单里）
+      loadSessions().catch(function(){});
     }
 
     // 2. 如果有附件，上传 + 入库
