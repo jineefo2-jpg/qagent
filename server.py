@@ -246,6 +246,9 @@ def chat(sid: str, body: ChatRequest,
 
                 elif event["type"] == "final":
                     assistant_turn["content"] = event["text"]
+                    # 服务端预渲染的 HTML（老浏览器零依赖显示用）
+                    if event.get("text_html"):
+                        assistant_turn["content_html"] = event["text_html"]
                     assistant_turn["iterations"] = event["iterations"]
 
                 elif event["type"] == "suggestions":
@@ -379,7 +382,7 @@ def index():
 def health():
     return {
         "status": "ok",
-        "sessions": len(SESSIONS),
+        "sessions": len(cache.keys("quant:session:*")),
         "time": datetime.now().isoformat(timespec="seconds"),
     }
 
@@ -393,4 +396,4 @@ if __name__ == "__main__":
     print("🚀 QuantAgent Web Server")
     print("   访问: http://localhost:5000")
     print("   API:  http://localhost:5000/docs")
-    uvicorn.run(app, host="0.0.0.0", port=8001, log_level="info")
+    uvicorn.run(app, host="0.0.0.0", port=5000, log_level="info")
