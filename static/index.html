@@ -88,7 +88,6 @@
   .session-item.active {
     background: var(--primary-dim);
     color: var(--text);
-    border-left: 2px solid var(--primary);
   }
   .session-title { flex: 1; overflow: hidden; text-overflow: ellipsis;
                     white-space: nowrap; }
@@ -336,7 +335,7 @@
     border: 1px solid var(--border);
     border-radius: 8px;
     padding: 8px;
-    align-items: flex-end;
+    align-items: center;   /* 附件按钮 + textarea + 发送按钮 垂直居中 */
   }
   .input-wrap:focus-within { border-color: var(--primary); }
   textarea {
@@ -772,6 +771,16 @@
 
 <script>
 // ════════════════════════════════════════════════════════════
+// 全局错误捕获（手机调试用，避免页面挂死）
+// ════════════════════════════════════════════════════════════
+window.addEventListener('error', (e) => {
+  console.warn('[GlobalError]', e.message, 'at', e.filename, ':', e.lineno);
+});
+window.addEventListener('unhandledrejection', (e) => {
+  console.warn('[UnhandledRejection]', e.reason);
+});
+
+// ════════════════════════════════════════════════════════════
 // 状态
 // ════════════════════════════════════════════════════════════
 let currentSession = null;
@@ -780,13 +789,22 @@ let currentAbortController = null;  // 当前请求的 AbortController
 
 // 设备 ID：本浏览器 localStorage 唯一标识，让会话不跨设备共享
 function getDeviceId() {
-  let id = localStorage.getItem('quant_device_id');
+  let id = null;
+  try {
+    id = localStorage.getItem('quant_device_id');
+  } catch (_) { /* localStorage 不可用（隐私模式）*/ }
   if (!id) {
-    // crypto.randomUUID 现代浏览器都有
-    id = (crypto.randomUUID && crypto.randomUUID())
-         || ('dev-' + Math.random().toString(36).slice(2, 14)
-                    + Date.now().toString(36));
-    localStorage.setItem('quant_device_id', id);
+    // crypto.randomUUID 在 iOS 15.4 以下不可用，做 fallback
+    try {
+      if (typeof crypto !== 'undefined' && crypto.randomUUID) {
+        id = crypto.randomUUID();
+      }
+    } catch (_) {}
+    if (!id) {
+      id = 'dev-' + Math.random().toString(36).slice(2, 14)
+                 + Date.now().toString(36);
+    }
+    try { localStorage.setItem('quant_device_id', id); } catch (_) {}
   }
   return id;
 }
@@ -803,34 +821,50 @@ async function api(url, options = {}) {
 
 // marked 配置：单换行也转 <br>，启用 GFM，所有链接新窗口打开
 if (window.marked) {
-  marked.use({
-    breaks: true,
-    gfm: true,
-    hooks: {
-      postprocess(html) {
-        // 给所有 <a> 加 target=_blank（K 线图等不会替换聊天页）
-        return html.replace(
-          /<a (?![^>]*\btarget=)/g,
-          '<a target="_blank" rel="noopener" '
-        );
+  try {
+    marked.use({
+      breaks: true,
+      gfm: true,
+      hooks: {
+        postprocess(html) {
+          // 容错：html 可能是 undefined/null（极端情况）
+          if (typeof html !== 'string') return html || '';
+          try {
+            return html.replace(
+              /<a (?![^>]*\btarget=)/g,
+              '<a target="_blank" rel="noopener" '
+            );
+          } catch (_) {
+            return html;
+          }
+        }
       }
-    }
-  });
+    });
+  } catch (e) {
+    console.warn('marked.use 配置失败:', e);
+  }
+}
+
+// 安全的 markdown 渲染封装：输入兜底为字符串，异常 fallback 到纯文本
+function safeMarkdown(text) {
+  const src = (text == null) ? '' : String(text);
+  if (!window.marked || !marked.parse) return escapeHtml(src);
+  try {
+    return marked.parse(src);
+  } catch (e) {
+    console.warn('marked.parse 失败，回退纯文本:', e);
+    return '<pre style="white-space:pre-wrap;">' + escapeHtml(src) + '</pre>';
+  }
 }
 
 // 流式期间节流渲染 markdown（避免每个 token 都重排）
 function scheduleMarkdownRender(contentDom) {
   if (contentDom._renderScheduled) return;
   contentDom._renderScheduled = true;
-  // 80ms 节流：人眼感受流畅，性能可控
   setTimeout(() => {
     contentDom._renderScheduled = false;
-    if (!contentDom._streaming) return;  // 已结束就不渲染了
-    try {
-      contentDom.innerHTML = marked.parse(contentDom._raw || '');
-    } catch (e) {
-      contentDom.textContent = contentDom._raw || '';
-    }
+    if (!contentDom._streaming) return;
+    contentDom.innerHTML = safeMarkdown(contentDom._raw);
   }, 80);
 }
 
@@ -933,7 +967,8 @@ function renderMessage(m) {
     : '<span class="badge">Q</span> QuantAgent';
 
   // 只展示真失败的工具调用；静默错误不显示红卡
-  const SILENT_ERROR_TOOLS = new Set(['factor_score', 'html_chart_render', 'historical_prices']);
+  const SILENT_ERROR_TOOLS = new Set(['factor_score', 'html_chart_render',
+                                       'historical_prices', 'market_news_search']);
   let toolsHtml = '';
   if (m.tool_calls && m.tool_calls.length) {
     toolsHtml = m.tool_calls
@@ -948,6 +983,7 @@ function renderMessage(m) {
     const NOTICES = {
       'html_chart_render': '此处图表未能加载，您可以让我重新生成或换种方式分析',
       'historical_prices': '历史 K 线数据未能获取，请稍后重试或换个代码',
+      'market_news_search': '未能检索到相关新闻，可换个关键词或股票代码再试',
     };
     const shownTools = new Set();
     chartFailHtml = m.tool_calls
@@ -960,7 +996,7 @@ function renderMessage(m) {
   }
 
   const content = m.role === 'assistant'
-    ? marked.parse(m.content || '')
+    ? safeMarkdown(m.content)
     : escapeHtml(m.content);
 
   // 用户消息可携带附件（来自上传）
@@ -1165,7 +1201,7 @@ async function sendMessage() {
     }
 
     if (finalContent) {
-      contentDom.innerHTML = marked.parse(finalContent);
+      contentDom.innerHTML = safeMarkdown(finalContent);
     }
 
   } catch (e) {
@@ -1236,7 +1272,8 @@ function handleEvent(event, assistantDom, contentDom, tracesByName) {
   else if (event.type === 'tool_result') {
     const label = TOOL_LABELS[event.name] || event.name;
     // 这些"错误"是引导/部分失败，不该当失败展示红卡
-    const SILENT_ERRORS = new Set(['factor_score', 'html_chart_render', 'historical_prices']);
+    const SILENT_ERRORS = new Set(['factor_score', 'html_chart_render',
+                                     'historical_prices', 'market_news_search']);
     if (event.is_error && !SILENT_ERRORS.has(event.name)) {
       // 真失败 → 显示错误卡片，状态变红
       const pending = Object.values(tracesByName).find(p => p.name === event.name) || {};
@@ -1256,6 +1293,7 @@ function handleEvent(event, assistantDom, contentDom, tracesByName) {
       const NOTICES = {
         'html_chart_render': '此处图表未能加载，您可以让我重新生成或换种方式分析',
         'historical_prices': '历史 K 线数据未能获取，请稍后重试或换个代码',
+        'market_news_search': '未能检索到相关新闻，可换个关键词或股票代码再试',
       };
       const noticeText = NOTICES[event.name];
       if (noticeText && !assistantDom.querySelector(`.silent-notice[data-tool="${event.name}"]`)) {
@@ -1278,7 +1316,7 @@ function handleEvent(event, assistantDom, contentDom, tracesByName) {
     contentDom._streaming = false;
     contentDom._raw = '';
     contentDom._renderScheduled = false;
-    contentDom.innerHTML = marked.parse(event.text);
+    contentDom.innerHTML = safeMarkdown(event.text);
     assistantDom.querySelectorAll('.thought').forEach(t => t.remove());
     const statusDom = assistantDom.querySelector('.msg-status');
     if (statusDom) statusDom.remove();

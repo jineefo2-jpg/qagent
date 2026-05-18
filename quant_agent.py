@@ -1258,9 +1258,16 @@ def market_news_search(query: str, max_results: int = 5) -> dict:
     all_news = []
     quotes = []
     sources_tried = []
-    has_chinese = bool(re.search(r'[一-鿿]', primary))
 
-    # ── 多源并发请求（取代之前的串行调用，~6s 降到 ~2s）──
+    # ── 中文意图检测：基于「原始 query」而不是收敛后的 primary ──
+    has_chinese_query = bool(re.search(r'[一-鿿]', query))
+    # 提取 query 中的中文关键词喂给国内源（如「ETF 市场 2025」→「ETF 市场」）
+    chinese_parts = re.findall(r'[一-鿿]+', query)
+    chinese_term = ' '.join(chinese_parts) if chinese_parts else None
+    # 国内源用中文关键词，否则回退到 primary（ticker）
+    domestic_term = chinese_term if chinese_term else primary
+
+    # ── 多源并发请求 ──
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     tasks = {}
@@ -1273,21 +1280,20 @@ def market_news_search(query: str, max_results: int = 5) -> dict:
             tasks["Yahoo RSS"] = ex.submit(_news_yahoo_rss, primary, max_results)
 
         # 3. Google News RSS（全球免费，任意关键词都好用）
-        #    A 股不调（中文支持差），其他都加入
         if market in ("US", "HK", "unknown"):
             tasks["Google News"] = ex.submit(_news_google_rss, primary, max_results)
 
-        # 4. 东方财富（A 股 / 港股 / 中文主题）
-        if market in ("A", "HK", "unknown"):
-            tasks["东方财富"] = ex.submit(_news_eastmoney, primary, max_results)
+        # 4. 东方财富（A 股 / 港股 / 中文 query）—— 不再受 market 局限
+        if market in ("A", "HK", "unknown") or has_chinese_query:
+            tasks["东方财富"] = ex.submit(_news_eastmoney, domestic_term, max_results)
 
         # 5. Finnhub（需 key，美股/港股深度）
         if FINNHUB_API_KEY and market in ("US", "HK"):
             tasks["Finnhub"] = ex.submit(_news_finnhub, primary, max_results)
 
-        # 6. AKShare（A 股或中文主题）
-        if _AKSHARE_AVAILABLE and (market == "A" or has_chinese):
-            tasks["AKShare"] = ex.submit(_news_akshare, primary, max_results)
+        # 6. AKShare（A 股 OR 中文 query，喂中文关键词）
+        if _AKSHARE_AVAILABLE and (market == "A" or has_chinese_query):
+            tasks["AKShare"] = ex.submit(_news_akshare, domestic_term, max_results)
 
         # 收集结果（带超时保护，单源不超过 10 秒）
         for name, fut in tasks.items():
