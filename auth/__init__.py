@@ -14,6 +14,11 @@ from .sessions import (
 )
 from .deps import current_user, require_user
 from .oauth import oauth_client, configured_providers
+from .email_login import (
+    is_email_login_enabled,
+    request_code as email_request_code,
+    verify_code as email_verify_code,
+)
 
 __all__ = [
     "User", "get_user", "upsert_user",
@@ -21,4 +26,5 @@ __all__ = [
     "COOKIE_NAME", "COOKIE_MAX_AGE",
     "current_user", "require_user",
     "oauth_client", "configured_providers",
+    "is_email_login_enabled", "email_request_code", "email_verify_code",
 ]

@@ -1233,11 +1233,49 @@
         </span>
         使用 GitHub 登录
       </a>
+      <!-- 邮箱登录入口（点开后切到下方 emailLoginPanel） -->
+      <button class="login-provider-btn" id="loginEmailBtn"
+              style="display:none;" onclick="showEmailLoginPanel()">
+        <span class="icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M20 4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2zm0 4-8 5-8-5V6l8 5 8-5v2z"/></svg>
+        </span>
+        使用邮箱 + 验证码登录
+      </button>
       <div class="login-disabled-hint" id="loginDisabledHint" style="display:none;">
-        ⚠️ 服务端未配置任何 OAuth 提供方<br>请联系管理员
+        ⚠️ 服务端未配置任何登录方式<br>请联系管理员
       </div>
     </div>
-    <button class="close-btn" onclick="hideLoginModal()">取消</button>
+
+    <!-- 邮箱登录面板（默认隐藏） -->
+    <div id="emailLoginPanel" style="display:none;">
+      <div style="display:flex;gap:6px;margin-bottom:8px;">
+        <input id="emailInput" type="email" placeholder="邮箱地址"
+               style="flex:1;padding:8px 10px;border:1px solid var(--border);
+                      border-radius:6px;background:var(--bg);color:var(--text);
+                      font-size:13px;outline:none;">
+        <button id="sendCodeBtn" onclick="sendEmailCode()"
+                style="padding:0 12px;border:1px solid var(--border);
+                       background:var(--bg);color:var(--text);
+                       border-radius:6px;cursor:pointer;font-size:12px;
+                       white-space:nowrap;">发送验证码</button>
+      </div>
+      <input id="codeInput" type="text" inputmode="numeric"
+             pattern="[0-9]*" maxlength="6" placeholder="6 位验证码"
+             style="width:100%;padding:8px 10px;border:1px solid var(--border);
+                    border-radius:6px;background:var(--bg);color:var(--text);
+                    font-size:14px;letter-spacing:4px;outline:none;
+                    margin-bottom:8px;box-sizing:border-box;">
+      <button onclick="verifyEmailCode()"
+              style="width:100%;padding:10px;background:#2563eb;color:#fff;
+                     border:none;border-radius:6px;cursor:pointer;font-size:14px;
+                     font-weight:500;">登录</button>
+      <div id="emailLoginMsg" style="margin-top:8px;font-size:12px;min-height:18px;"></div>
+      <button class="close-btn" onclick="hideEmailLoginPanel()"
+              style="margin-top:4px;">← 返回</button>
+    </div>
+
+    <button class="close-btn" id="loginCloseBtn"
+            onclick="hideLoginModal()">取消</button>
   </div>
 </div>
 
@@ -1355,13 +1393,124 @@ function showLoginModal() {
     AUTH_PROVIDERS.indexOf('google') >= 0 ? '' : 'none';
   document.getElementById('loginGithubBtn').style.display =
     AUTH_PROVIDERS.indexOf('github') >= 0 ? '' : 'none';
+  document.getElementById('loginEmailBtn').style.display =
+    AUTH_PROVIDERS.indexOf('email') >= 0 ? '' : 'none';
   document.getElementById('loginDisabledHint').style.display =
     hasAny ? 'none' : '';
+  // 默认显示按钮区，隐藏邮箱面板
+  hideEmailLoginPanel();
   document.getElementById('loginModalMask').classList.add('show');
 }
 
 function hideLoginModal() {
   document.getElementById('loginModalMask').classList.remove('show');
+  hideEmailLoginPanel();
+}
+
+// ────────── 邮箱登录子面板 ──────────
+
+function showEmailLoginPanel() {
+  document.getElementById('loginBtnsArea').style.display = 'none';
+  document.getElementById('emailLoginPanel').style.display = '';
+  document.getElementById('loginCloseBtn').style.display = 'none';
+  // 自动聚焦
+  setTimeout(function () {
+    var el = document.getElementById('emailInput');
+    if (el) el.focus();
+  }, 50);
+}
+
+function hideEmailLoginPanel() {
+  document.getElementById('loginBtnsArea').style.display = '';
+  document.getElementById('emailLoginPanel').style.display = 'none';
+  document.getElementById('loginCloseBtn').style.display = '';
+  document.getElementById('emailLoginMsg').textContent = '';
+}
+
+function _setEmailMsg(text, ok) {
+  var el = document.getElementById('emailLoginMsg');
+  if (!el) return;
+  el.textContent = text || '';
+  el.style.color = ok ? '#4ade80' : '#f87171';
+}
+
+var _codeCooldownTimer = null;
+function _startCodeCooldown(seconds) {
+  var btn = document.getElementById('sendCodeBtn');
+  if (!btn) return;
+  var remain = seconds;
+  btn.disabled = true;
+  btn.textContent = remain + 's 后重发';
+  if (_codeCooldownTimer) clearInterval(_codeCooldownTimer);
+  _codeCooldownTimer = setInterval(function () {
+    remain -= 1;
+    if (remain <= 0) {
+      clearInterval(_codeCooldownTimer);
+      _codeCooldownTimer = null;
+      btn.disabled = false;
+      btn.textContent = '发送验证码';
+    } else {
+      btn.textContent = remain + 's 后重发';
+    }
+  }, 1000);
+}
+
+async function sendEmailCode() {
+  var email = (document.getElementById('emailInput').value || '').trim();
+  if (!email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+    _setEmailMsg('请输入正确的邮箱地址', false);
+    return;
+  }
+  _setEmailMsg('发送中...', true);
+  try {
+    var r = await api('/auth/email/send_code', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: email }),
+    });
+    var d = await r.json();
+    if (d && d.success) {
+      _setEmailMsg(d.message || '验证码已发送，请查收邮箱', true);
+      _startCodeCooldown(60);
+      // 自动聚焦到验证码输入框
+      setTimeout(function () {
+        var el = document.getElementById('codeInput');
+        if (el) el.focus();
+      }, 50);
+    } else {
+      _setEmailMsg((d && d.error) || '发送失败', false);
+    }
+  } catch (e) {
+    _setEmailMsg('网络异常: ' + e.message, false);
+  }
+}
+
+async function verifyEmailCode() {
+  var email = (document.getElementById('emailInput').value || '').trim();
+  var code = (document.getElementById('codeInput').value || '').trim();
+  if (!code || !/^\d{6}$/.test(code)) {
+    _setEmailMsg('请输入 6 位数字验证码', false);
+    return;
+  }
+  _setEmailMsg('验证中...', true);
+  try {
+    var r = await api('/auth/email/verify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: email, code: code }),
+    });
+    var d = await r.json();
+    if (d && d.success) {
+      CURRENT_USER = d.user;
+      hideLoginModal();
+      renderUserArea();
+      showToast('登录成功', 'success');
+    } else {
+      _setEmailMsg((d && d.error) || '验证失败', false);
+    }
+  } catch (e) {
+    _setEmailMsg('网络异常: ' + e.message, false);
+  }
 }
 
 function renderUserArea() {

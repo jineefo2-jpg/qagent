@@ -42,6 +42,7 @@ from auth import (
     User, current_user, require_user, oauth_client, configured_providers,
     upsert_user, create_web_session, get_user_id_from_token,
     revoke_session, COOKIE_NAME, COOKIE_MAX_AGE,
+    is_email_login_enabled, email_request_code, email_verify_code,
 )
 from auth.oauth import redirect_base
 
@@ -892,8 +893,11 @@ def _email_allowed(email: str) -> bool:
 @app.get("/api/auth/providers")
 def api_auth_providers():
     """前端用：知道哪些登录按钮需要点亮"""
+    providers = list(configured_providers())
+    if is_email_login_enabled():
+        providers.append("email")
     return {
-        "providers": configured_providers(),
+        "providers": providers,
         "whitelist_enabled": bool(ALLOWED_EMAILS),
     }
 
@@ -903,6 +907,61 @@ def api_me(user: Optional[User] = Depends(current_user)):
     if user is None:
         raise HTTPException(401, "未登录")
     return user.to_public_dict()
+
+
+class EmailCodeRequest(BaseModel):
+    email: str
+
+
+class EmailVerifyRequest(BaseModel):
+    email: str
+    code: str
+
+
+@app.post("/auth/email/send_code")
+def auth_email_send_code(body: EmailCodeRequest):
+    """发送邮箱验证码"""
+    ok, msg = email_request_code(body.email)
+    if not ok:
+        return {"success": False, "error": msg}
+    return {"success": True, "message": msg}
+
+
+@app.post("/auth/email/verify")
+def auth_email_verify(body: EmailVerifyRequest):
+    """校验验证码 → 通过则签 cookie"""
+    if not _email_allowed(body.email):
+        return {"success": False, "error": "该邮箱未被授权登录"}
+    ok, msg = email_verify_code(body.email, body.code)
+    if not ok:
+        return {"success": False, "error": msg}
+
+    # 通过：建/更新用户
+    email = body.email.strip().lower()
+    user = upsert_user(
+        provider="email",
+        provider_sub=email,
+        email=email,
+        name=email.split("@")[0],
+        avatar_url="",
+    )
+    web_token = create_web_session(user.user_id)
+
+    from fastapi.responses import JSONResponse
+    r = JSONResponse({
+        "success": True,
+        "user": user.to_public_dict(),
+    })
+    r.set_cookie(
+        key=COOKIE_NAME,
+        value=web_token,
+        max_age=COOKIE_MAX_AGE,
+        httponly=True,
+        samesite="lax",
+        secure=_os.getenv("OAUTH_COOKIE_SECURE", "").lower() in ("1", "true"),
+        path="/",
+    )
+    return r
 
 
 @app.get("/auth/{provider}/login")
