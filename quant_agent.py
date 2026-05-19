@@ -777,6 +777,114 @@ def _fetch_kline_df(s: str, days: int = 120):
         return None
 
 
+def _compute_factors_akshare_us(symbol: str):
+    """
+    用 AKShare 拉美股财务（东方财富，国内服务器畅通）+ 历史 K 线 算 5 因子。
+    作为 yfinance 失败时的兜底（Yahoo 限流场景）。
+    """
+    if not _AKSHARE_AVAILABLE:
+        return None
+
+    s = symbol.upper().replace(".US", "")
+    cache_key = f"quant:factor:ak_us:{s}"
+    cached = cache.get(cache_key)
+    if cached:
+        return cached
+
+    factors = {}
+    raw = {}
+
+    # 1. 拉财报（东方财富美股财务分析）
+    try:
+        df = _ak.stock_financial_us_analysis_indicator_em(symbol=s,
+                                                           indicator='年报')
+        if df is None or len(df) == 0:
+            df = None
+        else:
+            r = df.iloc[0]   # 最新一期
+
+            eps = float(r.get('BASIC_EPS', 0) or 0)
+            roe = float(r.get('ROE_AVG', 0) or 0)        # 百分比，如 101.48
+            gross_margin = float(r.get('GROSS_PROFIT_RATIO', 0) or 0)
+            net_margin = float(r.get('NET_PROFIT_RATIO', 0) or 0)
+            rev_yoy = float(r.get('OPERATE_INCOME_YOY', 0) or 0)
+            profit_yoy = float(r.get('PARENT_HOLDER_NETPROFIT_YOY', 0) or 0)
+            eps_yoy = float(r.get('BASIC_EPS_YOY', 0) or 0)
+            bps = None
+            try:
+                bps = float(r.get('BPS', 0) or 0)
+            except Exception:
+                pass
+
+            raw["report_date"] = str(r.get('REPORT_DATE', ''))[:10]
+            raw["eps"] = eps
+            raw["roe_pct"] = round(roe, 2)
+            raw["gross_margin_pct"] = round(gross_margin, 2)
+            raw["net_margin_pct"] = round(net_margin, 2)
+            raw["revenue_growth_pct"] = round(rev_yoy, 2)
+            raw["profit_growth_pct"] = round(profit_yoy, 2)
+
+            # 用 market_quote 拿现价算 PE/PB
+            try:
+                q = market_quote(symbol)
+                if q.get("success"):
+                    price = q["price"]
+                    raw["price"] = price
+                    if eps > 0:
+                        pe = price / eps
+                        raw["pe"] = round(pe, 2)
+                        factors["value"] = max(0, min(100, 100 - pe * 2))
+                    if bps and bps > 0:
+                        pb = price / bps
+                        raw["pb"] = round(pb, 2)
+                        if "value" not in factors:
+                            factors["value"] = max(0, min(100, 80 - pb * 5))
+            except Exception:
+                pass
+
+            # Quality：ROE 越高分越高（ROE 已是百分比，如 30% → 30 × 4 = 120 → clamp 100）
+            if roe > 0:
+                factors["quality"] = max(0, min(100, roe * 4))
+            elif gross_margin > 0:
+                factors["quality"] = max(0, min(100, gross_margin))
+
+            # Growth：营收 + 净利增速平均
+            avg_g = (rev_yoy + profit_yoy) / 2
+            factors["growth"] = max(0, min(100, 50 + avg_g * 1.5))
+    except Exception:
+        df = None
+
+    # 2. 用 historical_prices 算 momentum / technical
+    try:
+        hp = historical_prices(symbol, days=90)
+        if hp.get("success") and hp.get("days_returned", 0) >= 20:
+            closes = hp["close"]
+            cur = closes[-1]
+            start = closes[0]
+            ret_3m = (cur / start - 1) * 100
+            raw["return_3m_pct"] = round(ret_3m, 2)
+            factors["momentum"] = max(0, min(100, 50 + ret_3m * 1.67))
+
+            ma60 = sum(closes[-60:]) / min(60, len(closes))
+            tech_pct = (cur / ma60 - 1) * 100
+            raw["vs_ma60_pct"] = round(tech_pct, 2)
+            factors["technical"] = max(0, min(100, 50 + tech_pct * 2))
+    except Exception:
+        pass
+
+    if not factors:
+        return None
+
+    result = {
+        "factors": {k: round(v, 1) for k, v in factors.items()},
+        "raw": raw,
+        "computed_at": datetime.datetime.now().strftime('%Y-%m-%d %H:%M'),
+        "note": "AKShare 东方财富美股财务（国内畅通）+ K 线",
+    }
+    cache.set(cache_key, result, ttl=_FACTOR_CACHE_TTL)
+    return result
+
+
 def _compute_factors_yfinance(symbol: str):
     """
     用 yfinance 拉取美股/港股的真实财务数据，计算 5 因子。
@@ -1033,7 +1141,7 @@ def factor_score(symbol: str, style: str = "balanced") -> dict:
                                    "market_news_search"],
         }
 
-    # ── 按市场路由：A 股走 AKShare，美股/港股走 yfinance ──
+    # ── 按市场路由：A 股走 AKShare，美股/港股走 yfinance；yfinance 失败时美股 fallback AKShare 东财 ──
     market = _detect_market(symbol)
     real = None
     real_source = None
@@ -1043,6 +1151,10 @@ def factor_score(symbol: str, style: str = "balanced") -> dict:
     elif market in ("US", "HK"):
         real = _compute_factors_yfinance(symbol)
         real_source = "yfinance 实时计算（Yahoo 官方）"
+        # 美股 Yahoo 被风控时，回落到 AKShare 东方财富美股财务（国内畅通）
+        if not real and market == "US":
+            real = _compute_factors_akshare_us(symbol)
+            real_source = "AKShare 东方财富美股财务"
 
     if real:
         # 真因子覆盖默认值；缺失字段用中性 50 兜底
