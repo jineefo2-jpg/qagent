@@ -235,17 +235,20 @@ async def _followup_node(state: AgentState) -> dict:
 # 5. 条件路由
 # ════════════════════════════════════════════════════════════
 
-def _should_use_tools(state: AgentState) -> str:
-    """LLM 输出有 tool_calls → 走 tools；否则 → 收尾"""
-    last = state["messages"][-1] if state["messages"] else None
-    if isinstance(last, AIMessage) and getattr(last, 'tool_calls', None):
-        return "tools"
-    return "render"
-
-
 # ════════════════════════════════════════════════════════════
 # 6. 构建 Graph
 # ════════════════════════════════════════════════════════════
+
+def _should_finalize(state: AgentState) -> list:
+    """
+    LLM 输出无 tool_calls 时，并行触发 render + followup（互不依赖）。
+    LangGraph 看到 list 返回会同时执行两个节点。
+    """
+    last = state["messages"][-1] if state["messages"] else None
+    if isinstance(last, AIMessage) and getattr(last, 'tool_calls', None):
+        return ["tools"]
+    return ["render", "followup"]   # ⭐ 并行
+
 
 def _build_graph():
     builder = StateGraph(AgentState)
@@ -255,10 +258,11 @@ def _build_graph():
     builder.add_node("followup",  _followup_node)
 
     builder.set_entry_point("llm")
-    builder.add_conditional_edges("llm", _should_use_tools,
-                                   {"tools": "tools", "render": "render"})
+    # 关键：用 list 返回让 LangGraph 并行调度 render + followup
+    builder.add_conditional_edges("llm", _should_finalize,
+                                   ["tools", "render", "followup"])
     builder.add_edge("tools", "llm")
-    builder.add_edge("render", "followup")
+    builder.add_edge("render", END)
     builder.add_edge("followup", END)
     return builder.compile()
 
