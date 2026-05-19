@@ -3583,7 +3583,7 @@ def broker_account(action: str = "balance",
     """
     try:
         from brokers import get_broker, BrokerError
-        broker = get_broker("alpaca")
+        broker = get_broker()
     except Exception as e:
         return _broker_unavailable_response(f"broker 模块未就绪: {e}")
 
@@ -3662,7 +3662,7 @@ def place_order_intent(symbol: str,
     pre_check = None
     try:
         from brokers import get_broker
-        broker = get_broker("alpaca")
+        broker = get_broker()
         if broker.is_configured():
             acc = broker.get_account()
             pre_check = check_order(intent, acc, _get_request_device_id(),
@@ -3698,7 +3698,7 @@ def cancel_order(broker_order_id: str) -> dict:
     try:
         from brokers import get_broker, BrokerError
         from brokers.risk_gate import record_order_canceled
-        broker = get_broker("alpaca")
+        broker = get_broker()
     except Exception as e:
         return _broker_unavailable_response(f"broker 模块未就绪: {e}")
 

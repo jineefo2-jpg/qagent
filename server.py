@@ -86,6 +86,16 @@ def _scope_id(user: Optional[User], x_device_id: Optional[str]) -> str:
 def _is_user_authenticated(user: Optional[User]) -> bool:
     return user is not None
 
+
+def _setup_broker_context(user: Optional[User],
+                          x_device_id: Optional[str] = None):
+    """
+    在调任意 broker API 之前必须先注入 user namespace（MockAdapter 靠这个隔离用户）。
+    chat 路由里已经设过，但 broker_status/orders/positions 等独立路由也得设。
+    """
+    _set_request_device_id(_scope_id(user, x_device_id))
+    _set_request_authenticated(_is_user_authenticated(user))
+
 BASE_DIR = Path(__file__).parent
 STATIC_DIR = BASE_DIR / "static"
 
@@ -695,12 +705,14 @@ class ConfirmOrderRequest(BaseModel):
 
 
 @app.get("/api/broker/status")
-def broker_status(user: User = Depends(require_user)):
+def broker_status(x_device_id: Optional[str] = Header(None),
+                   user: User = Depends(require_user)):
     """检查 broker 是否就绪：凭证 + 连通性 + 风控当前配置"""
+    _setup_broker_context(user, x_device_id)
     try:
         from brokers import get_broker
         from brokers.risk_gate import current_config
-        broker = get_broker("alpaca")
+        broker = get_broker()
         configured = broker.is_configured()
         account = None
         ping_ok = False
@@ -729,6 +741,7 @@ def get_order_intent(intent_id: str,
                       x_device_id: Optional[str] = Header(None),
                       user: User = Depends(require_user)):
     """前端弹窗加载意图详情 + 当前账户快照 + 预检风控"""
+    _setup_broker_context(user, x_device_id)
     device_id = _scope_id(user, x_device_id)
     try:
         from brokers.intent_store import get_intent
@@ -741,7 +754,7 @@ def get_order_intent(intent_id: str,
     if not intent:
         raise HTTPException(404, "意图不存在或已过期（5 分钟超时）")
 
-    broker = get_broker("alpaca")
+    broker = get_broker()
     if not broker.is_configured():
         raise HTTPException(400, "Alpaca 凭证未配置")
 
@@ -766,6 +779,7 @@ def confirm_order(body: ConfirmOrderRequest,
     用户在弹窗点"确认下单"后调用。
     流程：pop 意图 → 风控 → 真实下单 → 返回订单状态
     """
+    _setup_broker_context(user, x_device_id)
     device_id = _scope_id(user, x_device_id)
     try:
         from brokers.intent_store import pop_intent, save_intent
@@ -778,7 +792,7 @@ def confirm_order(body: ConfirmOrderRequest,
     if not intent:
         raise HTTPException(404, "意图不存在或已过期，请让 Agent 重新生成")
 
-    broker = get_broker("alpaca")
+    broker = get_broker()
     if not broker.is_configured():
         raise HTTPException(400, "Alpaca 凭证未配置")
 
@@ -822,11 +836,12 @@ def confirm_order(body: ConfirmOrderRequest,
 def api_cancel_order(broker_order_id: str,
                       x_device_id: Optional[str] = Header(None),
                       user: User = Depends(require_user)):
+    _setup_broker_context(user, x_device_id)
     device_id = _scope_id(user, x_device_id)
     try:
         from brokers import get_broker, BrokerError
         from brokers.risk_gate import record_order_canceled
-        broker = get_broker("alpaca")
+        broker = get_broker()
         if not broker.is_configured():
             raise HTTPException(400, "Alpaca 凭证未配置")
         broker.cancel_order(broker_order_id)
@@ -842,10 +857,12 @@ def api_cancel_order(broker_order_id: str,
 
 @app.get("/api/orders")
 def list_orders(status: str = "open", limit: int = 50,
+                 x_device_id: Optional[str] = Header(None),
                  user: User = Depends(require_user)):
+    _setup_broker_context(user, x_device_id)
     try:
         from brokers import get_broker, BrokerError
-        broker = get_broker("alpaca")
+        broker = get_broker()
         if not broker.is_configured():
             return {"success": False, "error": "Alpaca 凭证未配置"}
         orders = broker.list_orders(status=status, limit=limit)
@@ -856,16 +873,41 @@ def list_orders(status: str = "open", limit: int = 50,
 
 
 @app.get("/api/positions")
-def list_positions_api(user: User = Depends(require_user)):
+def list_positions_api(x_device_id: Optional[str] = Header(None),
+                       user: User = Depends(require_user)):
+    _setup_broker_context(user, x_device_id)
     try:
         from brokers import get_broker, BrokerError
-        broker = get_broker("alpaca")
+        broker = get_broker()
         if not broker.is_configured():
             return {"success": False, "error": "Alpaca 凭证未配置"}
         positions = broker.list_positions()
         return {"success": True, "count": len(positions),
                  "positions": [p.to_dict() for p in positions]}
     except BrokerError as e:
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/api/broker/reset_account")
+def reset_account(x_device_id: Optional[str] = Header(None),
+                   user: User = Depends(require_user)):
+    """
+    重置当前用户的虚拟账户：清空所有持仓/订单，现金归零再回到 $100,000。
+    仅 mock 模式可用。
+    """
+    _setup_broker_context(user, x_device_id)
+    try:
+        from brokers import get_broker
+        broker = get_broker()
+        if broker.name != "mock-paper":
+            return {"success": False,
+                    "error": f"当前 broker={broker.name} 不支持重置（只有 mock 模式可重置）"}
+        # MockAdapter 上有 reset_account 方法
+        if hasattr(broker, "reset_account"):
+            broker.reset_account()
+            return {"success": True, "message": "虚拟账户已重置"}
+        return {"success": False, "error": "当前 broker 不支持重置"}
+    except Exception as e:
         return {"success": False, "error": str(e)}
 
 
