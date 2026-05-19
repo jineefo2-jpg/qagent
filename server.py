@@ -21,8 +21,22 @@ from fastapi.responses import StreamingResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from quant_agent import stream_quant_agent
+import os as _os
+import inspect as _inspect
 from cache import cache  # Redis 或内存缓存
+
+# 框架切换：USE_LANGGRAPH=1 启用 LangGraph 版主循环
+_USE_LG = _os.getenv("USE_LANGGRAPH", "").strip().lower() in ("1", "true", "yes", "on")
+
+if _USE_LG:
+    from quant_agent_lg import stream_quant_agent_lg as stream_quant_agent
+    print("🌐 Agent 主循环: LangGraph 版（quant_agent_lg，async token 流式）")
+else:
+    from quant_agent import stream_quant_agent
+    print("⚙️  Agent 主循环: 原生 ReAct 版（quant_agent）")
+
+# 检测 stream_quant_agent 是同步还是异步 generator
+_IS_ASYNC_AGENT = _inspect.isasyncgenfunction(stream_quant_agent)
 
 # 当 X-Device-Id 缺失时的兜底（不应该出现，前端总会发）
 _DEFAULT_DEVICE = "default"
@@ -216,6 +230,54 @@ def chat(sid: str, body: ChatRequest,
         "iterations": 0,
     }
 
+    def _process_event(event):
+        """把 stream 事件归档到 assistant_turn，并返回要 yield 的 SSE 字符串"""
+        if event["type"] == "thought":
+            assistant_turn["thoughts"].append({
+                "iteration": event.get("iteration", 0),
+                "text": event["text"],
+            })
+        elif event["type"] == "tool_call":
+            assistant_turn["tool_calls"].append({
+                "name": event["name"],
+                "input": event["input"],
+                "id": event["id"],
+                "result": None,
+                "is_error": False,
+            })
+        elif event["type"] == "tool_result":
+            for tc in reversed(assistant_turn["tool_calls"]):
+                if (tc["name"] == event["name"]
+                        and tc["result"] is None):
+                    tc["result"] = event["result"]
+                    tc["is_error"] = event["is_error"]
+                    break
+        elif event["type"] == "final":
+            assistant_turn["content"] = event["text"]
+            if event.get("text_html"):
+                assistant_turn["content_html"] = event["text_html"]
+            assistant_turn["iterations"] = event.get("iterations", 0)
+        elif event["type"] == "suggestions":
+            assistant_turn["suggestions"] = event["items"]
+        elif event["type"] == "error":
+            assistant_turn["content"] = f"❌ {event['error']}"
+        return f"data: {json.dumps(event, ensure_ascii=False, default=str)}\n\n"
+
+    async def event_stream_async():
+        try:
+            async for event in stream_quant_agent(session.messages):
+                yield _process_event(event)
+            session.display.append(assistant_turn)
+            save_session(device_id, session)
+            yield f"data: {json.dumps({'type': 'done'})}\n\n"
+        except Exception as e:
+            try:
+                save_session(device_id, session)
+            except Exception:
+                pass
+            err = {"type": "error", "error": f"服务端异常: {e}"}
+            yield f"data: {json.dumps(err, ensure_ascii=False)}\n\n"
+
     def event_stream():
         try:
             for event in stream_quant_agent(session.messages):
@@ -275,8 +337,9 @@ def chat(sid: str, body: ChatRequest,
             err = {"type": "error", "error": f"服务端异常: {e}"}
             yield f"data: {json.dumps(err, ensure_ascii=False)}\n\n"
 
+    # 按 stream_quant_agent 是 async 还是 sync 选用对应包装
     return StreamingResponse(
-        event_stream(),
+        event_stream_async() if _IS_ASYNC_AGENT else event_stream(),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
