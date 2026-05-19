@@ -2373,6 +2373,83 @@ def economic_calendar(days_forward: int = 7) -> dict:
 
 
 # ─── Tool 15: 财报日历（业绩预告 + 美股财报日 ）────────
+def _earnings_investing(days_forward: int = 7,
+                         country_ids: list = None) -> dict:
+    """
+    Investing.com 财报日历（POST 端点，无 Cloudflare）。
+    返回未来 N 天的财报披露列表（美股最稳）。
+    """
+    try:
+        today = datetime.date.today()
+        end = today + datetime.timedelta(days=int(days_forward))
+
+        cids = country_ids or [5]  # 默认美国
+        form = [("country[]", str(c)) for c in cids]
+        form.extend([
+            ("dateFrom", today.strftime("%Y-%m-%d")),
+            ("dateTo",   end.strftime("%Y-%m-%d")),
+            ("currentTab", "custom"),
+            ("limit_from", "0"),
+        ])
+        body = urllib.parse.urlencode(form).encode("utf-8")
+
+        url = "https://www.investing.com/earnings-calendar/Service/getCalendarFilteredData"
+        req = urllib.request.Request(url, data=body, method="POST",
+            headers={
+                "User-Agent": ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                                "AppleWebKit/537.36 Chrome/120.0"),
+                "X-Requested-With": "XMLHttpRequest",
+                "Referer": "https://www.investing.com/earnings-calendar/",
+                "Content-Type": "application/x-www-form-urlencoded",
+            })
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        html = data.get("data", "")
+        if not html:
+            return None
+
+        from html import unescape
+        items = []
+        current_date = ""
+        for m in re.finditer(
+            r'<tr[^>]*class="[^"]*theDay[^"]*"[^>]*>([^<]+)</td></tr>'
+            r'|<tr[^>]*event_timestamp="([^"]+)"[^>]*>(.*?)</tr>'
+            r'|<tr[^>]*>\s*<td class="flag">(.*?)</tr>',
+            html, re.DOTALL,
+        ):
+            if m.group(1):
+                current_date = unescape(m.group(1)).strip()
+                continue
+            row_html = m.group(3) or m.group(4) or ""
+            country = re.search(r'title="([^"]+)" class="ceFlags', row_html)
+            symbol = re.search(r'pid-\d+-[^"]*"[^>]*>([^<]+)<', row_html) \
+                     or re.search(r'class="earnCalCompany[^"]*"[^>]*>([^<]+)<', row_html)
+            eps = re.search(r'class="(?:eps|earnCalEps)[^"]*"[^>]*>([^<]+)<', row_html)
+            eps_fore = re.search(r'class="(?:epsForecast|earnCalEpsFore)[^"]*"[^>]*>([^<]+)<', row_html)
+            rev = re.search(r'class="(?:rev|earnCalRev)[^"]*"[^>]*>([^<]+)<', row_html)
+            rev_fore = re.search(r'class="(?:revenueForecast|earnCalRevFore)[^"]*"[^>]*>([^<]+)<', row_html)
+
+            items.append({
+                "date":     current_date,
+                "country":  unescape((country.group(1) if country else "")).strip(),
+                "symbol":   unescape((symbol.group(1) if symbol else "")).strip(),
+                "eps_actual":   unescape((eps.group(1) if eps else "")).strip(),
+                "eps_forecast": unescape((eps_fore.group(1) if eps_fore else "")).strip(),
+                "revenue_actual":   unescape((rev.group(1) if rev else "")).strip(),
+                "revenue_forecast": unescape((rev_fore.group(1) if rev_fore else "")).strip(),
+            })
+        return {
+            "success": True,
+            "from": today.strftime("%Y-%m-%d"),
+            "to": end.strftime("%Y-%m-%d"),
+            "count": len(items),
+            "items": items[:30],
+            "data_source": "Investing.com 财报日历",
+        }
+    except Exception:
+        return None
+
+
 def earnings_calendar(market: str = "A",
                        date: str = None,
                        symbol: str = None) -> dict:
@@ -2424,34 +2501,42 @@ def earnings_calendar(market: str = "A",
             return {"success": False, "error": f"获取失败: {e}"}
 
     elif market == "US":
-        if not symbol:
-            return {"success": False,
-                    "error": "美股财报日历需提供 symbol（如 AAPL）"}
-        if not _YFINANCE_AVAILABLE:
-            return {"success": False, "error": "需要 yfinance"}
-        try:
-            ticker = _yf.Ticker(symbol.upper())
-            cal = ticker.calendar
-            if cal is None or (hasattr(cal, 'empty') and cal.empty):
-                return {"success": False,
-                        "error": f"{symbol} 暂无财报日历数据"}
-            # cal 可能是 dict 或 DataFrame
-            result = {
-                "success": True,
-                "market": "美股",
-                "symbol": symbol.upper(),
-                "data_source": "Yahoo Finance（yfinance）",
-            }
-            if isinstance(cal, dict):
-                result["earnings_date"] = str(cal.get('Earnings Date', ''))
-                result["eps_estimate"] = cal.get('Earnings Average')
-                result["revenue_estimate"] = cal.get('Revenue Average')
-            else:
-                # DataFrame
-                result["raw"] = cal.to_dict() if hasattr(cal, 'to_dict') else str(cal)
-            return result
-        except Exception as e:
-            return {"success": False, "error": f"获取失败: {e}"}
+        # 单个公司：先试 yfinance；失败/想看全市场日历 → Investing.com
+        if symbol and _YFINANCE_AVAILABLE:
+            try:
+                ticker = _yf.Ticker(symbol.upper())
+                cal = ticker.calendar
+                if cal and not (hasattr(cal, 'empty') and cal.empty):
+                    result = {
+                        "success": True,
+                        "market": "美股",
+                        "symbol": symbol.upper(),
+                        "data_source": "Yahoo Finance（yfinance）",
+                    }
+                    if isinstance(cal, dict):
+                        result["earnings_date"] = str(cal.get('Earnings Date', ''))
+                        result["eps_estimate"] = cal.get('Earnings Average')
+                        result["revenue_estimate"] = cal.get('Revenue Average')
+                    else:
+                        result["raw"] = cal.to_dict() if hasattr(cal, 'to_dict') else str(cal)
+                    return result
+            except Exception:
+                pass
+
+        # 退化到 Investing.com 全市场财报日历
+        iv = _earnings_investing(days_forward=7, country_ids=[5])
+        if iv and iv.get("count", 0) > 0:
+            iv["market"] = "美股"
+            if symbol:
+                # 过滤指定 ticker
+                iv["items"] = [it for it in iv["items"]
+                                if it["symbol"].upper() == symbol.upper()]
+                iv["count"] = len(iv["items"])
+            return iv
+
+        return {"success": False,
+                "error": "yfinance 和 Investing.com 都未取到财报日历数据",
+                "hint": "可能是 Yahoo 限流 + Investing 暂时无数据，请稍后重试"}
 
     return {"success": False, "error": f"未知 market: {market}"}
 
@@ -2875,6 +2960,36 @@ def _hist_sina(symbol: str, days: int = 60) -> dict:
         return {"success": False, "error": f"新浪 K 线失败: {e}"}
 
 
+def _hist_akshare_us_daily(symbol: str, days: int) -> dict:
+    """
+    AKShare 美股日线（stock_us_daily）—— Yahoo 限流时的兜底。
+    数据从新浪拉，相对稳定且无 rate limit。
+    """
+    if not _AKSHARE_AVAILABLE:
+        return {"success": False, "error": "AKShare 未安装"}
+    s = symbol.upper().replace(".US", "")
+    try:
+        df = _ak.stock_us_daily(symbol=s, adjust='qfq')
+        if df is None or len(df) == 0:
+            return {"success": False, "error": "stock_us_daily 返回空"}
+        df = df.tail(days)
+        return {
+            "success": True,
+            "symbol": s,
+            "market": "美股",
+            "days_returned": len(df),
+            "dates":  df['date'].astype(str).tolist(),
+            "open":   [float(x) for x in df['open']],
+            "close":  [float(x) for x in df['close']],
+            "high":   [float(x) for x in df['high']],
+            "low":    [float(x) for x in df['low']],
+            "volume": [int(float(x)) if x == x else 0 for x in df['volume']],
+            "data_source": "AKShare stock_us_daily (新浪美股)",
+        }
+    except Exception as e:
+        return {"success": False, "error": f"stock_us_daily 失败: {e}"}
+
+
 def _hist_akshare(symbol: str, days: int) -> dict:
     """AKShare 拉历史 K 线（国内源最快）"""
     if not _AKSHARE_AVAILABLE:
@@ -2986,6 +3101,15 @@ def historical_prices(symbol: str, days: int = 60) -> dict:
                               "error": r4.get("error")})
         if r4.get("success"):
             result = r4
+
+    # ── 优先级 5: AKShare stock_us_daily（美股专用，新浪兜底，无 Yahoo 限流）──
+    if result is None and market == "US":
+        r5 = _hist_akshare_us_daily(symbol, days)
+        sources_tried.append({"source": "AKShare stock_us_daily",
+                              "ok": r5.get("success"),
+                              "error": r5.get("error")})
+        if r5.get("success"):
+            result = r5
 
     if result is None:
         return {

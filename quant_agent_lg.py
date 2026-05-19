@@ -118,9 +118,12 @@ import asyncio as _asyncio
 async def _llm_node(state: AgentState, config=None) -> dict:
     """
     异步流式调用 LLM。
-    每个 token chunk 通过 adispatch_custom_event 发出（需要传 config 提供 run_id 上下文），
-    astream_events 的 on_custom_event 能拿到 → 映射为 content_delta。
+    每轮开始前先 dispatch round_start，让前端清空上一轮的流式残留
+    （上一轮如果说了"我来查行情..."这种过渡话，会被最终答案覆盖）。
     """
+    # 新一轮 → 通知前端清空已累积的 streaming 缓冲
+    await adispatch_custom_event("round_start", {}, config=config)
+
     full = None
     async for chunk in _llm_with_tools.astream(state["messages"], config=config):
         full = chunk if full is None else full + chunk
@@ -368,9 +371,12 @@ async def stream_quant_agent_lg(messages: list, max_iterations: int = 15):
             name = event.get("name", "")
             data = event.get("data", {}) or {}
 
-            # ── 1. 自定义事件：token 流 / 工具调用（从节点 dispatch）──
+            # ── 1. 自定义事件：round / token / 工具调用（从节点 dispatch）──
             if kind == "on_custom_event":
-                if name == "llm_token":
+                if name == "round_start":
+                    # 新一轮 LLM 输出开始 → 前端清空 streaming 缓冲
+                    yield {"type": "content_reset"}
+                elif name == "llm_token":
                     text = (data or {}).get("text", "")
                     if text:
                         yield {

@@ -1422,8 +1422,14 @@ function setStatus(assistantDom, text, isError = false) {
 }
 
 function handleEvent(event, assistantDom, contentDom, tracesByName) {
-  if (event.type === 'content_delta') {
-    // 流式 token：累加 + 节流 markdown 渲染（避免每个 token 重排）
+  if (event.type === 'content_reset') {
+    // 新一轮 LLM 输出开始 → 清空上一轮残留（防止中间过渡话被保留）
+    contentDom._streaming = true;
+    contentDom._raw = '';
+    contentDom.innerHTML = '';
+  }
+  else if (event.type === 'content_delta') {
+    // 流式 token：累加 + 节流 markdown 渲染
     if (!contentDom._streaming) {
       contentDom._streaming = true;
       contentDom.innerHTML = '';
@@ -1500,16 +1506,20 @@ function handleEvent(event, assistantDom, contentDom, tracesByName) {
     }
   }
   else if (event.type === 'final') {
-    // 流结束 → 关掉流式标记，最终一次性渲染
+    // 流结束 → 关掉流式标记
     contentDom._streaming = false;
-    contentDom._raw = '';
     contentDom._renderScheduled = false;
-    // 优先用服务端预渲染的 HTML（兼容性最佳），否则前端再渲一遍
-    if (event.text_html && typeof event.text_html === 'string') {
-      contentDom.innerHTML = event.text_html;
-    } else {
-      contentDom.innerHTML = safeMarkdown(event.text);
+    // 优先 server 预渲染 HTML；空时保留流式累积内容（防止屏幕被清空）
+    const html = (event.text_html && typeof event.text_html === 'string'
+                   && event.text_html.trim()) ? event.text_html : '';
+    const txt = (event.text && event.text.trim()) ? event.text : '';
+    if (html) {
+      contentDom.innerHTML = html;
+    } else if (txt) {
+      contentDom.innerHTML = safeMarkdown(txt);
     }
+    // else: 保留 contentDom 当前的流式渲染（不要清空）
+    contentDom._raw = '';
     assistantDom.querySelectorAll('.thought').forEach(t => t.remove());
     const statusDom = assistantDom.querySelector('.msg-status');
     if (statusDom) statusDom.remove();
