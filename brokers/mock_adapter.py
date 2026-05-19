@@ -69,11 +69,14 @@ def _k_order(ns: str, oid: str) -> str:
 # 价格抓取（用于撮合）
 # ════════════════════════════════════════════════════════════
 
-def _current_price(symbol: str) -> Optional[float]:
-    """通过 market_quote 拉实时价；失败返回 None"""
+def _current_price(symbol: str, fresh: bool = False) -> Optional[float]:
+    """
+    通过 market_quote 拉实时价；失败返回 None。
+    fresh=True 时绕开 30s 缓存（持仓估值/撮合判断用）。
+    """
     try:
         from quant_agent import market_quote
-        q = market_quote(symbol)
+        q = market_quote(symbol, skip_cache=fresh)
         if q and q.get("success") and q.get("price") is not None:
             return float(q["price"])
     except Exception:
@@ -149,7 +152,8 @@ def _try_fill_order(ns: str, order: dict) -> bool:
     if qty <= 0 or limit_price <= 0:
         return False
 
-    mp = _current_price(symbol)
+    # 撮合用最新价，绕开 30s 缓存
+    mp = _current_price(symbol, fresh=True)
     if mp is None:
         return False
     if not _can_fill(side, limit_price, mp):
@@ -235,10 +239,10 @@ class MockAdapter(BrokerAdapter):
         cash = _load_cash(ns)
         positions = _load_positions(ns)
 
-        # 实时计算总市值
+        # 实时计算总市值（绕开缓存，每次刷新都拉新价）
         market_value = 0.0
         for sym, p in positions.items():
-            mp = _current_price(sym)
+            mp = _current_price(sym, fresh=True)
             if mp is not None:
                 market_value += mp * float(p.get("qty", 0))
             else:
@@ -264,7 +268,7 @@ class MockAdapter(BrokerAdapter):
             qty = float(p.get("qty", 0))
             avg = float(p.get("avg_entry_price", 0))
             total_cost = float(p.get("total_cost", 0))
-            mp = _current_price(sym)
+            mp = _current_price(sym, fresh=True)
             if mp is None:
                 mp = avg
             market_value = mp * qty

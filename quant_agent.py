@@ -651,19 +651,20 @@ def _tool_cache(prefix: str, ttl: int):
     return deco
 
 
-def market_quote(symbol: str) -> dict:
+def market_quote(symbol: str, skip_cache: bool = False) -> dict:
     """
-    多源实时行情快照（30 秒缓存）。
-    源优先级：新浪财经（实时）→ MOCK 兜底
+    多源实时行情快照（默认 30 秒缓存）。
+    skip_cache=True 时绕过缓存直接拉新价（持仓估值/撮合用）
     """
     symbol_raw = symbol.strip()
     # 命中缓存（Redis 或内存）
     cache_key = f"quant:quote:{symbol_raw.upper()}"
-    cached = cache.get(cache_key)
-    if cached:
-        result = dict(cached)
-        result["from_cache"] = True
-        return result
+    if not skip_cache:
+        cached = cache.get(cache_key)
+        if cached:
+            result = dict(cached)
+            result["from_cache"] = True
+            return result
 
     # 按市场路由数据源（A 股优先国内权威；美股/港股优先 Yahoo 系）
     market = _detect_market(symbol_raw)
