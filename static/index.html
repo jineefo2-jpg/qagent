@@ -1029,7 +1029,8 @@ function renderMessage(m) {
   const SILENT_ERROR_TOOLS = new Set(['factor_score', 'html_chart_render',
                                        'historical_prices', 'market_news_search',
                                        'technical_indicator', 'earnings_calendar',
-                                       'economic_calendar', 'stock_announcements']);
+                                       'economic_calendar', 'stock_announcements',
+                                       'search_research_docs']);
   let toolsHtml = '';
   if (m.tool_calls && m.tool_calls.length) {
     toolsHtml = m.tool_calls
@@ -1049,6 +1050,7 @@ function renderMessage(m) {
       'earnings_calendar': '财报日历数据暂未取到，请稍后或换个市场/代码再试',
       'economic_calendar': '经济日历数据源暂时不可用，请稍后再试',
       'stock_announcements': '公告数据暂未取到，请稍后再试',
+      'search_research_docs': '研报知识库暂时不可用，已跳过本次检索',
     };
     const shownTools = new Set();
     chartFailHtml = m.tool_calls
@@ -1457,7 +1459,8 @@ function handleEvent(event, assistantDom, contentDom, tracesByName) {
     const SILENT_ERRORS = new Set(['factor_score', 'html_chart_render',
                                      'historical_prices', 'market_news_search',
                                      'technical_indicator', 'earnings_calendar',
-                                     'economic_calendar', 'stock_announcements']);
+                                     'economic_calendar', 'stock_announcements',
+                                     'search_research_docs']);
     if (event.is_error && !SILENT_ERRORS.has(event.name)) {
       // 真失败 → 显示错误卡片，状态变红
       var pending = {};
@@ -1488,6 +1491,7 @@ function handleEvent(event, assistantDom, contentDom, tracesByName) {
         'earnings_calendar': '财报日历数据暂未取到，请稍后或换个市场/代码再试',
         'economic_calendar': '经济日历数据源暂时不可用，请稍后再试',
         'stock_announcements': '公告数据暂未取到，请稍后再试',
+        'search_research_docs': '研报知识库暂时不可用，已跳过本次检索',
       };
       const noticeText = NOTICES[event.name];
       if (noticeText && !assistantDom.querySelector(`.silent-notice[data-tool="${event.name}"]`)) {

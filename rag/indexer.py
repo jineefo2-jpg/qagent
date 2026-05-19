@@ -106,22 +106,45 @@ def get_embedder():
     return _embedder
 
 
+def _build_chroma_client():
+    """构造 Chroma client；独立函数便于在异常时重建"""
+    from chromadb.config import Settings
+    return chromadb.PersistentClient(
+        path=str(DB_DIR),
+        settings=Settings(
+            anonymized_telemetry=False,  # 禁用 posthog 避免 httpx 残留
+            allow_reset=True,
+        ),
+    )
+
+
 def get_collection():
-    """获取或创建 Chroma collection（禁用 telemetry 避免大陆网络问题）"""
+    """获取或创建 Chroma collection；client 被关时自动重建"""
     global _client
     if _client is None:
-        from chromadb.config import Settings
-        _client = chromadb.PersistentClient(
-            path=str(DB_DIR),
-            settings=Settings(
-                anonymized_telemetry=False,  # 禁用 posthog 上报
-                allow_reset=True,
-            ),
+        _client = _build_chroma_client()
+    try:
+        return _client.get_or_create_collection(
+            name=COLLECTION_NAME,
+            metadata={"hnsw:space": "cosine"},
         )
-    return _client.get_or_create_collection(
-        name=COLLECTION_NAME,
-        metadata={"hnsw:space": "cosine"},
-    )
+    except Exception as e:
+        # "Cannot send a request, as the client has been closed" 等场景
+        msg = str(e).lower()
+        if "closed" in msg or "client" in msg:
+            # 重建一次再试
+            _client = _build_chroma_client()
+            return _client.get_or_create_collection(
+                name=COLLECTION_NAME,
+                metadata={"hnsw:space": "cosine"},
+            )
+        raise
+
+
+def reset_chroma_client():
+    """外部异常恢复 hook：让下次 get_collection 重建实例"""
+    global _client
+    _client = None
 
 
 # ════════════════════════════════════════════════════════════

@@ -4,7 +4,14 @@ RAG 检索接口 —— 被 quant_agent.py 作为工具调用。
 from typing import Optional
 
 from .config import DEFAULT_TOP_K, COLLECTION_NAME
-from .indexer import get_embedder, get_collection
+from .indexer import get_embedder, get_collection, reset_chroma_client
+
+
+def _is_client_closed(err: Exception) -> bool:
+    msg = str(err).lower()
+    return ("client has been closed" in msg
+            or "client is closed" in msg
+            or "closed" in msg and "client" in msg)
 
 
 def search_research_docs(
@@ -14,50 +21,48 @@ def search_research_docs(
 ) -> dict:
     """
     在已索引的研报/财报库中检索相关段落。
-
-    Args:
-        query: 自然语言查询（如"茅台一季度营收增速"、"中信对新能源车的判断"）
-        top_k: 返回相关段落数，默认 3
-        doc_filter: 可选，限定在指定文档内搜索（按文件名前缀匹配）
-
-    Returns:
-        {"success": True, "results": [{doc_name, page, content, score}, ...]}
+    遇到「httpx client closed」类错误会自动重建 chroma client 重试一次。
     """
     if not query or not query.strip():
         return {"success": False, "error": "query 不能为空"}
 
-    try:
+    def _do_search():
         coll = get_collection()
-    except Exception as e:
-        return {"success": False,
-                "error": f"无法连接知识库: {e}",
-                "hint": "先运行 `python -m rag.indexer` 建立索引"}
+        if coll.count() == 0:
+            return {
+                "success": False,
+                "error_type": "empty_kb",
+                "error": "知识库为空",
+                "hint": "把 PDF 放到 demo/docs/ 目录，运行 `python -m rag.indexer`",
+            }
+        embedder = get_embedder()
+        query_vec = embedder.encode([query], normalize_embeddings=True).tolist()[0]
+        where = {"doc_name": {"$eq": doc_filter}} if doc_filter else None
+        n = max(1, min(int(top_k), 10))
+        return coll.query(query_embeddings=[query_vec], n_results=n, where=where)
 
-    if coll.count() == 0:
-        return {
-            "success": False,
-            "error_type": "empty_kb",
-            "error": "知识库为空",
-            "hint": "把 PDF 放到 demo/docs/ 目录，运行 "
-                    "`python -m rag.indexer` 建索引",
-        }
-
-    # 嵌入查询
-    embedder = get_embedder()
-    query_vec = embedder.encode([query], normalize_embeddings=True).tolist()[0]
-
-    # 检索参数
-    where = {"doc_name": {"$eq": doc_filter}} if doc_filter else None
-    n = max(1, min(int(top_k), 10))
-
+    # 第 1 次尝试
     try:
-        res = coll.query(
-            query_embeddings=[query_vec],
-            n_results=n,
-            where=where,
-        )
-    except Exception as e:
-        return {"success": False, "error": f"检索失败: {e}"}
+        res = _do_search()
+        if isinstance(res, dict) and res.get("error_type") == "empty_kb":
+            return res
+        coll = get_collection()
+    except Exception as e1:
+        if _is_client_closed(e1):
+            # 重建 client 重试一次
+            try:
+                reset_chroma_client()
+                res = _do_search()
+                if isinstance(res, dict) and res.get("error_type") == "empty_kb":
+                    return res
+                coll = get_collection()
+            except Exception as e2:
+                return {"success": False,
+                        "error_type": "client_closed_retry_failed",
+                        "error": f"检索失败（已重试）: {e2}",
+                        "hint": "服务重启或稍后再试"}
+        else:
+            return {"success": False, "error": f"检索失败: {e1}"}
 
     docs       = res.get("documents", [[]])[0]
     metas      = res.get("metadatas", [[]])[0]
