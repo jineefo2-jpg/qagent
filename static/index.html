@@ -140,6 +140,393 @@
   .chat-title { font-size: 15px; font-weight: 600; }
   .chat-meta { font-size: 12px; color: var(--text-muted); }
 
+  /* ── 用户登录区 ── */
+  .user-area { display: flex; align-items: center; gap: 8px; margin-left: 12px; }
+  .login-btn {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 6px 14px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 500;
+    transition: background 0.15s;
+  }
+  .login-btn:hover { background: var(--bg-elev); }
+  .user-chip {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 10px 4px 4px;
+    border-radius: 20px;
+    cursor: pointer;
+    transition: background 0.15s;
+    position: relative;
+  }
+  .user-chip:hover { background: var(--bg); }
+  .user-chip img {
+    width: 26px; height: 26px;
+    border-radius: 50%;
+    border: 1px solid var(--border);
+    object-fit: cover;
+  }
+  .user-chip .user-name {
+    font-size: 13px;
+    color: var(--text);
+    max-width: 120px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .user-menu {
+    display: none;
+    position: absolute;
+    right: 0; top: 100%;
+    margin-top: 6px;
+    background: var(--bg-elev);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    min-width: 180px;
+    z-index: 1000;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.3);
+    overflow: hidden;
+  }
+  .user-menu.show { display: block; }
+  .user-menu .menu-info {
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+    font-size: 12px;
+    color: var(--text-muted);
+    word-break: break-all;
+  }
+  .user-menu .menu-item {
+    display: block;
+    padding: 10px 14px;
+    color: var(--text);
+    cursor: pointer;
+    font-size: 13px;
+    text-decoration: none;
+  }
+  .user-menu .menu-item:hover { background: var(--bg); }
+
+  /* 登录弹窗 */
+  .login-modal-mask {
+    display: none;
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,0.5);
+    z-index: 2000;
+    align-items: center;
+    justify-content: center;
+  }
+  .login-modal-mask.show { display: flex; }
+  .login-modal {
+    background: var(--bg-elev);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 24px;
+    width: min(360px, 90vw);
+    box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+  }
+  .login-modal h3 {
+    margin: 0 0 8px;
+    font-size: 17px;
+    color: var(--text);
+  }
+  .login-modal p {
+    margin: 0 0 18px;
+    font-size: 13px;
+    color: var(--text-muted);
+    line-height: 1.5;
+  }
+  .login-provider-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    width: 100%;
+    padding: 10px 14px;
+    margin-bottom: 8px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text);
+    text-decoration: none;
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 0.15s;
+  }
+  .login-provider-btn:hover { background: rgba(255,255,255,0.05); }
+  .login-provider-btn[disabled] {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+  .login-provider-btn .icon {
+    width: 18px; height: 18px;
+    display: inline-block;
+  }
+  .login-modal .close-btn {
+    margin-top: 10px;
+    background: transparent;
+    border: none;
+    color: var(--text-muted);
+    font-size: 12px;
+    cursor: pointer;
+    width: 100%;
+    padding: 6px;
+  }
+  .login-modal .login-disabled-hint {
+    color: #d97706;
+    font-size: 12px;
+    text-align: center;
+    padding: 8px 0 4px;
+    line-height: 1.5;
+  }
+
+  /* ── 下单确认弹窗 ── */
+  .order-modal-mask {
+    display: none;
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,0.6);
+    z-index: 2100;
+    align-items: center;
+    justify-content: center;
+  }
+  .order-modal-mask.show { display: flex; }
+  .order-modal {
+    background: var(--bg-elev);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 22px 24px;
+    width: min(440px, 92vw);
+    max-height: 90vh;
+    overflow-y: auto;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+  }
+  .order-modal h3 {
+    margin: 0 0 4px;
+    font-size: 16px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .order-modal .order-side-buy { color: #4ade80; }
+  .order-modal .order-side-sell { color: #f87171; }
+  .order-modal .sub {
+    font-size: 12px;
+    color: var(--text-muted);
+    margin: 0 0 14px;
+  }
+  .order-modal .row {
+    display: flex;
+    justify-content: space-between;
+    padding: 7px 0;
+    border-bottom: 1px dashed var(--border);
+    font-size: 13px;
+  }
+  .order-modal .row:last-child { border-bottom: none; }
+  .order-modal .row .k { color: var(--text-muted); }
+  .order-modal .row .v { color: var(--text); font-weight: 500; }
+  .order-modal .v-warn { color: #fbbf24; }
+  .order-modal .notes {
+    margin: 10px 0;
+    padding: 8px 10px;
+    background: var(--bg);
+    border-left: 3px solid #60a5fa;
+    border-radius: 4px;
+    font-size: 12px;
+    color: var(--text);
+    line-height: 1.5;
+  }
+  .order-modal .risk-reasons {
+    background: rgba(220,38,38,0.1);
+    border: 1px solid rgba(220,38,38,0.4);
+    color: #fca5a5;
+    border-radius: 6px;
+    padding: 8px 12px;
+    margin: 8px 0;
+    font-size: 12px;
+    line-height: 1.5;
+  }
+  .order-modal .risk-warnings {
+    background: rgba(251,191,36,0.1);
+    border: 1px solid rgba(251,191,36,0.4);
+    color: #fcd34d;
+    border-radius: 6px;
+    padding: 8px 12px;
+    margin: 8px 0;
+    font-size: 12px;
+  }
+  .order-modal .double-confirm {
+    margin: 10px 0;
+    padding: 10px;
+    background: rgba(251,191,36,0.05);
+    border: 1px dashed rgba(251,191,36,0.4);
+    border-radius: 6px;
+    font-size: 12px;
+    color: var(--text);
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+  }
+  .order-modal .double-confirm input { margin-top: 2px; }
+  .order-modal .actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 14px;
+  }
+  .order-modal .btn {
+    flex: 1;
+    padding: 10px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 14px;
+    font-weight: 500;
+    border: 1px solid var(--border);
+    transition: all 0.15s;
+  }
+  .order-modal .btn-cancel {
+    background: transparent;
+    color: var(--text-muted);
+  }
+  .order-modal .btn-cancel:hover { background: var(--bg); color: var(--text); }
+  .order-modal .btn-confirm {
+    background: #2563eb;
+    color: #fff;
+    border-color: #2563eb;
+  }
+  .order-modal .btn-confirm:hover { background: #1d4ed8; }
+  .order-modal .btn-confirm[disabled] {
+    opacity: 0.5;
+    cursor: not-allowed;
+    background: #6b7280;
+    border-color: #6b7280;
+  }
+  .order-modal .countdown {
+    text-align: center;
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-top: 8px;
+  }
+
+  /* ── 持仓/订单抽屉 ── */
+  .drawer-btn {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 6px 10px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 13px;
+    margin-right: 8px;
+  }
+  .drawer-btn:hover { background: var(--bg-elev); }
+  .drawer-mask {
+    display: none;
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,0.4);
+    z-index: 1500;
+  }
+  .drawer-mask.show { display: block; }
+  .drawer {
+    position: fixed;
+    top: 0; right: 0;
+    width: min(420px, 92vw);
+    height: 100vh;
+    background: var(--bg-elev);
+    border-left: 1px solid var(--border);
+    box-shadow: -8px 0 24px rgba(0,0,0,0.4);
+    z-index: 1501;
+    transform: translateX(100%);
+    transition: transform 0.25s ease-out;
+    display: flex;
+    flex-direction: column;
+  }
+  .drawer.open { transform: translateX(0); }
+  .drawer-header {
+    padding: 14px 16px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .drawer-header h3 {
+    margin: 0;
+    font-size: 15px;
+    color: var(--text);
+  }
+  .drawer-header .close {
+    background: transparent;
+    border: none;
+    color: var(--text-muted);
+    font-size: 22px;
+    cursor: pointer;
+    padding: 0 4px;
+  }
+  .drawer-tabs {
+    display: flex;
+    border-bottom: 1px solid var(--border);
+  }
+  .drawer-tab {
+    flex: 1;
+    padding: 10px;
+    text-align: center;
+    cursor: pointer;
+    color: var(--text-muted);
+    font-size: 13px;
+    border-bottom: 2px solid transparent;
+  }
+  .drawer-tab.active {
+    color: var(--text);
+    border-bottom-color: #60a5fa;
+  }
+  .drawer-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 12px 16px;
+  }
+  .drawer-body .empty {
+    text-align: center;
+    color: var(--text-muted);
+    padding: 30px 0;
+    font-size: 13px;
+  }
+  .drawer-body .item {
+    padding: 10px 12px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    margin-bottom: 8px;
+    font-size: 12px;
+  }
+  .drawer-body .item .item-head {
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 6px;
+    font-weight: 600;
+    font-size: 13px;
+  }
+  .drawer-body .item .meta {
+    color: var(--text-muted);
+    line-height: 1.6;
+  }
+  .drawer-body .pnl-up { color: #4ade80; }
+  .drawer-body .pnl-down { color: #f87171; }
+  .drawer-body .cancel-btn {
+    margin-top: 6px;
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+    padding: 3px 10px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 11px;
+  }
+  .drawer-body .cancel-btn:hover { color: #f87171; border-color: #f87171; }
+
+  /* 顶部 toast 样式由文件后段已有 .toast 规则提供（统一管理，避免冲突） */
+
   .messages {
     flex: 1;
     overflow-y: auto;
@@ -155,6 +542,45 @@
     padding: 80px 0;
   }
   .empty-state h2 { color: var(--text); margin-bottom: 12px; font-weight: 500; }
+  .empty-state .trade-hint {
+    margin: 22px auto 0;
+    max-width: 480px;
+    padding: 12px 18px;
+    background: linear-gradient(135deg, rgba(96,165,250,0.08), rgba(96,165,250,0.02));
+    border: 1px solid rgba(96,165,250,0.3);
+    border-radius: 10px;
+    color: var(--text);
+    font-size: 13px;
+    line-height: 1.6;
+  }
+  .empty-state .trade-hint .badge-line {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 4px;
+    color: #60a5fa;
+    font-weight: 500;
+  }
+  .empty-state .trade-hint .login-link {
+    color: #60a5fa;
+    text-decoration: underline;
+    cursor: pointer;
+    background: none;
+    border: none;
+    padding: 0;
+    font-size: inherit;
+  }
+  .empty-state .trade-hint .small {
+    display: block;
+    margin-top: 4px;
+    color: var(--text-muted);
+    font-size: 11px;
+  }
+  .empty-state .trade-hint.logged-in {
+    background: linear-gradient(135deg, rgba(74,222,128,0.06), rgba(74,222,128,0.02));
+    border-color: rgba(74,222,128,0.3);
+  }
+  .empty-state .trade-hint.logged-in .badge-line { color: #4ade80; }
   .empty-state .examples {
     margin-top: 32px;
     display: grid;
@@ -743,12 +1169,23 @@
       <button class="mobile-menu-btn" onclick="toggleSidebar()" aria-label="菜单">☰</button>
       <div class="chat-title" id="chatTitle" style="flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">未选择会话</div>
       <div class="chat-meta" id="chatMeta"></div>
+      <!-- 用户登录区（启动后由 bootstrapAuth 填充） -->
+      <div class="user-area" id="userArea"></div>
     </header>
 
     <div class="messages" id="messages">
       <div class="empty-state">
         <h2>📊 QuantAgent 量化分析助手</h2>
         <p>多因子打分 · 期权定价 · 风险评估 · 财经搜索</p>
+        <div class="trade-hint" id="tradeHint">
+          <div class="badge-line">🔒 登录后可使用模拟盘交易美股</div>
+          <div>
+            支持 SPY / QQQ / AAPL / NVDA / TSLA 等主流标的，
+            <button class="login-link" onclick="showLoginModal()">用 Google 或 GitHub 登录</button>
+            即可开始。
+          </div>
+          <span class="small">⚠️ 当前为 Alpaca Paper Trading（模拟盘），使用虚拟资金，不涉及真金白银</span>
+        </div>
       </div>
     </div>
 
@@ -777,6 +1214,61 @@
     </div>
   </main>
 </div>
+
+<!-- 登录弹窗 -->
+<div class="login-modal-mask" id="loginModalMask" onclick="if(event.target===this)hideLoginModal()">
+  <div class="login-modal" role="dialog" aria-modal="true" aria-labelledby="loginModalTitle">
+    <h3 id="loginModalTitle">登录以使用交易功能</h3>
+    <p>未登录用户可使用全部分析功能；交易类操作（账户查询、下单、撤单）需要登录。</p>
+    <div id="loginBtnsArea">
+      <a class="login-provider-btn" id="loginGoogleBtn" href="/auth/google/login" style="display:none;">
+        <span class="icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="18" height="18"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84A10.99 10.99 0 0 0 12 23z"/><path fill="#FBBC05" d="M5.84 14.1A6.61 6.61 0 0 1 5.5 12c0-.73.13-1.44.34-2.1V7.07H2.18A11 11 0 0 0 1 12c0 1.77.42 3.45 1.18 4.93l3.66-2.84z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84C6.71 7.31 9.14 5.38 12 5.38z"/></svg>
+        </span>
+        使用 Google 登录
+      </a>
+      <a class="login-provider-btn" id="loginGithubBtn" href="/auth/github/login" style="display:none;">
+        <span class="icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M12 .3a12 12 0 0 0-3.8 23.4c.6.1.8-.3.8-.6v-2c-3.3.7-4-1.4-4-1.4-.5-1.4-1.4-1.8-1.4-1.8-1.1-.7.1-.7.1-.7 1.2.1 1.9 1.2 1.9 1.2 1.1 1.9 2.9 1.4 3.6 1 .1-.8.4-1.4.7-1.7-2.6-.3-5.4-1.3-5.4-5.9 0-1.3.5-2.4 1.2-3.2-.1-.3-.5-1.5.1-3.2 0 0 1-.3 3.3 1.2a11.5 11.5 0 0 1 6 0c2.3-1.5 3.3-1.2 3.3-1.2.7 1.7.2 2.9.1 3.2.8.8 1.2 1.9 1.2 3.2 0 4.6-2.8 5.6-5.5 5.9.4.4.8 1.1.8 2.2v3.3c0 .3.2.7.8.6A12 12 0 0 0 12 .3"/></svg>
+        </span>
+        使用 GitHub 登录
+      </a>
+      <div class="login-disabled-hint" id="loginDisabledHint" style="display:none;">
+        ⚠️ 服务端未配置任何 OAuth 提供方<br>请联系管理员
+      </div>
+    </div>
+    <button class="close-btn" onclick="hideLoginModal()">取消</button>
+  </div>
+</div>
+
+<!-- 下单确认弹窗 -->
+<div class="order-modal-mask" id="orderModalMask">
+  <div class="order-modal" id="orderModal" role="dialog" aria-modal="true"></div>
+</div>
+
+<!-- 持仓/订单抽屉 -->
+<div class="drawer-mask" id="drawerMask" onclick="closeDrawer()"></div>
+<aside class="drawer" id="drawer" aria-hidden="true">
+  <div class="drawer-header">
+    <h3>📊 我的账户</h3>
+    <div style="display:flex;gap:6px;align-items:center;">
+      <button class="close" onclick="refreshDrawer()" title="刷新"
+              style="font-size:16px;padding:0 8px;line-height:1;">↻</button>
+      <button class="close" onclick="closeDrawer()" aria-label="关闭">×</button>
+    </div>
+  </div>
+  <div class="drawer-tabs">
+    <div class="drawer-tab active" data-tab="positions" onclick="switchDrawerTab('positions')">持仓</div>
+    <div class="drawer-tab" data-tab="orders" onclick="switchDrawerTab('orders')">订单</div>
+    <div class="drawer-tab" data-tab="balance" onclick="switchDrawerTab('balance')">资金</div>
+  </div>
+  <div class="drawer-body" id="drawerBody">
+    <div class="empty">加载中...</div>
+  </div>
+</aside>
+
+<!-- 顶部 toast -->
+<div class="toast" id="toast"></div>
 
 <script>
 // ════════════════════════════════════════════════════════════
@@ -836,13 +1328,499 @@ function getDeviceId() {
 }
 const DEVICE_ID = getDeviceId();
 
-// 统一封装：所有 fetch 自动带上 X-Device-Id
+// 统一封装：所有 fetch 自动带上 X-Device-Id（cookie 浏览器自动带上，无需手动）
 async function api(url, options = {}) {
   options.headers = {
     ...(options.headers || {}),
     'X-Device-Id': DEVICE_ID,
   };
+  options.credentials = options.credentials || 'same-origin';   // 确保 cookie 跟随
   return fetch(url, options);
+}
+
+// ════════════════════════════════════════════════════════════
+// 账户体系（OAuth 登录 / 登出 / 用户菜单）
+// ════════════════════════════════════════════════════════════
+
+var CURRENT_USER = null;          // {user_id, email, name, avatar_url, provider}
+var AUTH_PROVIDERS = [];          // ['google','github']
+
+// 注：showToast 实际由本文件后段统一定义（避免重复）
+// 类名约定：'success' / 'error' / 'info'
+
+function showLoginModal() {
+  // 同步亮灭按钮
+  var hasAny = AUTH_PROVIDERS.length > 0;
+  document.getElementById('loginGoogleBtn').style.display =
+    AUTH_PROVIDERS.indexOf('google') >= 0 ? '' : 'none';
+  document.getElementById('loginGithubBtn').style.display =
+    AUTH_PROVIDERS.indexOf('github') >= 0 ? '' : 'none';
+  document.getElementById('loginDisabledHint').style.display =
+    hasAny ? 'none' : '';
+  document.getElementById('loginModalMask').classList.add('show');
+}
+
+function hideLoginModal() {
+  document.getElementById('loginModalMask').classList.remove('show');
+}
+
+function renderUserArea() {
+  var area = document.getElementById('userArea');
+  if (!area) return;
+  if (CURRENT_USER) {
+    var avatar = CURRENT_USER.avatar_url || '';
+    var name = CURRENT_USER.name || CURRENT_USER.email || '用户';
+    var safeName = name.replace(/[<>"&]/g, function (c) {
+      return { '<':'&lt;', '>':'&gt;', '"':'&quot;', '&':'&amp;' }[c];
+    });
+    area.innerHTML =
+      '<button class="drawer-btn" onclick="openDrawer()" title="账户/订单/持仓">📊</button>'
+      + '<div class="user-chip" onclick="toggleUserMenu(event)">'
+      + (avatar ? '<img src="' + avatar + '" alt="">' : '<span style="width:26px;height:26px;border-radius:50%;background:var(--bg);display:inline-flex;align-items:center;justify-content:center;font-size:13px;">' + safeName.charAt(0) + '</span>')
+      + '<span class="user-name">' + safeName + '</span>'
+      + '<div class="user-menu" id="userMenu">'
+      +   '<div class="menu-info">' + (CURRENT_USER.email || '') + '<br><span style="opacity:.6;">via ' + (CURRENT_USER.provider || '') + '</span></div>'
+      +   '<a class="menu-item" href="/auth/logout">退出登录</a>'
+      + '</div>'
+      + '</div>';
+  } else {
+    area.innerHTML = '<button class="login-btn" onclick="showLoginModal()">登录</button>';
+  }
+  // 顺手同步首页的"登录可下单"提示
+  try { syncTradeHint(); } catch (_) {}
+}
+
+function toggleUserMenu(e) {
+  if (e) { e.stopPropagation(); }
+  var m = document.getElementById('userMenu');
+  if (m) m.classList.toggle('show');
+}
+
+// 点击空白关闭用户菜单
+document.addEventListener('click', function () {
+  var m = document.getElementById('userMenu');
+  if (m && m.classList.contains('show')) m.classList.remove('show');
+});
+
+// 启动时拉登录信息 + 可用 OAuth 提供方
+async function bootstrapAuth() {
+  // 1. 当前登录用户
+  try {
+    var r = await api('/api/me');
+    if (r.ok) {
+      CURRENT_USER = await r.json();
+    } else {
+      CURRENT_USER = null;
+    }
+  } catch (_) {
+    CURRENT_USER = null;
+  }
+
+  // 2. 可用 provider
+  try {
+    var pr = await api('/api/auth/providers');
+    if (pr.ok) {
+      var d = await pr.json();
+      AUTH_PROVIDERS = d.providers || [];
+    }
+  } catch (_) {
+    AUTH_PROVIDERS = [];
+  }
+
+  renderUserArea();
+}
+
+// URL 参数处理：?login=ok / ?logout=ok / ?auth_error=...
+function handleAuthUrlParams() {
+  try {
+    var sp = new URLSearchParams(window.location.search);
+    if (sp.get('login') === 'ok') {
+      showToast('登录成功', 'success');
+    } else if (sp.get('logout') === 'ok') {
+      showToast('已退出登录', 'success');
+    } else if (sp.get('auth_error')) {
+      showToast('登录失败：' + decodeURIComponent(sp.get('auth_error')), 'error');
+    }
+    if (sp.get('login') || sp.get('logout') || sp.get('auth_error')) {
+      // 清掉 URL 上的参数（不留刷新痕迹）
+      try {
+        var clean = window.location.pathname + window.location.hash;
+        window.history.replaceState({}, '', clean);
+      } catch (_) {}
+    }
+  } catch (_) {}
+}
+
+// 工具调用返回 auth_required 时，引导登录
+function isAuthRequiredResult(result) {
+  return result && (result.error_type === 'auth_required'
+                    || (result.error && /需要登录/.test(result.error || '')));
+}
+
+
+// ════════════════════════════════════════════════════════════
+// 交易 UI（下单确认弹窗 + 持仓/订单抽屉）
+// ════════════════════════════════════════════════════════════
+
+var _orderModalState = {
+  intent_id: null,
+  timer: null,
+  remaining: 30,
+};
+
+function escapeHtmlSafe(s) {
+  return String(s == null ? '' : s).replace(/[<>"&]/g, function (c) {
+    return { '<':'&lt;', '>':'&gt;', '"':'&quot;', '&':'&amp;' }[c];
+  });
+}
+
+function fmtMoney(v) {
+  if (v == null || isNaN(v)) return '-';
+  return '$' + Number(v).toLocaleString('en-US', {
+    minimumFractionDigits: 2, maximumFractionDigits: 2,
+  });
+}
+
+async function showOrderConfirmModal(intent_id, prelimResult) {
+  if (!CURRENT_USER) {
+    showLoginModal();
+    return;
+  }
+  _orderModalState.intent_id = intent_id;
+  var mask = document.getElementById('orderModalMask');
+  var modal = document.getElementById('orderModal');
+  modal.innerHTML = '<div style="padding:20px;text-align:center;color:var(--text-muted);">加载订单详情…</div>';
+  mask.classList.add('show');
+
+  // 拉服务端的最新风控 + 账户快照（比 prelim 更可靠）
+  var detail = null;
+  try {
+    var r = await api('/api/orders/intents/' + encodeURIComponent(intent_id));
+    if (r.ok) {
+      detail = await r.json();
+    } else if (r.status === 404) {
+      modal.innerHTML = '<div style="padding:20px;text-align:center;color:#f87171;">订单意图已过期或不存在</div>'
+        + '<div class="actions"><button class="btn btn-cancel" onclick="closeOrderModal()">关闭</button></div>';
+      return;
+    } else {
+      throw new Error('HTTP ' + r.status);
+    }
+  } catch (e) {
+    modal.innerHTML = '<div style="padding:20px;text-align:center;color:#f87171;">加载失败：'
+      + escapeHtmlSafe(e.message) + '</div>'
+      + '<div class="actions"><button class="btn btn-cancel" onclick="closeOrderModal()">关闭</button></div>';
+    return;
+  }
+
+  renderOrderConfirmModal(detail);
+  startOrderCountdown();
+}
+
+function renderOrderConfirmModal(detail) {
+  var intent = detail.intent || {};
+  var account = detail.account || {};
+  var check = detail.risk_check || {};
+  var side = intent.side === 'sell' ? 'sell' : 'buy';
+  var sideText = side === 'buy' ? '买入' : '卖出';
+  var sideClass = side === 'buy' ? 'order-side-buy' : 'order-side-sell';
+  var notional = (intent.qty || 0) * (intent.limit_price || 0);
+  var pct = (check.notional_pct || 0) * 100;
+  var notes = intent.notes || '';
+
+  var html = '<h3><span class="' + sideClass + '">' + sideText + '</span> '
+    + escapeHtmlSafe(intent.symbol) + '</h3>'
+    + '<p class="sub">Alpaca Paper Trading · 限价单 · TIF: ' + (intent.time_in_force || 'day') + '</p>';
+
+  html += '<div class="row"><span class="k">数量</span><span class="v">' + (intent.qty || 0) + ' 股</span></div>';
+  html += '<div class="row"><span class="k">限价</span><span class="v">' + fmtMoney(intent.limit_price) + '</span></div>';
+  html += '<div class="row"><span class="k">预估金额</span><span class="v">' + fmtMoney(notional) + '</span></div>';
+  html += '<div class="row"><span class="k">占净值</span><span class="v ' + (pct > 50 ? 'v-warn' : '') + '">'
+    + pct.toFixed(1) + '%</span></div>';
+  html += '<div class="row"><span class="k">购买力</span><span class="v">' + fmtMoney(account.buying_power) + '</span></div>';
+  html += '<div class="row"><span class="k">账户净值</span><span class="v">' + fmtMoney(account.equity) + '</span></div>';
+
+  if (notes) {
+    html += '<div class="notes">💬 Agent: ' + escapeHtmlSafe(notes) + '</div>';
+  }
+
+  // 风控反馈
+  if (check.reasons && check.reasons.length) {
+    html += '<div class="risk-reasons">⛔ 风控不通过：<br>'
+      + check.reasons.map(function (r) { return '• ' + escapeHtmlSafe(r); }).join('<br>')
+      + '</div>';
+  }
+  if (check.warnings && check.warnings.length) {
+    html += '<div class="risk-warnings">⚠️ ' + check.warnings.map(escapeHtmlSafe).join('；') + '</div>';
+  }
+
+  // 二次确认（大额）
+  var needDouble = check.needs_double_confirm;
+  if (needDouble) {
+    html += '<label class="double-confirm">'
+      + '<input type="checkbox" id="orderDoubleConfirm" onchange="updateConfirmBtnState()">'
+      + '<span>本单占净值 ' + pct.toFixed(1) + '%，达到大额订单阈值。我确认知晓风险，仍要下单。</span>'
+      + '</label>';
+  }
+
+  // 按钮
+  var canConfirm = (check.passed === true) && (!needDouble);
+  // 即使 reasons 里包含"需要勾选大额确认"，勾上后前端就能放行（后端会重新校验）
+  if (!check.passed && needDouble && check.reasons && check.reasons.length === 1
+        && /大额订单|双重确认|二次确认|勾选/.test(check.reasons[0])) {
+    canConfirm = false;   // 等用户勾选
+  }
+
+  html += '<div class="actions">'
+    + '<button class="btn btn-cancel" onclick="closeOrderModal()">取消</button>'
+    + '<button class="btn btn-confirm" id="orderConfirmBtn" onclick="confirmOrder()"'
+    + (canConfirm ? '' : ' disabled') + '>确认下单</button>'
+    + '</div>';
+  html += '<div class="countdown" id="orderCountdown">30 秒未确认将自动关闭</div>';
+
+  document.getElementById('orderModal').innerHTML = html;
+  updateConfirmBtnState();
+}
+
+function updateConfirmBtnState() {
+  var btn = document.getElementById('orderConfirmBtn');
+  var cb = document.getElementById('orderDoubleConfirm');
+  if (!btn) return;
+  if (cb) {
+    // 大额订单：勾了才放行
+    btn.disabled = !cb.checked;
+  }
+}
+
+function startOrderCountdown() {
+  _orderModalState.remaining = 30;
+  if (_orderModalState.timer) clearInterval(_orderModalState.timer);
+  _orderModalState.timer = setInterval(function () {
+    _orderModalState.remaining -= 1;
+    var el = document.getElementById('orderCountdown');
+    if (el) el.textContent = _orderModalState.remaining + ' 秒未确认将自动关闭';
+    if (_orderModalState.remaining <= 0) {
+      closeOrderModal();
+      showToast('订单意图已超时', 'error');
+    }
+  }, 1000);
+}
+
+function closeOrderModal() {
+  document.getElementById('orderModalMask').classList.remove('show');
+  if (_orderModalState.timer) clearInterval(_orderModalState.timer);
+  _orderModalState.timer = null;
+  _orderModalState.intent_id = null;
+}
+
+async function confirmOrder() {
+  var intent_id = _orderModalState.intent_id;
+  if (!intent_id) { closeOrderModal(); return; }
+  var btn = document.getElementById('orderConfirmBtn');
+  if (btn) { btn.disabled = true; btn.textContent = '提交中…'; }
+
+  var doubleConfirmed = false;
+  var cb = document.getElementById('orderDoubleConfirm');
+  if (cb && cb.checked) doubleConfirmed = true;
+
+  try {
+    var r = await api('/api/orders/confirm', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ intent_id: intent_id, double_confirmed: doubleConfirmed }),
+    });
+    var data = await r.json().catch(function () { return null; });
+
+    if (!r.ok) {
+      showToast('下单失败：' + (data && data.detail ? data.detail : ('HTTP ' + r.status)), 'error');
+      if (btn) { btn.disabled = false; btn.textContent = '确认下单'; }
+      return;
+    }
+
+    if (data && data.success) {
+      var o = data.order || {};
+      showToast('✅ 已提交：' + (o.broker_order_id || '').slice(0, 8) + '...', 'success');
+      closeOrderModal();
+      // 自动打开抽屉到「订单」tab 让用户看到状态
+      // 然后在 1.5s 后再刷一次（撮合通常 < 2s 完成）
+      try {
+        _drawerTab = 'orders';
+        var tabs = document.querySelectorAll('.drawer-tab');
+        for (var i = 0; i < tabs.length; i++) {
+          tabs[i].classList.toggle('active',
+            tabs[i].getAttribute('data-tab') === 'orders');
+        }
+        document.getElementById('drawer').classList.add('open');
+        document.getElementById('drawerMask').classList.add('show');
+        refreshDrawer();
+        setTimeout(refreshDrawer, 1500);
+        setTimeout(refreshDrawer, 4000);
+      } catch (_) {}
+    } else if (data && data.blocked_by_risk_gate) {
+      showToast('被风控阻断：' + (data.message || ''), 'error');
+      if (btn) { btn.disabled = false; btn.textContent = '确认下单'; }
+    } else {
+      showToast('下单失败：' + (data && data.error ? data.error : '未知错误'), 'error');
+      if (btn) { btn.disabled = false; btn.textContent = '确认下单'; }
+    }
+  } catch (e) {
+    showToast('网络异常：' + e.message, 'error');
+    if (btn) { btn.disabled = false; btn.textContent = '确认下单'; }
+  }
+}
+
+// ────────── 持仓/订单抽屉 ──────────
+
+var _drawerTab = 'positions';
+
+function openDrawer() {
+  if (!CURRENT_USER) { showLoginModal(); return; }
+  document.getElementById('drawer').classList.add('open');
+  document.getElementById('drawerMask').classList.add('show');
+  refreshDrawer();
+}
+
+function closeDrawer() {
+  document.getElementById('drawer').classList.remove('open');
+  document.getElementById('drawerMask').classList.remove('show');
+}
+
+function switchDrawerTab(name) {
+  _drawerTab = name;
+  var tabs = document.querySelectorAll('.drawer-tab');
+  for (var i = 0; i < tabs.length; i++) {
+    tabs[i].classList.toggle('active', tabs[i].getAttribute('data-tab') === name);
+  }
+  refreshDrawer();
+}
+
+async function refreshDrawer() {
+  var body = document.getElementById('drawerBody');
+  body.innerHTML = '<div class="empty">加载中…</div>';
+  try {
+    if (_drawerTab === 'positions') {
+      var r = await api('/api/positions');
+      var d = await r.json();
+      renderPositions(d);
+    } else if (_drawerTab === 'orders') {
+      var r2 = await api('/api/orders?status=all&limit=30');
+      var d2 = await r2.json();
+      renderOrders(d2);
+    } else if (_drawerTab === 'balance') {
+      var r3 = await api('/api/broker/status');
+      var d3 = await r3.json();
+      renderBalance(d3);
+    }
+  } catch (e) {
+    body.innerHTML = '<div class="empty">加载失败：' + escapeHtmlSafe(e.message) + '</div>';
+  }
+}
+
+function renderPositions(d) {
+  var body = document.getElementById('drawerBody');
+  if (!d || !d.success) {
+    body.innerHTML = '<div class="empty">' + escapeHtmlSafe((d && d.error) || '加载失败') + '</div>';
+    return;
+  }
+  var items = d.positions || [];
+  if (!items.length) {
+    body.innerHTML = '<div class="empty">暂无持仓</div>';
+    return;
+  }
+  body.innerHTML = items.map(function (p) {
+    var pnlClass = (p.unrealized_pl >= 0) ? 'pnl-up' : 'pnl-down';
+    var sign = p.unrealized_pl >= 0 ? '+' : '';
+    return '<div class="item">'
+      + '<div class="item-head"><span>' + escapeHtmlSafe(p.symbol) + '</span>'
+      + '<span class="' + pnlClass + '">' + sign + p.unrealized_pl_pct.toFixed(2) + '%</span></div>'
+      + '<div class="meta">'
+      + '持仓 ' + p.qty + ' 股 @ ' + fmtMoney(p.avg_entry_price) + '<br>'
+      + '市值 ' + fmtMoney(p.market_value) + ' · '
+      + '<span class="' + pnlClass + '">' + sign + fmtMoney(p.unrealized_pl) + '</span>'
+      + '</div></div>';
+  }).join('');
+}
+
+function renderOrders(d) {
+  var body = document.getElementById('drawerBody');
+  if (!d || !d.success) {
+    body.innerHTML = '<div class="empty">' + escapeHtmlSafe((d && d.error) || '加载失败') + '</div>';
+    return;
+  }
+  var items = d.orders || [];
+  if (!items.length) {
+    body.innerHTML = '<div class="empty">暂无订单</div>';
+    return;
+  }
+  var STATUS_LABEL = {
+    'new': '⏳ 待成交', 'partially_filled': '◐ 部分成交', 'filled': '✅ 已成交',
+    'canceled': '✕ 已撤', 'rejected': '⛔ 拒单', 'expired': '⏱ 过期', 'pending': '⏳',
+  };
+  body.innerHTML = items.map(function (o) {
+    var price = o.limit_price ? '@' + fmtMoney(o.limit_price) : '@市价';
+    var sideTxt = o.side === 'buy' ? '买入' : '卖出';
+    var canCancel = (o.status === 'new' || o.status === 'partially_filled');
+    return '<div class="item">'
+      + '<div class="item-head"><span>' + sideTxt + ' ' + escapeHtmlSafe(o.symbol) + '</span>'
+      + '<span>' + (STATUS_LABEL[o.status] || o.status) + '</span></div>'
+      + '<div class="meta">' + o.qty + ' 股 ' + price + '<br>'
+      + '已成交 ' + (o.filled_qty || 0) + ' 股' + (o.filled_avg_price ? ' @ ' + fmtMoney(o.filled_avg_price) : '')
+      + '<br><span style="opacity:.6;font-size:11px;">id: ' + escapeHtmlSafe((o.broker_order_id||'').slice(0,18)) + '</span>'
+      + '</div>'
+      + (canCancel ? '<button class="cancel-btn" onclick="cancelOrderFromDrawer(\'' + escapeHtmlSafe(o.broker_order_id) + '\')">撤单</button>' : '')
+      + '</div>';
+  }).join('');
+}
+
+function renderBalance(d) {
+  var body = document.getElementById('drawerBody');
+  if (!d || !d.configured) {
+    body.innerHTML = '<div class="empty">'
+      + (d && d.error ? escapeHtmlSafe(d.error) : '未配置 Alpaca 凭证')
+      + '</div>';
+    return;
+  }
+  if (!d.ping_ok) {
+    body.innerHTML = '<div class="empty">无法连接 Alpaca：' + escapeHtmlSafe(d.error || '') + '</div>';
+    return;
+  }
+  var acc = d.account || {};
+  var risk = d.risk_config || {};
+  body.innerHTML =
+    '<div class="item">'
+    + '<div class="item-head">资金概览</div>'
+    + '<div class="meta">'
+    + '<div class="row" style="display:flex;justify-content:space-between;"><span>现金</span><span>' + fmtMoney(acc.cash) + '</span></div>'
+    + '<div class="row" style="display:flex;justify-content:space-between;"><span>购买力</span><span>' + fmtMoney(acc.buying_power) + '</span></div>'
+    + '<div class="row" style="display:flex;justify-content:space-between;"><span>净值</span><span>' + fmtMoney(acc.equity) + '</span></div>'
+    + '<div class="row" style="display:flex;justify-content:space-between;opacity:.6;"><span>账户号</span><span>' + escapeHtmlSafe((acc.account_id||'').slice(0,12)) + '...</span></div>'
+    + '</div></div>'
+    + '<div class="item">'
+    + '<div class="item-head">风控规则</div>'
+    + '<div class="meta">'
+    + '单笔上限：' + (risk.max_single_pct*100).toFixed(0) + '% · ETF ' + (risk.max_single_pct_etf*100).toFixed(0) + '%<br>'
+    + '二次确认阈值：' + (risk.double_confirm_pct*100).toFixed(0) + '%<br>'
+    + '日内订单上限：' + risk.max_daily_orders + ' 笔<br>'
+    + '日内撤单率上限：' + (risk.max_daily_cancel_rate*100).toFixed(0) + '%<br>'
+    + '白名单 ' + risk.whitelist_size + ' 个标的<br>'
+    + '市价单：' + (risk.block_market_order ? '禁用' : '允许')
+    + '</div></div>';
+}
+
+async function cancelOrderFromDrawer(broker_order_id) {
+  if (!confirm('撤销订单 ' + broker_order_id.slice(0, 12) + '... ？')) return;
+  try {
+    var r = await api('/api/orders/cancel/' + encodeURIComponent(broker_order_id),
+                       { method: 'POST' });
+    var d = await r.json();
+    if (d && d.success) {
+      showToast('撤单已提交', 'success');
+      refreshDrawer();
+    } else {
+      showToast('撤单失败：' + (d && d.error ? d.error : 'unknown'), 'error');
+    }
+  } catch (e) {
+    showToast('撤单异常：' + e.message, 'error');
+  }
 }
 
 // 复用 head 里已检测好的标志（如果未加载到 marked，也强制兼容模式）
@@ -1009,7 +1987,39 @@ function showEmptyState() {
   document.getElementById('messages').innerHTML = `
     <div class="empty-state">
       <h2>选择会话或新建一个</h2>
+      ${tradeHintHTML()}
     </div>`;
+  // 重渲染后再按登录态刷一次文案
+  syncTradeHint();
+}
+
+function tradeHintHTML() {
+  return `
+    <div class="trade-hint" id="tradeHint">
+      <div class="badge-line">🔒 登录后可使用模拟盘交易美股</div>
+      <div>
+        支持 SPY / QQQ / AAPL / NVDA / TSLA 等主流标的，
+        <button class="login-link" onclick="showLoginModal()">用 Google 或 GitHub 登录</button>
+        即可开始。
+      </div>
+      <span class="small">⚠️ 当前为 Alpaca Paper Trading（模拟盘），使用虚拟资金，不涉及真金白银</span>
+    </div>`;
+}
+
+// 根据登录态动态切换提示语
+function syncTradeHint() {
+  var el = document.getElementById('tradeHint');
+  if (!el) return;
+  if (CURRENT_USER) {
+    el.classList.add('logged-in');
+    var name = CURRENT_USER.name || CURRENT_USER.email || '同学';
+    el.innerHTML =
+      '<div class="badge-line">✅ 已登录，可在对话中下单美股模拟盘</div>'
+      + '<div>试试问：「帮我买 5 股 AAPL，限价高 1%」或「查我现在的持仓」</div>'
+      + '<span class="small">⚠️ 当前为 Alpaca Paper Trading（模拟盘），不涉及真金白银</span>';
+  } else {
+    el.classList.remove('logged-in');
+  }
 }
 
 // ════════════════════════════════════════════════════════════
@@ -1036,6 +2046,23 @@ function renderMessage(m) {
     toolsHtml = m.tool_calls
       .filter(tc => tc.is_error && !SILENT_ERROR_TOOLS.has(tc.name))
       .map(tc => renderToolTrace(tc))
+      .join('');
+  }
+
+  // auth_required 历史回放：把"需要登录"提示渲染出来
+  let authRequiredHtml = '';
+  if (m.role === 'assistant' && Array.isArray(m.tool_calls)) {
+    const seen = new Set();
+    authRequiredHtml = m.tool_calls
+      .filter(tc => tc.is_error && isAuthRequiredResult(tc.result) && !seen.has(tc.name))
+      .map(tc => {
+        seen.add(tc.name);
+        const label = (typeof TOOL_LABELS !== 'undefined' && TOOL_LABELS[tc.name]) || tc.name;
+        return '<div class="chart-failed-notice">🔒 「' + label
+          + '」需要登录后才能使用。 '
+          + '<a href="javascript:void(0)" onclick="showLoginModal()" style="color:#60a5fa;text-decoration:underline;">点击登录</a>'
+          + '</div>';
+      })
       .join('');
   }
 
@@ -1099,6 +2126,7 @@ function renderMessage(m) {
     <div class="msg-role">${roleLabel}</div>
     ${attachmentHtml}
     <div class="msg-content">${content}</div>
+    ${authRequiredHtml}
     ${chartFailHtml}
     ${toolsHtml}
     ${suggestionsHtml}
@@ -1455,6 +2483,29 @@ function handleEvent(event, assistantDom, contentDom, tracesByName) {
   }
   else if (event.type === 'tool_result') {
     const label = TOOL_LABELS[event.name] || event.name;
+    // ── 下单意图：自动弹出确认弹窗 ──
+    if (event.name === 'place_order_intent' && !event.is_error
+        && event.result && event.result.intent_id
+        && event.result.show_confirm_modal) {
+      try {
+        showOrderConfirmModal(event.result.intent_id, event.result);
+      } catch (e) {
+        console.warn('order modal failed:', e);
+      }
+      // 同时落卡片（用户能看到 Agent 调了这个工具）
+    }
+    // ── auth_required：温和提示用户登录，不展示红色错误卡 ──
+    if (event.is_error && isAuthRequiredResult(event.result)) {
+      try {
+        var notice = document.createElement('div');
+        notice.className = 'chart-failed-notice';
+        notice.innerHTML =
+          '🔒 「' + label + '」需要登录后才能使用。'
+          + ' <a href="javascript:void(0)" onclick="showLoginModal()" style="color:#60a5fa;text-decoration:underline;">点击登录</a>';
+        assistantDom.querySelector('.msg-content').appendChild(notice);
+      } catch (_) {}
+      return;   // 不再继续渲染错误卡片
+    }
     // 这些"错误"是引导/部分失败，不该当失败展示红卡
     const SILENT_ERRORS = new Set(['factor_score', 'html_chart_render',
                                      'historical_prices', 'market_news_search',
@@ -1669,7 +2720,7 @@ async function uploadAttachmentIfAny() {
 }
 
 let _toastTimer = null;
-function showToast(msg, type = 'info', duration = 3000) {
+function showToast(msg, type = 'info', duration) {
   let toast = document.querySelector('.toast');
   if (!toast) {
     toast = document.createElement('div');
@@ -1679,8 +2730,11 @@ function showToast(msg, type = 'info', duration = 3000) {
   clearTimeout(_toastTimer);
   toast.className = 'toast show ' + type;
   toast.textContent = msg;
-  if (duration > 0) {
-    _toastTimer = setTimeout(() => toast.classList.remove('show'), duration);
+  // 默认时长：success 1.5s，其他 3s；显式传 duration 覆盖
+  const ms = (typeof duration === 'number') ? duration
+           : (type === 'success' ? 1500 : 3000);
+  if (ms > 0) {
+    _toastTimer = setTimeout(() => toast.classList.remove('show'), ms);
   }
 }
 
@@ -1688,7 +2742,12 @@ function showToast(msg, type = 'info', duration = 3000) {
 // 启动
 // ════════════════════════════════════════════════════════════
 
-loadSessions();
+// 先处理 URL 上的登录回跳提示，再拉用户信息，再加载会话
+handleAuthUrlParams();
+bootstrapAuth().then(loadSessions).catch(function (e) {
+  console.warn('bootstrap failed:', e);
+  loadSessions();
+});
 </script>
 
 </body>

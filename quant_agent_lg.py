@@ -23,9 +23,15 @@
 
 import json
 import re
+import time
 import datetime
 from typing import TypedDict, Annotated, Sequence
 from concurrent.futures import ThreadPoolExecutor
+
+# Token 批处理参数（环境变量可覆盖）
+import os as _os
+_TOKEN_FLUSH_MS = int(_os.getenv("LG_TOKEN_FLUSH_MS", "30"))        # 30ms 批量窗口
+_TOKEN_FLUSH_CHARS = int(_os.getenv("LG_TOKEN_FLUSH_CHARS", "40"))  # 或累计 40 字符
 
 from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
@@ -42,6 +48,9 @@ from quant_agent import (
     DEEPSEEK_API_KEY, DEEPSEEK_MODEL,
     render_markdown_to_html, _generate_followups, dispatch_tool,
     _sanitize_messages,
+    TRADING_TOOLS, _is_request_authenticated,
+    _set_request_device_id, _set_request_authenticated,
+    _get_request_device_id,
 )
 
 # ════════════════════════════════════════════════════════════
@@ -94,6 +103,16 @@ def _to_openai_tools(schemas):
     ]
 
 _llm_with_tools = _llm.bind_tools(_to_openai_tools(TOOL_SCHEMAS))
+# 未登录用户专用：去掉交易类工具
+_llm_with_tools_anon = _llm.bind_tools(
+    _to_openai_tools([s for s in TOOL_SCHEMAS
+                       if s["name"] not in TRADING_TOOLS])
+)
+
+
+def _llm_for_request():
+    """按当前请求鉴权状态选择 LLM 实例"""
+    return _llm_with_tools if _is_request_authenticated() else _llm_with_tools_anon
 
 
 # ════════════════════════════════════════════════════════════
@@ -125,15 +144,37 @@ async def _llm_node(state: AgentState, config=None) -> dict:
     await adispatch_custom_event("round_start", {}, config=config)
 
     full = None
-    async for chunk in _llm_with_tools.astream(state["messages"], config=config):
+    # ── Token 批处理：30ms 或 40 字符触发一次 dispatch ──
+    # 避免每 token 一次 callback 链路的开销（实测可省 1.5–2.5s）
+    buf = []
+    buf_len = 0
+    last_flush = time.monotonic()
+
+    async def _flush():
+        nonlocal buf, buf_len, last_flush
+        if buf:
+            await adispatch_custom_event(
+                "llm_token", {"text": "".join(buf)}, config=config)
+            buf = []
+            buf_len = 0
+            last_flush = time.monotonic()
+
+    async for chunk in _llm_for_request().astream(state["messages"], config=config):
         full = chunk if full is None else full + chunk
         content = getattr(chunk, "content", "") or ""
         if isinstance(content, list):
             content = "".join(p.get("text", "") for p in content
                                 if isinstance(p, dict))
         if content:
-            await adispatch_custom_event("llm_token", {"text": content},
-                                          config=config)
+            buf.append(content)
+            buf_len += len(content)
+            elapsed_ms = (time.monotonic() - last_flush) * 1000
+            if elapsed_ms >= _TOKEN_FLUSH_MS or buf_len >= _TOKEN_FLUSH_CHARS:
+                await _flush()
+
+    # 尾部残余必须发出
+    await _flush()
+
     return {
         "messages": [full] if full else [],
         "iteration": state.get("iteration", 0) + 1,
@@ -166,8 +207,15 @@ async def _tools_node(state: AgentState, config=None) -> dict:
 
     # 并行执行
     loop = _asyncio.get_event_loop()
+    # 在主线程读出当前 auth/device 状态，传给 worker 线程重新注入
+    # （否则 run_in_executor 的 worker 看不到主线程的 thread-local）
+    _ctx_authed = _is_request_authenticated()
+    _ctx_device = _get_request_device_id()
 
     def _run_one(tc):
+        # worker 线程：必须重新设置 thread-local，否则 dispatch_tool 守门会误判
+        _set_request_device_id(_ctx_device)
+        _set_request_authenticated(_ctx_authed)
         name, args, tc_id = _extract(tc)
         try:
             result = dispatch_tool(name, args)

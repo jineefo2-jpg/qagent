@@ -615,6 +615,42 @@ MOCK_QUOTES = {
 _QUOTE_CACHE_TTL = 30        # 盘中价格 30 秒精度足够
 
 
+# ════════════════════════════════════════════════════════════
+# 通用工具缓存装饰器（网络密集型工具用）
+#   - 命中缓存：在返回 dict 上加 from_cache=True 标记
+#   - 失败结果（success=False / dict 含 error）默认不缓存
+# ════════════════════════════════════════════════════════════
+
+def _tool_cache(prefix: str, ttl: int):
+    """根据全部入参 hash 做缓存的装饰器。"""
+    def deco(fn):
+        import functools as _ft
+        @_ft.wraps(fn)
+        def wrapper(*args, **kwargs):
+            try:
+                key_src = json.dumps([args, kwargs], ensure_ascii=False, default=str, sort_keys=True)
+            except Exception:
+                key_src = repr((args, kwargs))
+            import hashlib as _hl
+            key = f"quant:tool:{prefix}:{_hl.md5(key_src.encode('utf-8')).hexdigest()[:16]}"
+            cached = cache.get(key)
+            if cached is not None:
+                if isinstance(cached, dict):
+                    r = dict(cached); r["from_cache"] = True
+                    return r
+                return cached
+            result = fn(*args, **kwargs)
+            # 只缓存成功的 dict 结果
+            if isinstance(result, dict) and result.get("success", True) and not result.get("error"):
+                try:
+                    cache.set(key, result, ttl=ttl)
+                except Exception:
+                    pass
+            return result
+        return wrapper
+    return deco
+
+
 def market_quote(symbol: str) -> dict:
     """
     多源实时行情快照（30 秒缓存）。
@@ -1704,6 +1740,7 @@ def _news_yahoo(primary: str, max_results: int = 5):
         return [], []
 
 
+@_tool_cache("news", ttl=300)   # 5 分钟内同 query 直接走缓存
 def market_news_search(query: str, max_results: int = 5) -> dict:
     """
     多源财经新闻聚合搜索。
@@ -2415,6 +2452,7 @@ def _economic_finnhub(days_forward: int) -> dict:
         return None
 
 
+@_tool_cache("econcal", ttl=1800)   # 30 分钟
 def economic_calendar(days_forward: int = 7) -> dict:
     """
     全球经济日历（FOMC/CPI/PMI/利率决议等）。
@@ -2562,6 +2600,7 @@ def _earnings_investing(days_forward: int = 7,
         return None
 
 
+@_tool_cache("earncal", ttl=3600)   # 1 小时
 def earnings_calendar(market: str = "A",
                        date: str = None,
                        symbol: str = None) -> dict:
@@ -2654,6 +2693,7 @@ def earnings_calendar(market: str = "A",
 
 
 # ─── Tool 16: 个股公告（巨潮 / SEC EDGAR）──────────────
+@_tool_cache("annc", ttl=1800)   # 30 分钟
 def stock_announcements(symbol: str, days: int = 30) -> dict:
     """
     个股近期公告。
@@ -3475,6 +3515,209 @@ def html_chart_render(
     }
 
 
+# ════════════════════════════════════════════════════════════
+# 交易工具（Alpaca paper trading，半自动模式）
+#   - broker_account:        只读，查询账户/持仓/订单
+#   - place_order_intent:    生成订单意图（不直接下单，等用户在前端确认）
+#   - cancel_order:          直接撤单（低风险操作，但计入撤单率统计）
+#
+# device_id 通过线程局部变量传入（server.py 在每次请求设置）
+# ════════════════════════════════════════════════════════════
+
+import threading as _threading
+
+_request_ctx = _threading.local()
+
+
+def _set_request_device_id(device_id: str):
+    """server.py 在收到请求时调用，把 device_id 注入到工具调用的上下文"""
+    _request_ctx.device_id = device_id
+
+
+def _get_request_device_id() -> str:
+    return getattr(_request_ctx, "device_id", "default")
+
+
+def _set_request_authenticated(authenticated: bool):
+    """注入鉴权状态。未登录用户不能调交易工具"""
+    _request_ctx.authenticated = bool(authenticated)
+
+
+def _is_request_authenticated() -> bool:
+    return bool(getattr(_request_ctx, "authenticated", False))
+
+
+# 需要登录才能调用的工具白名单
+TRADING_TOOLS = {"broker_account", "place_order_intent", "cancel_order"}
+
+
+def get_tool_schemas_for(authenticated: bool) -> list:
+    """
+    根据鉴权状态返回 LLM 可见的工具清单。
+    未登录用户拿不到交易类工具的 schema，从源头降低误调风险。
+    """
+    if authenticated:
+        return TOOL_SCHEMAS
+    return [s for s in TOOL_SCHEMAS if s["name"] not in TRADING_TOOLS]
+
+
+def _broker_unavailable_response(reason: str) -> dict:
+    """凭证缺失/网络异常时给 Agent 的友好返回（让它给用户解释）"""
+    return {
+        "success": False,
+        "error_type": "broker_unavailable",
+        "error": reason,
+        "hint": "在 .env 配置 ALPACA_API_KEY / ALPACA_API_SECRET 后重启服务即可启用",
+    }
+
+
+def broker_account(action: str = "balance",
+                    status: str = "open",
+                    limit: int = 20) -> dict:
+    """
+    券商账户只读查询。
+    action:
+      - balance:   现金 + 净值 + 购买力
+      - positions: 当前持仓
+      - orders:    订单列表
+    """
+    try:
+        from brokers import get_broker, BrokerError
+        broker = get_broker("alpaca")
+    except Exception as e:
+        return _broker_unavailable_response(f"broker 模块未就绪: {e}")
+
+    if not broker.is_configured():
+        return _broker_unavailable_response("Alpaca 凭证未配置")
+
+    act = (action or "balance").lower()
+    try:
+        if act == "balance":
+            acc = broker.get_account()
+            return {
+                "success": True,
+                "action": "balance",
+                "broker": broker.name,
+                "account": acc.to_dict(),
+                "data_source": "Alpaca Paper Trading（模拟盘）",
+            }
+        elif act == "positions":
+            positions = broker.list_positions()
+            return {
+                "success": True,
+                "action": "positions",
+                "broker": broker.name,
+                "count": len(positions),
+                "positions": [p.to_dict() for p in positions],
+                "data_source": "Alpaca Paper Trading（模拟盘）",
+            }
+        elif act == "orders":
+            allowed = {"open", "closed", "all"}
+            st = status if status in allowed else "open"
+            orders = broker.list_orders(status=st, limit=int(limit))
+            return {
+                "success": True,
+                "action": "orders",
+                "broker": broker.name,
+                "status_filter": st,
+                "count": len(orders),
+                "orders": [o.to_dict() for o in orders],
+                "data_source": "Alpaca Paper Trading（模拟盘）",
+            }
+        else:
+            return {"success": False,
+                    "error": f"未知 action: {act}",
+                    "hint": "action 取值: balance / positions / orders"}
+    except BrokerError as e:
+        return {"success": False, "error_type": "broker_error", "error": str(e)}
+
+
+def place_order_intent(symbol: str,
+                        side: str,
+                        qty: float,
+                        limit_price: float,
+                        notes: str = "") -> dict:
+    """
+    生成订单意图。**不会直接下单**。
+    用户必须在前端弹窗中点"确认"，后端 /api/orders/confirm 走完风控才会真正下单。
+
+    强制限价单（防滑点）。
+    """
+    from brokers import OrderIntent, BrokerError
+    from brokers.intent_store import save_intent
+    from brokers.risk_gate import check_order
+
+    # 基本参数校验
+    try:
+        intent = OrderIntent.new(
+            symbol=symbol, side=side, qty=qty,
+            order_type="limit", limit_price=limit_price,
+            notes=notes or "",
+        )
+    except BrokerError as e:
+        return {"success": False, "error": str(e),
+                "hint": "symbol/side/qty/limit_price 必填；side ∈ {buy, sell}"}
+
+    # 预先跑一次风控，把可能的问题在前端弹窗里就告诉用户（不阻断创建）
+    pre_check = None
+    try:
+        from brokers import get_broker
+        broker = get_broker("alpaca")
+        if broker.is_configured():
+            acc = broker.get_account()
+            pre_check = check_order(intent, acc, _get_request_device_id(),
+                                     double_confirmed=False).to_dict()
+    except Exception:
+        # 预检失败不影响意图创建，前端确认时还会再检一次
+        pre_check = None
+
+    # 保存意图（用 device_id 作隔离）
+    device_id = _get_request_device_id()
+    save_intent(device_id, intent)
+
+    return {
+        "success": True,
+        "intent_id": intent.intent_id,
+        "intent": intent.to_dict(),
+        "pre_check": pre_check,
+        "show_confirm_modal": True,   # 前端识别这个字段→弹窗
+        "message": (f"已生成订单意图 {intent.intent_id}。"
+                     f"{'⚠️ ' + '；'.join(pre_check['reasons']) if pre_check and not pre_check.get('passed') else '请在弹窗中确认。'}"),
+        "ttl_seconds": 300,
+        "data_source": "Alpaca Paper Trading（半自动下单 - 等待用户确认）",
+    }
+
+
+def cancel_order(broker_order_id: str) -> dict:
+    """
+    撤销一笔挂单。直接执行（不走确认弹窗），但计入日内撤单率统计。
+    """
+    if not broker_order_id or not broker_order_id.strip():
+        return {"success": False, "error": "broker_order_id 不能为空"}
+
+    try:
+        from brokers import get_broker, BrokerError
+        from brokers.risk_gate import record_order_canceled
+        broker = get_broker("alpaca")
+    except Exception as e:
+        return _broker_unavailable_response(f"broker 模块未就绪: {e}")
+
+    if not broker.is_configured():
+        return _broker_unavailable_response("Alpaca 凭证未配置")
+
+    try:
+        broker.cancel_order(broker_order_id.strip())
+        record_order_canceled(_get_request_device_id())
+        return {
+            "success": True,
+            "broker_order_id": broker_order_id,
+            "message": "撤单已提交。注意：若订单已部分/全部成交，仅未成交部分会被撤销。",
+            "data_source": "Alpaca Paper Trading（模拟盘）",
+        }
+    except BrokerError as e:
+        return {"success": False, "error_type": "broker_error", "error": str(e)}
+
+
 TOOL_REGISTRY = {
     "market_quote":         market_quote,
     "factor_score":         factor_score,
@@ -3494,6 +3737,10 @@ TOOL_REGISTRY = {
     "stock_announcements":  stock_announcements,
     "portfolio_manage":     portfolio_manage,
     "alert_manage":         alert_manage,
+    # ── 交易工具（Alpaca paper）──
+    "broker_account":       broker_account,
+    "place_order_intent":   place_order_intent,
+    "cancel_order":         cancel_order,
 }
 
 TOOL_SCHEMAS = [
@@ -3928,6 +4175,89 @@ method 选项：
             "required": ["query"],
         }
     },
+    # ════════════════════════════════════════════════════════════
+    # 交易工具（Alpaca paper trading，半自动下单）
+    # ════════════════════════════════════════════════════════════
+    {
+        "name": "broker_account",
+        "description": """券商账户只读查询（Alpaca paper trading 模拟盘）。
+action 取值：
+  - balance:   现金 / 净值 / 购买力
+  - positions: 当前持仓列表
+  - orders:    订单列表（可配合 status: open/closed/all）
+**只读，不会下单。** 在帮用户分析"我该不该买/卖"之前，建议先 balance + positions 看清账户全貌。""",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["balance", "positions", "orders"],
+                    "description": "查询类型",
+                },
+                "status": {
+                    "type": "string",
+                    "enum": ["open", "closed", "all"],
+                    "default": "open",
+                    "description": "action=orders 时的状态过滤",
+                },
+                "limit": {
+                    "type": "integer",
+                    "default": 20,
+                    "description": "action=orders 时返回条数上限",
+                },
+            },
+            "required": ["action"],
+        }
+    },
+    {
+        "name": "place_order_intent",
+        "description": """生成下单**意图**（不会直接下单！）。
+适用：用户明确表达"买入"/"卖出"美股的意图时调用。
+
+工作流：
+  1. 你调此工具 → 返回 intent_id
+  2. 前端自动弹出确认对话框，展示订单参数和预估金额
+  3. 用户点"确认下单"后，后端走风控并真正提交到券商
+  4. 你只负责生成意图，**不要假设它已经成交**
+
+**强制限价单**（防滑点）。仅支持美股（NYSE/NASDAQ），白名单内的标的。
+
+调用前建议：
+  - 先用 broker_account('balance') 看可用资金
+  - 用 market_quote 看当前价 → 给合理的 limit_price（一般买入设当前价附近、卖出同理）
+  - 在 notes 字段简要写下你建议这笔交易的理由（用户在弹窗能看到）""",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "symbol": {"type": "string",
+                            "description": "美股代码，如 AAPL / NVDA / SPY"},
+                "side": {"type": "string", "enum": ["buy", "sell"]},
+                "qty": {"type": "number",
+                         "description": "股数（必须为正数；不支持小数股）"},
+                "limit_price": {"type": "number",
+                                 "description": "限价（必填）。买入时一般设当前价 ±1%"},
+                "notes": {"type": "string",
+                           "description": "下单理由（简短一句，给用户看）"},
+            },
+            "required": ["symbol", "side", "qty", "limit_price"],
+        }
+    },
+    {
+        "name": "cancel_order",
+        "description": """撤销一笔挂单。
+需要 broker_order_id（从 broker_account(action='orders') 的返回里拿）。
+撤单计入日内撤单率统计，撤单率过高会被风控阻断后续下单。""",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "broker_order_id": {
+                    "type": "string",
+                    "description": "券商返回的订单 ID（不是 intent_id）",
+                },
+            },
+            "required": ["broker_order_id"],
+        }
+    },
 ]
 
 
@@ -3961,6 +4291,38 @@ SYSTEM_PROMPT = """你是 QuantAgent v1.0，量化金融分析助手（多因子
 - 不编造数据，缺数据标注 [DATA UNAVAILABLE]
 - 不省略风险提示
 
+【交易工具使用规则 — 美股 Alpaca paper trading】
+触发条件：用户**明确表达**"买入/卖出 X 股 YYY"等下单意图时，才调 place_order_intent。
+  - 用户问"该不该买" / "现在能买吗" → **不要直接下单**，先分析再让用户决定
+  - 用户说"帮我买 10 股 AAPL" → 可以走下单流程
+
+下单前必做（按顺序）：
+  1. broker_account('balance') 看可用资金
+  2. market_quote(symbol) 看当前价
+  3. 估算金额，确认在用户预算内
+  4. place_order_intent(...) 生成意图（**只生成意图，不会真下单**，等用户在前端确认）
+
+下单参数原则：
+  - 限价：买入 limit_price 设当前价 ±1%，卖出同理（防止剧烈滑点）
+  - 股数：默认保守，单笔金额不要超过用户可用资金 20%（除 ETF 可放宽到 50%）
+  - notes：用一句话写明白下单理由（如 "RSI 30 超卖 + 财报亮眼"），用户在确认弹窗能看到
+
+风控规则（系统会自动检查）：
+  - 白名单：仅支持 SPY/QQQ/AAPL/MSFT/NVDA/AMZN/GOOGL/META/TSLA 等主流标的
+  - 非白名单标的会被风控拒绝，**不要硬塞**，告诉用户"该标的暂不在交易白名单"
+  - 强制限价单，市价单已被禁用
+
+意图返回后：
+  - place_order_intent 返回 {intent_id, pre_check, show_confirm_modal: true}
+  - 你只需在回答里**简单说明**"已生成订单意图，请在弹窗中确认"
+  - 不要假设订单已成交；用户可能取消
+  - 如 pre_check.passed=false，提醒用户具体被拦的原因（reasons 列表）
+
+绝对不允许：
+  - 不要在用户没明说的情况下"主动"建议下单
+  - 不要为了"完成任务"硬下不合理的单（如资金不足、标的不在白名单）
+  - 不要承诺成交价格或盈亏
+
 【报告输出格式（仅"分析"类问题）】
 ```
 # 📊 [标题]
@@ -3987,6 +4349,15 @@ SYSTEM_PROMPT = """你是 QuantAgent v1.0，量化金融分析助手（多因子
 # ════════════════════════════════════════════════════════════
 
 def dispatch_tool(tool_name: str, tool_input: dict) -> dict:
+    # ── 鉴权守门：交易类工具必须已登录 ──
+    if tool_name in TRADING_TOOLS and not _is_request_authenticated():
+        return {
+            "success": False,
+            "error_type": "auth_required",
+            "error": "交易功能需要登录后才能使用",
+            "hint": "请在页面右上角用 Google 或 GitHub 登录后再试",
+        }
+
     fn = TOOL_REGISTRY.get(tool_name)
     if fn is None:
         return {"success": False,
@@ -4017,6 +4388,15 @@ def _to_openai_tools(anthropic_schemas: list) -> list:
 
 # 模块加载时转换一次，避免每轮迭代重算
 _OPENAI_TOOLS = _to_openai_tools(TOOL_SCHEMAS)
+# 未登录用户的工具清单（去掉交易类）—— 预先生成避免每次请求重新计算
+_OPENAI_TOOLS_ANON = _to_openai_tools(
+    [s for s in TOOL_SCHEMAS if s["name"] not in TRADING_TOOLS]
+)
+
+
+def _current_openai_tools() -> list:
+    """根据当前请求的鉴权状态返回对应工具清单"""
+    return _OPENAI_TOOLS if _is_request_authenticated() else _OPENAI_TOOLS_ANON
 
 
 def _truncate_observation(obs: dict, obs_str: str, max_len: int = 2500) -> str:
@@ -4168,7 +4548,7 @@ def stream_quant_agent(messages: list, max_iterations: int = 15):
             stream = client.chat.completions.create(
                 model=DEEPSEEK_MODEL,
                 messages=messages,
-                tools=_OPENAI_TOOLS,
+                tools=_current_openai_tools(),
                 max_tokens=8000,
                 stream=True,
             )

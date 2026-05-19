@@ -19,3 +19,15 @@ yfinance>=0.2.0
 chromadb>=1.5.0
 pymupdf>=1.26.0
 sentence-transformers>=5.0.0
+
+# 可选：LangGraph 主循环（USE_LANGGRAPH=1 时启用）
+langgraph>=0.2.0
+langchain-openai>=0.2.0
+langchain-core>=0.3.0
+
+# 可选：Alpaca paper trading（半自动下单）
+alpaca-py>=0.30.0
+
+# OAuth 账户登录（Google / GitHub）
+authlib>=1.3.0
+itsdangerous>=2.1.0
