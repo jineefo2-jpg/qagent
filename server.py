@@ -127,18 +127,21 @@ async def _warmup():
     import time as _t
     t0 = _t.monotonic()
 
-    # 1. 预热 bge 嵌入模型（首次 search_research_docs 不再卡 5s）
+    # 1. 预热 bge 嵌入模型 + bge-reranker（首次 search 不再卡）
     async def _warm_embedder():
         try:
             loop = asyncio.get_event_loop()
             def _load():
-                from rag.indexer import get_embedder
+                from rag.indexer import get_embedder, get_reranker
                 emb = get_embedder()
-                # 一次试编码触发底层 kernel JIT
                 emb.encode(["预热"], normalize_embeddings=True)
+                # 同步加载 reranker（cross-encoder）
+                rr = get_reranker()
+                if rr is not None:
+                    rr.predict([("预热查询", "预热文档")], show_progress_bar=False)
                 return True
             await loop.run_in_executor(None, _load)
-            print(f"🔥 嵌入模型预热完成 ({_t.monotonic()-t0:.1f}s)")
+            print(f"🔥 嵌入 + 精排模型预热完成 ({_t.monotonic()-t0:.1f}s)")
         except Exception as e:
             print(f"⚠️  嵌入模型预热失败（不影响主流程）: {e}")
 

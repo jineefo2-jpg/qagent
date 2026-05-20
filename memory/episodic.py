@@ -39,22 +39,87 @@ DEDUP_SIMILARITY = 0.85        # 写入时若已有相似度 > 此值的记忆 �
 STALE_AFTER_DAYS = 180         # 超过此天数未被访问 → 视为过期，清理时删除
 
 
+# ════════════════════════════════════════════════════════════
 # 隐私正则（防止 LLM 把用户敏感信息存入向量库）
-_RE_PHONE_CN = re.compile(r'1[3-9]\d{9}')
-_RE_ID_CN = re.compile(r'\d{17}[\dXx]')      # 18 位身份证
-_RE_CARD = re.compile(r'\d{13,19}')           # 银行卡 13-19 位
+# 顺序：先识别更具体的（身份证 → 手机 → IP → API key → 信用卡）
+# ════════════════════════════════════════════════════════════
+
+# 中国手机号（11 位，1[3-9] 开头）
+_RE_PHONE_CN = re.compile(r'(?<!\d)1[3-9]\d{9}(?!\d)')
+
+# 18 位身份证（最后一位可为 X/x）
+_RE_ID_CN = re.compile(r'(?<!\d)\d{17}[\dXx](?!\d)')
+
+# IPv4（严格语法：每段 0-255）
+_RE_IPV4 = re.compile(
+    r'(?<!\d)(?:(?:25[0-5]|2[0-4]\d|1\d{2}|[1-9]?\d)\.){3}'
+    r'(?:25[0-5]|2[0-4]\d|1\d{2}|[1-9]?\d)(?!\d)'
+)
+
+# IPv6（简化版：至少含 2 个冒号）
+_RE_IPV6 = re.compile(r'\b(?:[0-9a-fA-F]{1,4}:){2,7}[0-9a-fA-F]{1,4}\b')
+
+# API key / token 模式（覆盖常见服务）
+_RE_API_KEY_PATTERNS = [
+    # OpenAI / DeepSeek 等 sk- 开头
+    re.compile(r'\bsk-[A-Za-z0-9_-]{20,}\b'),
+    # Anthropic
+    re.compile(r'\bsk-ant-api\d{2}-[A-Za-z0-9_-]{30,}\b'),
+    # GitHub PAT / OAuth token
+    re.compile(r'\bghp_[A-Za-z0-9]{30,}\b'),
+    re.compile(r'\bgho_[A-Za-z0-9]{30,}\b'),
+    re.compile(r'\bghs_[A-Za-z0-9]{30,}\b'),
+    re.compile(r'\bgithub_pat_[A-Za-z0-9_]{60,}\b'),
+    # AWS Access Key ID
+    re.compile(r'\bAKIA[A-Z0-9]{16}\b'),
+    # Google OAuth Client Secret
+    re.compile(r'\bGOCSPX-[A-Za-z0-9_-]{20,}\b'),
+    # Stripe
+    re.compile(r'\bsk_(test|live)_[A-Za-z0-9]{24,}\b'),
+    # Alpaca Trading API
+    re.compile(r'\bPK[A-Z0-9]{15,}\b'),
+    re.compile(r'\bAK[A-Z0-9]{15,}\b'),
+    # JWT token（三段 base64 用点分隔）
+    re.compile(r'\beyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+'),
+    # GitHub OAuth App secret（40 位 hex）—— 仅在前后有"secret"/"token"上下文时识别太复杂，
+    # 这里只识别 GitHub OAuth Client ID 前缀
+    re.compile(r'\bIv1\.[A-Za-z0-9]{14,}\b'),
+    re.compile(r'\bOv23li[A-Za-z0-9]{10,}\b'),
+]
+
+# 银行卡（13-19 位连续数字，但前后非数字）
+_RE_CARD = re.compile(r'(?<!\d)\d{13,19}(?!\d)')
+
+# 邮箱（不当作敏感拦截，仅用于上下文判断）
 _RE_EMAIL = re.compile(r'[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}')
 
 
 def _has_sensitive(text: str) -> Optional[str]:
-    """返回触发的敏感类型，无则返回 None"""
+    """
+    返回触发的敏感类型，无则返回 None。
+    检查顺序按"信息密度"从高到低：身份证 > 手机 > IP > API key > 信用卡。
+    """
+    if not text:
+        return None
     if _RE_ID_CN.search(text):
         return "身份证号"
     if _RE_PHONE_CN.search(text):
         return "手机号"
+    if _RE_IPV4.search(text):
+        return "IPv4 地址"
+    if _RE_IPV6.search(text):
+        return "IPv6 地址"
+    for pat in _RE_API_KEY_PATTERNS:
+        m = pat.search(text)
+        if m:
+            # 截前缀 + 长度做日志（不打印完整 key）
+            prefix = m.group()[:6]
+            return f"API key/token（{prefix}…）"
+    # 银行卡：避开身份证号的 18 位区段；要求是孤立的纯数字串
     if _RE_CARD.search(text) and not _RE_ID_CN.search(text):
-        # 银行卡跟身份证段位重叠，先识身份证再判卡
-        return "银行卡号"
+        # 排除 13 位的电话/座机这种短串误报：要求是 16-19 位才报"信用卡"
+        # 13-15 位的可能是 ISBN/订单号 → 仍然敏感，保守拦
+        return "长数字串/银行卡号"
     return None
 
 
@@ -193,21 +258,28 @@ def search_memories(
     min_score: float = DEFAULT_MIN_SCORE,
 ) -> List[Dict]:
     """
-    按相似度检索当前用户的情景记忆。仅返回 score >= min_score 的。
-    每条返回：{id, content, type, score, created_at, summary}
+    按相似度检索当前用户的情景记忆，启用了 rerank 时走两阶段精排。
+    仅返回 score >= min_score 的。
+    每条返回：{id, content, type, score, created_at, summary, rerank_score?}
     """
     if not user_id or not query or not query.strip():
         return []
     top_k = max(1, min(int(top_k), 20))
+
+    # 启用 rerank 时召回 5 倍候选喂给 cross-encoder
+    from rag.config import RERANK_ENABLED, RERANK_CANDIDATES_MULTIPLIER
+
     try:
         coll = _get_collection()
-        # 没有记录就直接返回，避免无意义查询
         if coll.count() == 0:
             return []
         vec = _embed([query])[0]
+        n_candidates = (top_k * RERANK_CANDIDATES_MULTIPLIER
+                        if RERANK_ENABLED else top_k)
+        n_candidates = min(n_candidates, max(coll.count(), 1))
         res = coll.query(
             query_embeddings=[vec],
-            n_results=top_k,
+            n_results=n_candidates,
             where={"user_id": str(user_id)},
         )
     except Exception as e:
@@ -221,17 +293,37 @@ def search_memories(
     ids = (res.get("ids") or [[]])[0]
     dists = (res.get("distances") or [[]])[0]
 
+    # ── 用 reranker 重打分（如已加载）──
+    rerank_scores = None
+    if RERANK_ENABLED and docs:
+        try:
+            from rag.indexer import get_reranker
+            reranker = get_reranker()
+            if reranker is not None:
+                pairs = [(query, d) for d in docs]
+                rerank_scores = reranker.predict(
+                    pairs, show_progress_bar=False).tolist()
+        except Exception:
+            rerank_scores = None
+
+    # 排序索引：优先 rerank_score 降序，否则按 distance 升序
+    if rerank_scores is not None:
+        order = sorted(range(len(docs)),
+                       key=lambda i: rerank_scores[i], reverse=True)
+    else:
+        order = sorted(range(len(docs)),
+                       key=lambda i: float(dists[i]) if dists else 1.0)
+
     out = []
     hit_ids = []
     hit_metas = []
-    for i in range(len(docs)):
-        # cosine 距离 → 相似度
+    for i in order[:top_k]:
         dist = float(dists[i]) if dists else 1.0
         score = max(0.0, 1.0 - dist)
         if score < min_score:
             continue
         meta = metas[i] or {}
-        out.append({
+        item = {
             "id": ids[i],
             "content": docs[i],
             "type": meta.get("type", "fact"),
@@ -239,7 +331,10 @@ def search_memories(
             "created_at": meta.get("created_at", 0),
             "summary": meta.get("summary", docs[i][:80]),
             "score": round(score, 4),
-        })
+        }
+        if rerank_scores is not None:
+            item["rerank_score"] = round(float(rerank_scores[i]), 4)
+        out.append(item)
         hit_ids.append(ids[i])
         hit_metas.append(dict(meta))
 

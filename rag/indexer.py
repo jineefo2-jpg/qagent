@@ -22,7 +22,7 @@ from sentence_transformers import SentenceTransformer
 from .config import (
     DOCS_DIR, DB_DIR, EMBEDDING_MODEL,
     CHUNK_SIZE, CHUNK_OVERLAP, MIN_CHUNK_LEN,
-    COLLECTION_NAME,
+    COLLECTION_NAME, RERANKER_MODEL,
 )
 
 
@@ -43,18 +43,144 @@ def extract_pdf_pages(pdf_path: Path):
     return pages
 
 
-def chunk_text(text: str, chunk_size: int, overlap: int):
-    """简单的字符级分块（中文不需要 token 分词）"""
-    chunks = []
-    start = 0
-    n = len(text)
-    while start < n:
-        end = min(start + chunk_size, n)
-        chunks.append(text[start:end])
-        if end == n:
+# ════════════════════════════════════════════════════════════
+# Recursive Character 分块（中英文混合，金融文档优化）
+#
+# 核心思想：按"语义重要性"分级使用分隔符，能用段落切就不用句子切。
+#   1. 先按高级分隔符（段落/句号）切到全部片段 ≤ chunk_size
+#   2. 把小片段合并为 ~chunk_size 的 chunk
+#   3. 相邻 chunk 之间保留 overlap（保持上下文连续）
+#
+# 关键改进点（vs 旧字符级硬切）：
+#   - 句子末尾才切，不再"句子中间"截断
+#   - markdown 表格行（用 \n 分隔）能被识别
+#   - 小数（"15.5%"）不会被英文句号切开（要求 ". " 才算句末）
+#   - 段落空行（\n\n）优先级最高，最大程度保留逻辑单元
+# ════════════════════════════════════════════════════════════
+
+# 中英金融文档常见分隔符（按优先级降序；空字符串是字符级兜底）
+DEFAULT_SEPARATORS = [
+    "\n\n",       # 段落
+    "\n",         # 换行（表格行也走这个）
+    "。", "！", "？",   # 中文句末
+    "；",          # 中文分号
+    ". ",         # 英文句末（带空格，避免 15.5% 被切）
+    "? ", "! ", "; ",   # 英文标点带空格
+    "，", ", ",   # 逗号
+    " ",          # 空格
+    "",           # 字符级兜底
+]
+
+
+def _split_keep_separator(text: str, sep: str) -> list:
+    """按 sep 切分，把分隔符保留在前一段的尾部"""
+    if sep == "":
+        return list(text)
+    parts = text.split(sep)
+    if len(parts) <= 1:
+        return parts
+    return [p + sep for p in parts[:-1]] + [parts[-1]]
+
+
+def _recursive_split(text: str, separators: list, chunk_size: int) -> list:
+    """递归切分到所有片段 ≤ chunk_size"""
+    if len(text) <= chunk_size:
+        return [text]
+
+    # 找到本轮要用的分隔符（首个文本里出现的，或最终空字符串）
+    sep = ""
+    next_seps = separators
+    for i, s in enumerate(separators):
+        if s == "":
+            sep = s
+            next_seps = []
             break
-        start = end - overlap
+        if s in text:
+            sep = s
+            next_seps = separators[i + 1:]
+            break
+
+    # 字符级兜底：定长硬切
+    if sep == "":
+        return [text[i:i + chunk_size] for i in range(0, len(text), chunk_size)]
+
+    splits = _split_keep_separator(text, sep)
+
+    # 对仍然超长的片段继续递归切
+    result = []
+    for s in splits:
+        if len(s) <= chunk_size:
+            result.append(s)
+        elif next_seps:
+            result.extend(_recursive_split(s, next_seps, chunk_size))
+        else:
+            # 没分隔符了 → 字符硬切
+            for k in range(0, len(s), chunk_size):
+                result.append(s[k:k + chunk_size])
+    return result
+
+
+def _merge_with_overlap(pieces: list, chunk_size: int, overlap: int) -> list:
+    """
+    贪心合并小片段为 chunk，相邻 chunk 之间字符级 overlap。
+
+    严格按字符长度（不按 piece 边界）控制 overlap，避免单 piece 过大导致
+    chunk 实际长度超过 chunk_size。
+    """
+    if not pieces:
+        return []
+    overlap = max(0, min(overlap, max(1, chunk_size - 1)))   # 防呆
+
+    chunks = []
+    current = ""
+
+    for p in pieces:
+        if len(current) + len(p) <= chunk_size:
+            current += p
+            continue
+        # 当前 chunk 满了
+        if current:
+            chunks.append(current)
+            # 从末尾按字符取 overlap 长度作为下一个 chunk 的起点
+            current = current[-overlap:] if overlap > 0 else ""
+        # 加上新片段；若新片段自己超长（_recursive_split 兜底过了，这里再保险）
+        if len(current) + len(p) <= chunk_size:
+            current += p
+        else:
+            # 当前已有 overlap + 新片段超长 → 先提交 overlap+部分，再剩余字符级硬切
+            remaining = chunk_size - len(current)
+            current += p[:remaining]
+            chunks.append(current)
+            current = p[remaining:]
+            # 若剩余仍超长，字符级硬切
+            while len(current) > chunk_size:
+                chunks.append(current[:chunk_size])
+                tail = current[chunk_size - overlap:] if overlap > 0 else ""
+                current = tail + ""   # 继续在 current 里挂下一片
+                break
+
+    if current:
+        chunks.append(current)
+
     return chunks
+
+
+def chunk_text(text: str, chunk_size: int, overlap: int) -> list:
+    """
+    Recursive Character 切分（保留旧函数名，平滑替换）。
+    自动按 "段落 → 句号 → 分号 → 逗号 → 空格 → 字符" 多级回退。
+    """
+    if not text or not text.strip():
+        return []
+
+    # 1. 递归切到所有片段 ≤ chunk_size
+    pieces = _recursive_split(text, DEFAULT_SEPARATORS, chunk_size)
+
+    # 2. 贪心合并 + 加 overlap
+    chunks = _merge_with_overlap(pieces, chunk_size, overlap)
+
+    # 3. 清洗空白
+    return [c.strip() for c in chunks if c.strip()]
 
 
 def build_chunks(pdf_path: Path):
@@ -94,6 +220,8 @@ def build_chunks(pdf_path: Path):
 
 _embedder = None
 _client = None
+_reranker = None
+_reranker_failed = False   # 加载失败标记：避免每次检索都重试
 
 
 def get_embedder():
@@ -104,6 +232,43 @@ def get_embedder():
         _embedder = SentenceTransformer(EMBEDDING_MODEL)
         print(f"✅ 模型已加载，向量维度 {_embedder.get_sentence_embedding_dimension()}")
     return _embedder
+
+
+def get_reranker():
+    """
+    惰性加载 cross-encoder 精排模型（首次下载 ~110MB）。
+    依次尝试 HF mirror → 官方 → ModelScope；都挂掉时 fallback 到仅嵌入排序。
+    """
+    global _reranker, _reranker_failed
+    if _reranker_failed:
+        return None
+    if _reranker is not None:
+        return _reranker
+
+    from sentence_transformers import CrossEncoder
+
+    # 依次尝试不同的 endpoint
+    endpoints = [
+        ("HF mirror（国内代理）", "https://hf-mirror.com"),
+        ("HuggingFace 官方", "https://huggingface.co"),
+    ]
+
+    print(f"⏳ 加载精排模型 {RERANKER_MODEL}...")
+    last_err = None
+    for label, ep in endpoints:
+        try:
+            os.environ["HF_ENDPOINT"] = ep
+            _reranker = CrossEncoder(RERANKER_MODEL, max_length=512)
+            print(f"✅ 精排模型已加载（来源: {label}）")
+            return _reranker
+        except Exception as e:
+            print(f"  ⚠️  {label} 失败: {str(e)[:120]}")
+            last_err = e
+            continue
+
+    print(f"⚠️  所有镜像均失败（将仅用 embedding 排序）: {last_err}")
+    _reranker_failed = True
+    return None
 
 
 def _build_chroma_client():

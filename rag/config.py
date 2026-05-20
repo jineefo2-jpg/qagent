@@ -18,3 +18,10 @@ MIN_CHUNK_LEN = 30     # 太短的块（页眉/页码）丢弃
 # 检索默认参数
 DEFAULT_TOP_K = 3
 COLLECTION_NAME = "research_docs"
+
+# Reranker（cross-encoder，精排）
+# 流程：bi-encoder 召回 top_k * MULTIPLIER 候选 → cross-encoder 重打分 → 取 top_k
+RERANKER_MODEL = "BAAI/bge-reranker-base"   # 110MB，中文友好
+RERANK_ENABLED = True                         # 全局开关
+RERANK_CANDIDATES_MULTIPLIER = 5              # 召回 top_k * 5 喂给 reranker
+RERANK_MIN_SCORE = -10.0                       # reranker logit 阈值，过低不返回（保守）

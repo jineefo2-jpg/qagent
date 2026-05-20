@@ -1,10 +1,52 @@
 """
 RAG 检索接口 —— 被 quant_agent.py 作为工具调用。
+
+两阶段检索：
+  1. bi-encoder（bge-small-zh）KNN 召回 top_k * MULTIPLIER 候选
+  2. cross-encoder（bge-reranker-base）对候选重打分，取 top_k
 """
 from typing import Optional
 
-from .config import DEFAULT_TOP_K, COLLECTION_NAME
-from .indexer import get_embedder, get_collection, reset_chroma_client
+from .config import (
+    DEFAULT_TOP_K, COLLECTION_NAME,
+    RERANK_ENABLED, RERANK_CANDIDATES_MULTIPLIER, RERANK_MIN_SCORE,
+)
+from .indexer import (
+    get_embedder, get_collection, reset_chroma_client, get_reranker,
+)
+
+
+def _rerank(query: str, candidates: list) -> list:
+    """
+    对候选 chunk 列表用 cross-encoder 重打分。
+    candidates: [{doc, meta, distance}, ...]
+    返回按新分数降序排序的列表（每条新增 rerank_score 字段）。
+
+    若 reranker 未加载/加载失败，直接返回原列表（按 distance 升序）。
+    """
+    if not candidates:
+        return candidates
+    if not RERANK_ENABLED:
+        return candidates
+
+    reranker = get_reranker()
+    if reranker is None:
+        return candidates    # fallback: 仅嵌入排序
+
+    pairs = [(query, c["doc"]) for c in candidates]
+    try:
+        scores = reranker.predict(pairs, show_progress_bar=False).tolist()
+    except Exception as e:
+        # 推理出错也降级
+        print(f"⚠️  rerank 失败，回退到 embedding 排序: {e}")
+        return candidates
+
+    for c, s in zip(candidates, scores):
+        c["rerank_score"] = float(s)
+    # 按 rerank_score 降序，过滤太低的
+    candidates = [c for c in candidates if c["rerank_score"] >= RERANK_MIN_SCORE]
+    candidates.sort(key=lambda x: x["rerank_score"], reverse=True)
+    return candidates
 
 
 def _is_client_closed(err: Exception) -> bool:
@@ -38,8 +80,14 @@ def search_research_docs(
         embedder = get_embedder()
         query_vec = embedder.encode([query], normalize_embeddings=True).tolist()[0]
         where = {"doc_name": {"$eq": doc_filter}} if doc_filter else None
-        n = max(1, min(int(top_k), 10))
-        return coll.query(query_embeddings=[query_vec], n_results=n, where=where)
+        final_k = max(1, min(int(top_k), 10))
+        # 启用 rerank 时拉更多候选（用 reranker 精排回 final_k）
+        n_candidates = final_k * RERANK_CANDIDATES_MULTIPLIER if RERANK_ENABLED else final_k
+        return coll.query(
+            query_embeddings=[query_vec],
+            n_results=min(n_candidates, max(coll.count(), 1)),
+            where=where,
+        )
 
     # 第 1 次尝试
     try:
@@ -76,16 +124,34 @@ def search_research_docs(
             "note": "未检索到相关段落",
         }
 
-    results = []
+    # ── 整理候选 → 喂 reranker ──
+    candidates = []
     for doc, meta, dist in zip(docs, metas, distances):
-        results.append({
+        candidates.append({
+            "doc": doc.strip(),
+            "meta": meta or {},
+            "distance": float(dist) if dist is not None else 1.0,
+        })
+
+    reranked = _rerank(query, candidates)
+    final_k = max(1, min(int(top_k), 10))
+    reranked = reranked[:final_k]
+
+    results = []
+    for c in reranked:
+        meta = c["meta"]
+        relevance = round(1 - c["distance"], 4)
+        item = {
             "doc_name":  meta.get("doc_name"),
             "page":      meta.get("page"),
             "source":    meta.get("source"),
-            "content":   doc.strip(),
-            "relevance": round(1 - dist, 4),  # cosine distance → 相似度
+            "content":   c["doc"],
+            "relevance": relevance,
             "citation":  f"《{meta.get('doc_name')}》第 {meta.get('page')} 页",
-        })
+        }
+        if "rerank_score" in c:
+            item["rerank_score"] = round(c["rerank_score"], 4)
+        results.append(item)
 
     return {
         "success":     True,
@@ -93,6 +159,7 @@ def search_research_docs(
         "results":     results,
         "result_count": len(results),
         "kb_total":    coll.count(),
+        "rerank":      RERANK_ENABLED and (get_reranker() is not None),
         "data_source": f"内部文档库（{COLLECTION_NAME}）",
         "disclaimer":  "引用内容来自已入库 PDF，请核对原文准确性",
     }
