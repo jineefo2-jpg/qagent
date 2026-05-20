@@ -51,6 +51,7 @@ from quant_agent import (
     TRADING_TOOLS, _is_request_authenticated,
     _set_request_device_id, _set_request_authenticated,
     _get_request_device_id,
+    _build_system_prompt,
 )
 
 # ════════════════════════════════════════════════════════════
@@ -401,8 +402,12 @@ async def stream_quant_agent_lg(messages: list, max_iterations: int = 15):
       - error:          异常
     """
     _sanitize_messages(messages)
+    # 动态拼装 system prompt（含当前用户档案 + Top-3 情景记忆）
+    sys_prompt = _build_system_prompt(messages)
     if not messages or messages[0].get("role") != "system":
-        messages.insert(0, {"role": "system", "content": SYSTEM_PROMPT})
+        messages.insert(0, {"role": "system", "content": sys_prompt})
+    else:
+        messages[0]["content"] = sys_prompt
 
     lc_msgs = _openai_to_lc_messages(messages)
     state = {"messages": lc_msgs, "iteration": 0}

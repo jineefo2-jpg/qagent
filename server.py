@@ -912,6 +912,96 @@ def reset_account(x_device_id: Optional[str] = Header(None),
 
 
 # ════════════════════════════════════════════════════════════
+# 长记忆 API（Phase 1：结构化档案）
+#   GET    /api/memory/profile          读当前用户档案
+#   PUT    /api/memory/profile          全量更新（覆盖）
+#   PATCH  /api/memory/profile          增量更新（merge）
+#   DELETE /api/memory/profile          清空档案
+# ════════════════════════════════════════════════════════════
+
+
+class ProfileUpdateRequest(BaseModel):
+    updates: dict
+
+
+@app.get("/api/memory/profile")
+def api_get_memory_profile(user: User = Depends(require_user)):
+    from memory import get_profile, profile_summary_text
+    p = get_profile(user.user_id)
+    return {
+        "profile": p.to_dict(),
+        "summary": profile_summary_text(p),
+    }
+
+
+@app.patch("/api/memory/profile")
+def api_patch_memory_profile(body: ProfileUpdateRequest,
+                              user: User = Depends(require_user)):
+    """增量更新 —— 只覆盖 updates 里出现的字段"""
+    from memory import update_profile_fields, profile_summary_text
+    try:
+        p = update_profile_fields(user.user_id, body.updates or {})
+        return {
+            "success": True,
+            "profile": p.to_dict(),
+            "summary": profile_summary_text(p),
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@app.delete("/api/memory/profile")
+def api_delete_memory_profile(user: User = Depends(require_user)):
+    """清空档案"""
+    from memory import clear_profile
+    clear_profile(user.user_id)
+    return {"success": True}
+
+
+# ── Layer 2: 情景记忆 ──
+
+@app.get("/api/memory/episodic")
+def api_list_episodic(limit: int = 50, user: User = Depends(require_user)):
+    """列出当前用户的所有情景记忆"""
+    from memory import list_memories
+    items = list_memories(user.user_id, limit=int(limit))
+    return {"success": True, "count": len(items), "memories": items}
+
+
+@app.delete("/api/memory/episodic/{memory_id}")
+def api_delete_episodic(memory_id: str, user: User = Depends(require_user)):
+    """删除一条情景记忆"""
+    from memory import delete_memory
+    ok = delete_memory(user.user_id, memory_id)
+    if not ok:
+        return {"success": False, "error": "记忆不存在或不属于当前用户"}
+    return {"success": True}
+
+
+@app.delete("/api/memory/episodic")
+def api_clear_episodic(user: User = Depends(require_user)):
+    """清空当前用户全部情景记忆"""
+    from memory import clear_user_memories
+    n = clear_user_memories(user.user_id)
+    return {"success": True, "deleted_count": n}
+
+
+@app.get("/api/memory/stats")
+def api_memory_stats(user: User = Depends(require_user)):
+    """记忆使用情况统计（UI 展示）"""
+    from memory import memory_stats
+    return memory_stats(user.user_id)
+
+
+@app.post("/api/memory/prune")
+def api_memory_prune(days: int = 180,
+                     user: User = Depends(require_user)):
+    """手动触发：清理 N 天未访问的旧记忆（默认 180 天）"""
+    from memory import prune_stale_memories
+    return prune_stale_memories(user_id=user.user_id, days=int(days))
+
+
+# ════════════════════════════════════════════════════════════
 # OAuth 账户路由
 #   /auth/{provider}/login      302 跳转去 OAuth consent
 #   /auth/{provider}/callback   处理回调，签发 cookie session

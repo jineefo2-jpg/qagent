@@ -3548,8 +3548,11 @@ def _is_request_authenticated() -> bool:
     return bool(getattr(_request_ctx, "authenticated", False))
 
 
-# 需要登录才能调用的工具白名单
-TRADING_TOOLS = {"broker_account", "place_order_intent", "cancel_order"}
+# 需要登录才能调用的工具白名单（交易 + 长记忆，本质都是用户态操作）
+TRADING_TOOLS = {
+    "broker_account", "place_order_intent", "cancel_order",
+    "get_user_profile", "update_user_profile", "record_memory",
+}
 
 
 def get_tool_schemas_for(authenticated: bool) -> list:
@@ -3719,6 +3722,92 @@ def cancel_order(broker_order_id: str) -> dict:
         return {"success": False, "error_type": "broker_error", "error": str(e)}
 
 
+# ════════════════════════════════════════════════════════════
+# 长记忆工具（Layer 1: 结构化档案）
+#   - get_user_profile:    读取当前用户档案
+#   - update_user_profile: 更新指定字段（增量）
+# 仅登录用户可调，跟 TRADING_TOOLS 一样受 dispatch_tool 守门
+# ════════════════════════════════════════════════════════════
+
+def get_user_profile() -> dict:
+    """读取当前登录用户的结构化档案"""
+    user_ns = _get_request_device_id()
+    if not user_ns or not user_ns.startswith("u:"):
+        return {"success": False, "error_type": "auth_required",
+                "error": "档案功能仅登录用户可用"}
+    user_id = user_ns[2:]  # 去掉 "u:" 前缀
+    try:
+        from memory import get_profile
+        p = get_profile(user_id)
+        d = p.to_dict()
+        # 简化返回，不暴露 created_at 之类的元数据
+        return {
+            "success": True,
+            "profile": {k: v for k, v in d.items()
+                        if k not in ("user_id", "created_at", "updated_at")
+                        and v not in (None, [], {})},
+            "has_data": any(d.get(k) for k in
+                            ("investment_style", "risk_tolerance", "watchlist",
+                             "goals", "background", "preferences"))
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+def record_memory(content: str, mem_type: str = "fact",
+                   session_id: str = "") -> dict:
+    """
+    记录一条情景记忆到向量库（仅登录用户）。
+    """
+    user_ns = _get_request_device_id()
+    if not user_ns or not user_ns.startswith("u:"):
+        return {"success": False, "error_type": "auth_required",
+                "error": "记忆功能仅登录用户可用"}
+    user_id = user_ns[2:]
+    try:
+        from memory import record_memory as _record
+        return _record(user_id=user_id, content=content,
+                       mem_type=mem_type, session_id=session_id or "")
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+def update_user_profile(updates: dict, reason: str = "") -> dict:
+    """
+    部分更新用户档案。
+    updates: {field: value} —— 字段不存在则忽略；传 null 等于清空该字段。
+    reason:  更新理由（便于审计，非必填）
+
+    可用字段：
+      investment_style    value / growth / balanced / momentum
+      risk_tolerance      low / medium / high
+      markets             ["US", "HK", "CN", ...]
+      watchlist           ["AAPL", "NVDA", ...]
+      goals               自由文本
+      background          自由文本
+      preferences         自由文本
+      blacklist_symbols   ["GME", ...]
+    """
+    user_ns = _get_request_device_id()
+    if not user_ns or not user_ns.startswith("u:"):
+        return {"success": False, "error_type": "auth_required",
+                "error": "档案功能仅登录用户可用"}
+    if not isinstance(updates, dict) or not updates:
+        return {"success": False, "error": "updates 必须是非空字典"}
+    user_id = user_ns[2:]
+    try:
+        from memory import update_profile_fields, profile_summary_text
+        p = update_profile_fields(user_id, updates)
+        return {
+            "success": True,
+            "updated_fields": list(updates.keys()),
+            "reason": reason[:200],
+            "current_summary": profile_summary_text(p),
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
 TOOL_REGISTRY = {
     "market_quote":         market_quote,
     "factor_score":         factor_score,
@@ -3742,6 +3831,10 @@ TOOL_REGISTRY = {
     "broker_account":       broker_account,
     "place_order_intent":   place_order_intent,
     "cancel_order":         cancel_order,
+    # ── 长记忆工具 ──
+    "get_user_profile":     get_user_profile,
+    "update_user_profile":  update_user_profile,
+    "record_memory":        record_memory,
 }
 
 TOOL_SCHEMAS = [
@@ -4259,6 +4352,108 @@ action 取值：
             "required": ["broker_order_id"],
         }
     },
+
+    # ════════════════════════════════════════════════════════════
+    # 长记忆工具（Layer 1：结构化用户档案）
+    # 仅登录用户可用；调用前会自动隔离到当前用户的 namespace
+    # 用户档案会在每次对话开始时自动注入 system prompt，**绝大多数情况下你不需要主动查询**。
+    # ════════════════════════════════════════════════════════════
+    {
+        "name": "get_user_profile",
+        "description": """读取当前用户的结构化偏好档案。
+**通常不需要主动调用** —— 档案已自动注入到 system prompt 顶部，你已经能看到。
+仅在用户主动问"我的档案是什么"/"你记住我什么了"时再用这个工具确认完整状态。""",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+        }
+    },
+    {
+        "name": "update_user_profile",
+        "description": """更新当前用户的结构化偏好档案（增量；只更新 updates 里出现的字段，其他字段不动）。
+
+**触发时机** —— 当用户**明确**说出以下话语之一时：
+  - "我偏好价值投资" / "我喜欢成长股"  → investment_style
+  - "我能承受 30% 回撤" / "我风险偏好低"  → risk_tolerance
+  - "我关注 AAPL 和 NVDA" / "把 TSLA 加到我的自选"  → watchlist
+  - "我的目标是年化 20%" / "三年翻倍"  → goals
+  - "我 35 岁工程师" / "我有 100w 可投资金"  → background
+  - "我不喜欢期权" / "不要给我推荐做空"  → preferences
+  - "拉黑 GME"  → blacklist_symbols
+
+**不要触发的情况**：
+  - 用户只是闲聊或试探，没有明确表达"记住"的意图
+  - 用户问"该不该买 X"（这只是个咨询，不要把 X 当成 watchlist）
+  - 内容含敏感信息（身份证号、银行卡号、密码等）→ 拒绝并提醒
+
+调用 update 前应在 reason 字段简要说明触发原因。""",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "updates": {
+                    "type": "object",
+                    "description": """要更新的字段字典。可用键名（多选其一或多个）：
+  investment_style: "value" / "growth" / "balanced" / "momentum"
+  risk_tolerance:   "low" / "medium" / "high"
+  markets:          ["US", "HK", "CN", ...]
+  watchlist:        ["AAPL", "NVDA", ...]
+  goals:            自由文本，简短
+  background:       自由文本，简短
+  preferences:      自由文本，简短
+  blacklist_symbols: ["GME", ...]
+传 null 等于清空该字段（如 {"watchlist": null}）。
+注意 watchlist 是**全量替换**不是 append；想加股票要先 get_user_profile 拿到原值再合并。""",
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "更新理由（一句话，便于审计）。如：用户说他偏好价值股，加入档案",
+                },
+            },
+            "required": ["updates"],
+        }
+    },
+    {
+        "name": "record_memory",
+        "description": """记录一条情景记忆到向量库（仅登录用户）。
+与 update_user_profile 的区别：
+  - update_user_profile 用于**结构化字段**（风格/股池/目标/背景等定值）
+  - record_memory 用于**自由文本事实**：
+      * 用户说过的重要观点、约束、经历（不在 profile schema 内）
+      * 你给出的重要分析结论，未来用户可能回顾
+      * 用户重要决策（如下单）的理由
+
+mem_type 取值：
+  - "fact"     用户陈述的事实/约束 例：「我最近在转型做长期价值投资」
+  - "analysis" 你给的重要分析 例：「NVDA 5/19 报告：RSI=30 超卖 + 财报亮眼 → 买入」
+  - "decision" 决策理由 例：「用户买入 100 股 AAPL 限价 $185 理由：长期持有 + 估值合理」
+
+**慎用**：
+  - 不要每段对话都存 —— 只存"未来可能召回"的关键信息
+  - 一次对话最多 1-2 条
+  - 内容不要含手机号/身份证/银行卡号（会被自动拒绝）
+
+向量库会在下次对话开始时按用户当前问题做语义检索 Top-3 注入到你的 system prompt。""",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "content": {
+                    "type": "string",
+                    "description": "记忆内容（5-1500 字，越凝练越好；要能脱离上下文独立理解）",
+                },
+                "mem_type": {
+                    "type": "string",
+                    "enum": ["fact", "analysis", "decision"],
+                    "default": "fact",
+                    "description": "记忆类型",
+                },
+                "session_id": {
+                    "type": "string",
+                    "description": "可选，当前 session id，便于审计回溯",
+                },
+            },
+            "required": ["content"],
+        }
+    },
 ]
 
 
@@ -4531,14 +4726,74 @@ def _sanitize_messages(messages: list) -> list:
     return messages
 
 
+def _build_system_prompt(messages: list = None) -> str:
+    """
+    动态生成 system prompt：
+      - 基础 SYSTEM_PROMPT
+      - Layer 1: 已登录用户 → 拼接其结构化档案摘要
+      - Layer 2: 已登录用户 + 有当前用户消息 → 检索 Top-3 情景记忆注入
+    """
+    base = SYSTEM_PROMPT
+    user_ns = _get_request_device_id()
+    if not user_ns or not user_ns.startswith("u:"):
+        return base
+    user_id = user_ns[2:]
+
+    extras = []
+
+    # ── Layer 1: 结构化档案 ──
+    try:
+        from memory import get_profile, profile_summary_text
+        p = get_profile(user_id)
+        summary = profile_summary_text(p)
+        if summary:
+            extras.append(summary)
+    except Exception:
+        pass
+
+    # ── Layer 2: 情景记忆 Top-3 ──
+    query = _extract_latest_user_query(messages)
+    if query:
+        try:
+            from memory import search_memories, memories_to_prompt_text
+            hits = search_memories(user_id=user_id, query=query,
+                                    top_k=3, min_score=0.45)
+            if hits:
+                extras.append(memories_to_prompt_text(hits))
+        except Exception:
+            pass
+
+    if not extras:
+        return base
+
+    return (base + "\n\n" + "\n\n".join(extras)
+            + "\n（以上为该用户的历史档案/记忆，回答时优先匹配。"
+              "如用户明确陈述新的重要偏好/事实，应调用 update_user_profile / record_memory 更新。）")
+
+
+def _extract_latest_user_query(messages: list) -> str:
+    """从 messages 末尾倒着找最后一条 user content，作为检索 query"""
+    if not messages:
+        return ""
+    for m in reversed(messages):
+        if m.get("role") == "user":
+            c = m.get("content") or ""
+            return c if isinstance(c, str) else ""
+    return ""
+
+
 def stream_quant_agent(messages: list, max_iterations: int = 15):
     """
     生成器版 Agent 主循环（DeepSeek/OpenAI 协议）。
     yield 事件协议保持不变，与前端解耦。
     """
-    # 首次调用时注入 system message
+    # 首次调用时注入 system message；已有 system 时按当前用户档案+记忆覆盖
+    sys_prompt = _build_system_prompt(messages)
     if not messages or messages[0].get("role") != "system":
-        messages.insert(0, {"role": "system", "content": SYSTEM_PROMPT})
+        messages.insert(0, {"role": "system", "content": sys_prompt})
+    else:
+        # 更新已有 system，确保档案和记忆是最新的
+        messages[0]["content"] = sys_prompt
 
     # 防御：清洗历史中可能存在的悬空 tool_calls（来自上次取消请求）
     _sanitize_messages(messages)

@@ -1301,6 +1301,7 @@
     <div class="drawer-tab active" data-tab="positions" onclick="switchDrawerTab('positions')">持仓</div>
     <div class="drawer-tab" data-tab="orders" onclick="switchDrawerTab('orders')">订单</div>
     <div class="drawer-tab" data-tab="balance" onclick="switchDrawerTab('balance')">资金</div>
+    <div class="drawer-tab" data-tab="memory" onclick="switchDrawerTab('memory')">🧠 记忆</div>
   </div>
   <div class="drawer-body" id="drawerBody">
     <div class="empty">加载中...</div>
@@ -1822,17 +1823,45 @@ async function confirmOrder() {
 // ────────── 持仓/订单抽屉 ──────────
 
 var _drawerTab = 'positions';
+var _drawerPollTimer = null;
+var DRAWER_POLL_MS = 5000;   // 持仓 tab 每 5 秒自动刷新
+
+function _stopDrawerPoll() {
+  if (_drawerPollTimer) {
+    clearInterval(_drawerPollTimer);
+    _drawerPollTimer = null;
+  }
+}
+
+function _startDrawerPoll() {
+  _stopDrawerPoll();
+  // 只在「持仓」和「资金」tab 自动轮询（订单/记忆变化少，省 API）
+  if (_drawerTab === 'positions' || _drawerTab === 'balance') {
+    _drawerPollTimer = setInterval(function () {
+      // 只在抽屉仍可见 + 页面也可见时刷新
+      var drawer = document.getElementById('drawer');
+      if (!drawer || !drawer.classList.contains('open')) {
+        _stopDrawerPoll();
+        return;
+      }
+      if (document.visibilityState === 'hidden') return;
+      refreshDrawer(/*silent=*/true);
+    }, DRAWER_POLL_MS);
+  }
+}
 
 function openDrawer() {
   if (!CURRENT_USER) { showLoginModal(); return; }
   document.getElementById('drawer').classList.add('open');
   document.getElementById('drawerMask').classList.add('show');
   refreshDrawer();
+  _startDrawerPoll();
 }
 
 function closeDrawer() {
   document.getElementById('drawer').classList.remove('open');
   document.getElementById('drawerMask').classList.remove('show');
+  _stopDrawerPoll();
 }
 
 function switchDrawerTab(name) {
@@ -1842,11 +1871,27 @@ function switchDrawerTab(name) {
     tabs[i].classList.toggle('active', tabs[i].getAttribute('data-tab') === name);
   }
   refreshDrawer();
+  _startDrawerPoll();   // 切 tab 时重启轮询（不同 tab 策略不同）
 }
 
-async function refreshDrawer() {
+// 页面切到后台时停轮询（省电），切回前台时再启动
+document.addEventListener('visibilitychange', function () {
+  if (document.visibilityState === 'hidden') {
+    _stopDrawerPoll();
+  } else {
+    var drawer = document.getElementById('drawer');
+    if (drawer && drawer.classList.contains('open')) {
+      _startDrawerPoll();
+    }
+  }
+});
+
+async function refreshDrawer(silent) {
   var body = document.getElementById('drawerBody');
-  body.innerHTML = '<div class="empty">加载中…</div>';
+  // 轮询时不要清空内容（避免闪烁），仅首次或手动刷新显示加载态
+  if (!silent) {
+    body.innerHTML = '<div class="empty">加载中…</div>';
+  }
   try {
     if (_drawerTab === 'positions') {
       var r = await api('/api/positions');
@@ -1860,6 +1905,17 @@ async function refreshDrawer() {
       var r3 = await api('/api/broker/status');
       var d3 = await r3.json();
       renderBalance(d3);
+    } else if (_drawerTab === 'memory') {
+      // 同时拉档案 + 情景记忆 + 统计
+      var [r4a, r4b, r4c] = await Promise.all([
+        api('/api/memory/profile'),
+        api('/api/memory/episodic?limit=100'),
+        api('/api/memory/stats'),
+      ]);
+      var profile = await r4a.json();
+      var memList = await r4b.json();
+      var stats = await r4c.json();
+      renderMemoryTab(profile, memList, stats);
     }
   } catch (e) {
     body.innerHTML = '<div class="empty">加载失败：' + escapeHtmlSafe(e.message) + '</div>';
@@ -1873,8 +1929,16 @@ function renderPositions(d) {
     return;
   }
   var items = d.positions || [];
+  // 时间戳 + 自动刷新提示（始终展示，即使无持仓）
+  var ts = new Date();
+  var tsStr = ts.getHours().toString().padStart(2,'0') + ':'
+            + ts.getMinutes().toString().padStart(2,'0') + ':'
+            + ts.getSeconds().toString().padStart(2,'0');
+  var footer = '<div style="text-align:center;font-size:11px;color:var(--text-muted);'
+             + 'padding:8px 0 4px;margin-top:6px;border-top:1px dashed var(--border);">'
+             + '⚡ 自动刷新中 · 最后更新 ' + tsStr + '</div>';
   if (!items.length) {
-    body.innerHTML = '<div class="empty">暂无持仓</div>';
+    body.innerHTML = '<div class="empty">暂无持仓</div>' + footer;
     return;
   }
   body.innerHTML = items.map(function (p) {
@@ -1887,8 +1951,9 @@ function renderPositions(d) {
       + '持仓 ' + p.qty + ' 股 @ ' + fmtMoney(p.avg_entry_price) + '<br>'
       + '市值 ' + fmtMoney(p.market_value) + ' · '
       + '<span class="' + pnlClass + '">' + sign + fmtMoney(p.unrealized_pl) + '</span>'
+      + (p.current_price ? '<br><span style="opacity:.65;">当前价 ' + fmtMoney(p.current_price) + '</span>' : '')
       + '</div></div>';
-  }).join('');
+  }).join('') + footer;
 }
 
 function renderOrders(d) {
@@ -1955,6 +2020,211 @@ function renderBalance(d) {
     + '白名单 ' + risk.whitelist_size + ' 个标的<br>'
     + '市价单：' + (risk.block_market_order ? '禁用' : '允许')
     + '</div></div>';
+}
+
+// ────────── 记忆 tab：档案 + 情景记忆 ──────────
+
+function renderMemoryTab(profileResp, memListResp, statsResp) {
+  var body = document.getElementById('drawerBody');
+  var profile = (profileResp && profileResp.profile) || {};
+  var summary = (profileResp && profileResp.summary) || '';
+  var memories = (memListResp && memListResp.memories) || [];
+  var stats = statsResp || {};
+
+  // ── 1. 档案展示 ──
+  function fieldRow(label, value, key, editable) {
+    var displayVal = '';
+    if (Array.isArray(value)) {
+      displayVal = value.length ? value.join(', ') : '<span style="opacity:.5;">未设</span>';
+    } else if (value) {
+      displayVal = escapeHtmlSafe(String(value));
+    } else {
+      displayVal = '<span style="opacity:.5;">未设</span>';
+    }
+    var editBtn = editable
+      ? '<button onclick="editProfileField(\'' + key + '\')" '
+        + 'style="background:none;border:none;color:#60a5fa;cursor:pointer;'
+        + 'font-size:11px;padding:0;margin-left:6px;">编辑</button>'
+      : '';
+    return '<div style="display:flex;justify-content:space-between;'
+      + 'padding:6px 0;border-bottom:1px dashed var(--border);font-size:12px;">'
+      + '<span style="color:var(--text-muted);">' + label + '</span>'
+      + '<span style="text-align:right;max-width:60%;word-break:break-all;">'
+      + displayVal + editBtn + '</span>'
+      + '</div>';
+  }
+
+  var profileHtml = '<div class="item">'
+    + '<div class="item-head">📋 用户档案 '
+    + '<button onclick="clearProfile()" style="background:none;border:none;'
+    + 'color:#f87171;cursor:pointer;font-size:11px;padding:0;">清空</button></div>'
+    + '<div class="meta">'
+    + fieldRow('投资风格', profile.investment_style, 'investment_style', true)
+    + fieldRow('风险偏好', profile.risk_tolerance, 'risk_tolerance', true)
+    + fieldRow('关注市场', profile.markets, 'markets', true)
+    + fieldRow('自选股', profile.watchlist, 'watchlist', true)
+    + fieldRow('投资目标', profile.goals, 'goals', true)
+    + fieldRow('个人背景', profile.background, 'background', true)
+    + fieldRow('偏好', profile.preferences, 'preferences', true)
+    + fieldRow('黑名单', profile.blacklist_symbols, 'blacklist_symbols', true)
+    + '</div></div>';
+
+  // ── 2. 情景记忆列表 ──
+  var TYPE_LABEL = {'fact': '事实', 'analysis': '分析', 'decision': '决策'};
+  var TYPE_COLOR = {'fact': '#60a5fa', 'analysis': '#fbbf24', 'decision': '#4ade80'};
+  var memHtml;
+  if (!memories.length) {
+    memHtml = '<div class="item">'
+      + '<div class="item-head">💬 情景记忆 (0)</div>'
+      + '<div class="meta" style="opacity:.6;">'
+      + '暂无记忆。当你跟 Agent 说出重要事实/经验/约束时，'
+      + 'Agent 会自动调用 record_memory 工具存入向量库。'
+      + '</div></div>';
+  } else {
+    memHtml = '<div class="item"><div class="item-head">'
+      + '💬 情景记忆 (' + memories.length + ') '
+      + '<button onclick="clearAllMemories()" style="background:none;border:none;'
+      + 'color:#f87171;cursor:pointer;font-size:11px;padding:0;">清空全部</button>'
+      + '</div></div>';
+    memHtml += memories.map(function (m) {
+      var color = TYPE_COLOR[m.type] || '#888';
+      var label = TYPE_LABEL[m.type] || m.type;
+      var date = '';
+      if (m.created_at) {
+        var d = new Date(m.created_at * 1000);
+        date = (d.getMonth()+1) + '/' + d.getDate() + ' '
+             + d.getHours().toString().padStart(2,'0') + ':'
+             + d.getMinutes().toString().padStart(2,'0');
+      }
+      return '<div class="item" style="border-left:3px solid ' + color + ';">'
+        + '<div style="display:flex;justify-content:space-between;align-items:center;'
+        + 'margin-bottom:4px;font-size:11px;">'
+        + '<span style="color:' + color + ';font-weight:600;">' + label + '</span>'
+        + '<span style="color:var(--text-muted);">' + date + '</span>'
+        + '</div>'
+        + '<div style="font-size:12px;line-height:1.5;">' + escapeHtmlSafe(m.content) + '</div>'
+        + '<button onclick="deleteMemoryById(\'' + m.id + '\')" '
+        + 'style="margin-top:6px;background:none;border:1px solid var(--border);'
+        + 'color:var(--text-muted);padding:2px 8px;border-radius:4px;cursor:pointer;'
+        + 'font-size:11px;">删除</button>'
+        + '</div>';
+    }).join('');
+  }
+
+  // ── 3. 统计卡片（Phase 4） ──
+  var statsHtml = '';
+  if (stats && stats.total !== undefined) {
+    var bt = stats.by_type || {};
+    statsHtml = '<div class="item">'
+      + '<div class="item-head">📊 记忆统计</div>'
+      + '<div class="meta">'
+      + '总数 ' + stats.total + ' 条'
+      + ' · 事实 ' + (bt.fact || 0)
+      + ' · 分析 ' + (bt.analysis || 0)
+      + ' · 决策 ' + (bt.decision || 0) + '<br>'
+      + '累计召回 ' + (stats.total_access || 0) + ' 次<br>'
+      + '<button onclick="pruneStaleMemories()" '
+      + 'style="margin-top:6px;background:none;border:1px solid var(--border);'
+      + 'color:var(--text-muted);padding:3px 10px;border-radius:4px;cursor:pointer;'
+      + 'font-size:11px;">清理 180 天未访问的旧记忆</button>'
+      + '</div></div>';
+  }
+
+  body.innerHTML = profileHtml + statsHtml + memHtml;
+}
+
+async function pruneStaleMemories() {
+  if (!confirm('清理 180 天未被检索过的旧记忆？')) return;
+  try {
+    var r = await api('/api/memory/prune?days=180', {method: 'POST'});
+    var d = await r.json();
+    showToast('清理 ' + (d.removed || 0) + ' 条 / 检查 ' + (d.checked || 0) + ' 条', 'success');
+    refreshDrawer();
+  } catch (e) {
+    showToast('清理失败：' + e.message, 'error');
+  }
+}
+
+async function editProfileField(field) {
+  var labels = {
+    'investment_style': '投资风格（value / growth / balanced / momentum）',
+    'risk_tolerance': '风险偏好（low / medium / high）',
+    'markets': '关注市场（逗号分隔，如：US, HK, CN）',
+    'watchlist': '自选股（逗号分隔，如：AAPL, NVDA）',
+    'goals': '投资目标（自由文本）',
+    'background': '个人背景（自由文本）',
+    'preferences': '偏好（自由文本）',
+    'blacklist_symbols': '黑名单标的（逗号分隔）',
+  };
+  var raw = prompt(labels[field] + '\n\n（留空= 清空该字段）');
+  if (raw === null) return;
+  var value;
+  raw = raw.trim();
+  if (raw === '') {
+    value = null;
+  } else if (['markets','watchlist','blacklist_symbols'].indexOf(field) >= 0) {
+    value = raw.split(/[,，\s]+/).filter(function (x) { return x.length > 0; });
+  } else {
+    value = raw;
+  }
+  try {
+    var r = await api('/api/memory/profile', {
+      method: 'PATCH',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({updates: {[field]: value}}),
+    });
+    var d = await r.json();
+    if (d.success) {
+      showToast('档案已更新', 'success');
+      refreshDrawer();
+    } else {
+      showToast('更新失败：' + (d.error || ''), 'error');
+    }
+  } catch (e) {
+    showToast('请求失败：' + e.message, 'error');
+  }
+}
+
+async function clearProfile() {
+  if (!confirm('确定清空整个档案？所有偏好/自选/目标都会消失。')) return;
+  try {
+    await api('/api/memory/profile', {method: 'DELETE'});
+    showToast('档案已清空', 'success');
+    refreshDrawer();
+  } catch (e) {
+    showToast('清空失败', 'error');
+  }
+}
+
+async function deleteMemoryById(memory_id) {
+  if (!confirm('删除这条记忆？')) return;
+  try {
+    var r = await api('/api/memory/episodic/' + encodeURIComponent(memory_id),
+                       {method: 'DELETE'});
+    var d = await r.json();
+    if (d.success) {
+      showToast('已删除', 'success');
+      refreshDrawer();
+    } else {
+      showToast('删除失败：' + (d.error || ''), 'error');
+    }
+  } catch (e) {
+    showToast('删除失败：' + e.message, 'error');
+  }
+}
+
+async function clearAllMemories() {
+  if (!confirm('清空所有情景记忆？此操作不可撤销。')) return;
+  try {
+    var r = await api('/api/memory/episodic', {method: 'DELETE'});
+    var d = await r.json();
+    if (d.success) {
+      showToast('已清空 ' + (d.deleted_count || 0) + ' 条', 'success');
+      refreshDrawer();
+    }
+  } catch (e) {
+    showToast('清空失败：' + e.message, 'error');
+  }
 }
 
 async function cancelOrderFromDrawer(broker_order_id) {
