@@ -3475,28 +3475,71 @@ def html_chart_render(
                 "error": f"图表配置异常: {type(e).__name__}: {e}",
                 "data_received": str(data)[:200]}
 
-    # 构造 HTML 页面
+    # 构造 HTML 页面 —— 多 CDN 回退 + 失败提示，国内外都能用
     html = f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{title or 'QuantAgent 图表'}</title>
-<script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
 <style>
   body {{ background: #0d1117; color: #e6edf3; font-family: sans-serif;
          margin: 0; padding: 20px; }}
-  #chart {{ width: 100%; height: 90vh; }}
-  .footer {{ color: #8b949e; font-size: 12px; margin-top: 10px;
-             text-align: center; }}
+  #chart {{ width: 100%; height: 88vh; }}
+  .footer {{ color: #8b949e; font-size: 12px; margin-top: 10px; text-align: center; }}
+  #fallback-msg {{ display: none; padding: 20px; text-align: center;
+                  color: #f87171; line-height: 1.7; }}
 </style>
 </head>
 <body>
   <div id="chart"></div>
+  <div id="fallback-msg">
+    ⚠️ 无法加载图表渲染引擎 (ECharts)<br>
+    可能原因：网络拦截了 CDN 或 JS 文件被防火墙屏蔽<br>
+    <button onclick="location.reload()" style="margin-top:10px;padding:6px 14px;
+            background:#2563eb;color:#fff;border:none;border-radius:6px;cursor:pointer;">
+      重试
+    </button>
+  </div>
   <div class="footer">QuantAgent · 数据仅供研究参考，不构成投资建议</div>
   <script>
-    const chart = echarts.init(document.getElementById('chart'), 'dark');
-    chart.setOption({json.dumps(option, ensure_ascii=False, default=str)});
-    window.addEventListener('resize', () => chart.resize());
+    // 多 CDN 回退：依次尝试，失败自动切换
+    var CDN_LIST = [
+      'https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js',
+      'https://cdn.staticfile.org/echarts/5.4.3/echarts.min.js',
+      'https://cdn.bootcdn.net/ajax/libs/echarts/5.4.3/echarts.min.js',
+      'https://unpkg.com/echarts@5/dist/echarts.min.js',
+    ];
+    var CHART_OPTION = {json.dumps(option, ensure_ascii=False, default=str)};
+
+    function loadCDN(idx) {{
+      if (idx >= CDN_LIST.length) {{
+        document.getElementById('chart').style.display = 'none';
+        document.getElementById('fallback-msg').style.display = 'block';
+        return;
+      }}
+      var s = document.createElement('script');
+      s.src = CDN_LIST[idx];
+      s.onload = function () {{ renderChart(); }};
+      s.onerror = function () {{
+        console.warn('CDN failed:', CDN_LIST[idx]);
+        loadCDN(idx + 1);
+      }};
+      document.head.appendChild(s);
+    }}
+
+    function renderChart() {{
+      try {{
+        var chart = echarts.init(document.getElementById('chart'), 'dark');
+        chart.setOption(CHART_OPTION);
+        window.addEventListener('resize', function () {{ chart.resize(); }});
+      }} catch (e) {{
+        console.error('chart render error:', e);
+        document.getElementById('fallback-msg').style.display = 'block';
+      }}
+    }}
+
+    loadCDN(0);
   </script>
 </body>
 </html>"""
