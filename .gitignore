@@ -2,6 +2,9 @@
 .env
 .env.local
 *.key
+*.pem
+*.p12
+*.pfx
 
 # Python
 __pycache__/
