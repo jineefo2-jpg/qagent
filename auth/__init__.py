@@ -13,6 +13,7 @@ from .sessions import (
     COOKIE_NAME, COOKIE_MAX_AGE,
 )
 from .deps import current_user, require_user
+from .admin import require_admin, is_admin
 from .oauth import oauth_client, configured_providers
 from .email_login import (
     is_email_login_enabled,
@@ -24,7 +25,7 @@ __all__ = [
     "User", "get_user", "upsert_user",
     "create_web_session", "get_user_id_from_token", "revoke_session",
     "COOKIE_NAME", "COOKIE_MAX_AGE",
-    "current_user", "require_user",
+    "current_user", "require_user", "require_admin", "is_admin",
     "oauth_client", "configured_providers",
     "is_email_login_enabled", "email_request_code", "email_verify_code",
 ]

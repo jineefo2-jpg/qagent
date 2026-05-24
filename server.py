@@ -39,7 +39,8 @@ from cache import cache  # Redis 或内存缓存
 
 # OAuth 账户体系
 from auth import (
-    User, current_user, require_user, oauth_client, configured_providers,
+    User, current_user, require_user, require_admin,
+    oauth_client, configured_providers,
     upsert_user, create_web_session, get_user_id_from_token,
     revoke_session, COOKIE_NAME, COOKIE_MAX_AGE,
     is_email_login_enabled, email_request_code, email_verify_code,
@@ -1246,6 +1247,16 @@ def health():
         "sessions": len(cache.keys("quant:session:*")),
         "time": datetime.now().isoformat(timespec="seconds"),
     }
+
+
+@app.get("/metrics/brokers")
+def metrics_brokers(_admin: User = Depends(require_admin)):
+    """
+    Admin-only metrics for the broker subsystem (ADR-0001 §8).
+    Gated by ADMIN_EMAILS env. Returns counters + gauges as plain JSON.
+    """
+    from brokers.metrics import snapshot
+    return snapshot()
 
 
 # ════════════════════════════════════════════════════════════

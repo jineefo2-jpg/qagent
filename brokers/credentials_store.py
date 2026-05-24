@@ -28,7 +28,7 @@ from typing import List, Optional
 
 import sqlite3
 
-from . import _db, audit, crypto
+from . import _db, audit, crypto, metrics
 from .base import (
     AlpacaCredentials,
     Credentials,
@@ -157,6 +157,7 @@ class CredentialsStore:
                 detail=f"{broker_type}/{label}: integrity error",
                 success=False, conn=c,
             )
+            metrics.incr("broker_bind_total", broker=broker_type, result="fail")
             raise CredentialsStoreError(
                 f"Binding ({broker_type}, label={label!r}) already exists for this user"
             ) from e
@@ -168,6 +169,7 @@ class CredentialsStore:
             detail=f"{broker_type}/{label}/env={env}",
             success=True, conn=c,
         )
+        metrics.incr("broker_bind_total", broker=broker_type, result="ok")
 
         # Drop any stale adapter in the registry's cache (late import: cycle break)
         from . import registry
@@ -228,6 +230,8 @@ class CredentialsStore:
                 detail=f"{broker_type}/{actual_label}: decrypt failed",
                 success=False, conn=c,
             )
+            metrics.incr("broker_use_total", broker=broker_type, result="fail")
+            metrics.incr("broker_auth_fail_total", broker=broker_type)
             raise
 
         try:
@@ -248,6 +252,7 @@ class CredentialsStore:
             detail=f"{broker_type}/{actual_label}",
             success=True, conn=c,
         )
+        metrics.incr("broker_use_total", broker=broker_type, result="ok")
         return creds
 
     # ── list ────────────────────────────────────────────────
@@ -293,6 +298,7 @@ class CredentialsStore:
                 detail="not found / wrong user",
                 success=False, conn=c,
             )
+            metrics.incr("broker_unbind_total", broker="unknown", result="fail")
             return False
 
         broker_type, label = row
@@ -306,6 +312,7 @@ class CredentialsStore:
             detail=f"{broker_type}/{label}",
             success=True, conn=c,
         )
+        metrics.incr("broker_unbind_total", broker=broker_type, result="ok")
 
         from . import registry
         registry._registry.invalidate(user_id, broker_type, label)
