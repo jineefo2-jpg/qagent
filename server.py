@@ -1260,14 +1260,19 @@ def health():
 
 @app.get("/api/me")
 def api_me(user: Optional[User] = Depends(current_user)):
-    """当前登录用户的简略信息。未登录返回 {logged_in: false}。"""
+    """
+    当前登录用户的简略信息。
+    - 登录:返回 user 对象 {user_id, email, name, avatar_url, provider}
+    - 未登录:返回 null (200)
+    契约和 index.html 现有 bootstrapAuth() 期望保持一致。
+    """
     if user is None:
-        return {"logged_in": False}
+        return None
     return {
-        "logged_in": True,
         "user_id": user.user_id,
         "email": user.email,
         "name": user.name,
+        "avatar_url": user.avatar_url,
         "provider": user.provider,
     }
 

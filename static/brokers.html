@@ -121,6 +121,18 @@
 
   .actions { display: flex; gap: 8px; margin-top: 16px; }
 
+  /* Broker snapshot cards */
+  .snapshot-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+                   gap: 10px; }
+  .snap-card { background: var(--bg); border: 1px solid var(--border);
+               border-radius: 6px; padding: 12px; }
+  .snap-card .k { color: var(--text-muted); font-size: 12px; margin-bottom: 4px; }
+  .snap-card .v { font-size: 18px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .snap-card .v.small { font-size: 14px; }
+  .snap-error { color: var(--danger); font-size: 13px;
+                background: rgba(248,81,73,0.1); padding: 10px;
+                border-radius: 6px; border: 1px solid rgba(248,81,73,0.3); }
+
   /* 安全告知条 */
   .security-banner {
     background: rgba(0, 212, 170, 0.08);
@@ -162,6 +174,16 @@
 <div class="section">
   <h2>已绑定的账户</h2>
   <div id="bindings-list">
+    <div class="empty">加载中…</div>
+  </div>
+</div>
+
+<div class="section" id="broker-snapshot-section">
+  <h2>当前 broker 实时状态</h2>
+  <p class="muted" style="margin-bottom:12px;">
+    由 <code>BROKER_MODE</code> + 你的绑定共同决定。绑定 / 解绑后自动刷新。
+  </p>
+  <div id="broker-snapshot">
     <div class="empty">加载中…</div>
   </div>
 </div>
@@ -279,13 +301,86 @@ function clearMsg(el) {
 async function loadCurrentUser() {
   const r = await api('GET', '/api/me');
   const el = $('#current-user-info');
-  if (!r.ok || !r.payload?.logged_in) {
+  // /api/me 契约:登录返回 user dict;未登录返回 null;HTTP 始终 200
+  if (!r.ok || !r.payload) {
     el.innerHTML = '⚠️ 未登录 — <a href="/">回到主页登录</a>后回来';
     return false;
   }
   const u = r.payload;
   el.textContent = `当前账号: ${u.email || '(无邮箱)'} · ${u.provider || ''} · user_id=${u.user_id}`;
   return true;
+}
+
+function _fmtMoney(n, ccy) {
+  if (n === null || n === undefined) return '—';
+  return (ccy || '$') + Number(n).toLocaleString(undefined, {
+    minimumFractionDigits: 2, maximumFractionDigits: 2,
+  });
+}
+
+async function loadBrokerSnapshot() {
+  const root = $('#broker-snapshot');
+  root.innerHTML = '<div class="empty">读取中…</div>';
+
+  const [statusR, posR, ordR] = await Promise.all([
+    api('GET', '/api/broker/status'),
+    api('GET', '/api/positions'),
+    api('GET', '/api/orders?status=open&limit=100'),
+  ]);
+
+  // /api/broker/status 包装了所有错误进 200 payload,看 payload.error
+  if (!statusR.ok) {
+    if (statusR.status === 401) {
+      root.innerHTML = '<div class="empty">未登录</div>';
+    } else {
+      root.innerHTML = `<div class="snap-error">读取失败 (${statusR.status})</div>`;
+    }
+    return;
+  }
+  const s = statusR.payload || {};
+  if (s.error) {
+    root.innerHTML = `<div class="snap-error">⚠️ ${s.broker || 'broker'}: ${s.error}</div>
+      <p class="muted" style="margin-top:8px;">
+        如果是 <code>no_broker_binding</code>,在上面"已绑定的账户"里添加一个对应类型 (alpaca/tiger) 的 binding 后再来。
+      </p>`;
+    return;
+  }
+  const acc = s.account || {};
+  const positionsCount = (posR.ok && posR.payload?.success) ? (posR.payload.count || 0) : '?';
+  const ordersCount = (ordR.ok && ordR.payload?.success) ? (ordR.payload.count || 0) : '?';
+
+  root.innerHTML = `
+    <div class="snapshot-grid">
+      <div class="snap-card">
+        <div class="k">broker</div>
+        <div class="v small">${s.broker || '—'}</div>
+      </div>
+      <div class="snap-card">
+        <div class="k">配置</div>
+        <div class="v small">${s.configured ? '✅' : '❌'} ${s.ping_ok ? 'ping ok' : ''}</div>
+      </div>
+      <div class="snap-card">
+        <div class="k">现金</div>
+        <div class="v">${_fmtMoney(acc.cash, acc.currency === 'USD' ? '$' : (acc.currency + ' '))}</div>
+      </div>
+      <div class="snap-card">
+        <div class="k">可用购买力</div>
+        <div class="v">${_fmtMoney(acc.buying_power, acc.currency === 'USD' ? '$' : (acc.currency + ' '))}</div>
+      </div>
+      <div class="snap-card">
+        <div class="k">净值</div>
+        <div class="v">${_fmtMoney(acc.equity, acc.currency === 'USD' ? '$' : (acc.currency + ' '))}</div>
+      </div>
+      <div class="snap-card">
+        <div class="k">持仓</div>
+        <div class="v">${positionsCount}</div>
+      </div>
+      <div class="snap-card">
+        <div class="k">在挂订单</div>
+        <div class="v">${ordersCount}</div>
+      </div>
+    </div>
+  `;
 }
 
 async function loadBindings() {
@@ -328,7 +423,7 @@ async function loadBindings() {
       btn.disabled = true;
       const r = await api('DELETE', `/api/broker/bindings/${id}`);
       if (r.ok) {
-        loadBindings();
+        await Promise.all([loadBindings(), loadBrokerSnapshot()]);
       } else {
         alert(`解绑失败: ${r.status} ${r.payload?.detail || ''}`);
         btn.disabled = false;
@@ -356,9 +451,11 @@ function wireForm(formId, msgId, broker_type, gatherCreds) {
       };
       const r = await api('POST', '/api/broker/bindings', body);
       if (r.ok) {
-        showMsg(msg, 'ok', `✅ 绑定成功 (id=${r.payload.id})`);
+        showMsg(msg, 'ok', `✅ 绑定成功 (id=${r.payload.id}) · 正在拉取账户快照…`);
         form.reset();
-        loadBindings();
+        // 并发刷新:列表 + 当前 broker 快照(账户/持仓/订单/资金)
+        await Promise.all([loadBindings(), loadBrokerSnapshot()]);
+        showMsg(msg, 'ok', `✅ 绑定成功 (id=${r.payload.id}) · 已刷新`);
       } else {
         showMsg(msg, 'error', `❌ ${r.status} · ${r.payload?.detail || '未知错误'}`);
       }
@@ -397,8 +494,13 @@ wireForm('#form-alpaca', '#msg-alpaca', 'alpaca', (fd) => ({
 }));
 
 (async () => {
-  await loadCurrentUser();
+  const loggedIn = await loadCurrentUser();
   await loadBindings();
+  if (loggedIn) {
+    await loadBrokerSnapshot();
+  } else {
+    $('#broker-snapshot').innerHTML = '<div class="empty">登录后看快照</div>';
+  }
 })();
 </script>
 
