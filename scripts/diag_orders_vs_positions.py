@@ -16,9 +16,9 @@ try:
 except ImportError:
     pass
 
-from brokers import get_broker
+from brokers.registry import get_current_broker
 
-b = get_broker("alpaca")
+b = get_current_broker(broker_type="alpaca")
 if not b.is_configured():
     print("❌ Alpaca 凭证未配置")
     sys.exit(1)

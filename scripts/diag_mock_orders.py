@@ -18,14 +18,14 @@ except ImportError: pass
 import os
 os.environ['BROKER_MODE'] = 'mock'
 
-from brokers import get_broker
+from brokers.registry import get_current_broker
 from quant_agent import _set_request_device_id, market_quote
 
 ns = sys.argv[1] if len(sys.argv) > 1 else "default"
 print(f"User namespace: {ns}\n")
 
 _set_request_device_id(ns)
-b = get_broker()
+b = get_current_broker()
 
 # 账户
 acc = b.get_account()

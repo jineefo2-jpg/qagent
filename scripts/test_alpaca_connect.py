@@ -26,7 +26,8 @@ try:
 except ImportError:
     pass
 
-from brokers import get_broker, OrderIntent, BrokerError
+from brokers import OrderIntent, BrokerError
+from brokers.registry import get_current_broker
 
 
 def main():
@@ -37,7 +38,7 @@ def main():
     )
     args = parser.parse_args()
 
-    broker = get_broker("alpaca")
+    broker = get_current_broker(broker_type="alpaca")
 
     print(f"=== Broker: {broker.name} ===")
     print(f"is_configured: {broker.is_configured()}")
