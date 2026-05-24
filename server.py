@@ -1377,7 +1377,11 @@ def api_delete_binding(binding_id: int, user: User = Depends(require_user)):
 
 if __name__ == "__main__":
     import uvicorn
+    _host = _os.getenv("HOST", "0.0.0.0")
+    _port = int(_os.getenv("PORT", "8001"))
     print("🚀 QuantAgent Web Server")
-    print("   访问: http://localhost:5000")
-    print("   API:  http://localhost:5000/docs")
-    uvicorn.run(app, host="0.0.0.0", port=5000, log_level="info")
+    print(f"   访问: http://localhost:{_port}")
+    print(f"   API:  http://localhost:{_port}/docs")
+    print(f"   绑券商: http://localhost:{_port}/brokers")
+    print(f"   (overide with HOST=... PORT=... env)")
+    uvicorn.run(app, host=_host, port=_port, log_level="info")

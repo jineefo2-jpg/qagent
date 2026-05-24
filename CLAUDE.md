@@ -12,10 +12,14 @@ pip install -r requirements-dev.txt   # adds pytest for the canary test
 # Configure (copy then fill DEEPSEEK_API_KEY at minimum)
 cp .env.example .env
 
-# Start the web server (FastAPI + SSE, port 5000)
+# Start the web server (FastAPI + SSE, default port 5000)
 python server.py
 # → http://localhost:5000   UI
 # → http://localhost:5000/docs   OpenAPI
+# → http://localhost:5000/brokers   bind a brokerage account
+
+# On macOS, port 5000 conflicts with AirPlay Receiver. Override:
+PORT=8080 python server.py
 
 # Switch agent runtime
 USE_LANGGRAPH=1 python server.py   # use quant_agent_lg.py instead of quant_agent.py
