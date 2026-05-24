@@ -161,6 +161,7 @@ Detailed design: `docs/adr/0001-broker-abstraction.md`. The constraints below ar
 - A user can have **1:N broker bindings**, where a binding = `(user_id, broker_type, label)`. Each binding owns its own credentials. There is no module-level shared broker credential (except `MockAdapter`, which is stateless per-user).
 - Adapters are constructed **per binding** via `brokers.registry.BrokerRegistry.get(user_id, broker_type, label=None)`. Do not introduce paths that bypass the registry.
 - Supported brokers: `mock` (always), `alpaca` (paper only), `tiger` (paper only). New brokers MUST extend `BrokerAdapter` and ship with a paper / simulator mode that works in CI without a real account.
+- **Every non-mock broker (alpaca, tiger, ...) requires an explicit per-user binding.** `ALPACA_API_KEY` / `ALPACA_API_SECRET` env vars MUST NOT drive any production code path; the only legitimate uses are smoke / diag scripts run locally by an operator. Calling `get_current_broker(broker_type="alpaca")` without a binding for the current user MUST raise — never silently fall back to env. See ADR-0001 addendum.
 
 ### Credentials
 - Credentials are encrypted with **envelope encryption** in `brokers/credentials_store.py`: per-binding DEK encrypts the credential blob; a versioned KEK (`BROKER_KEK_v1`, `BROKER_KEK_v2`, ... from env) wraps the DEK.

@@ -247,3 +247,38 @@ Each step is its own commit, behind a worktree. Canary stays green at every comm
 - Tiger OpenAPI docs: https://quant.itigerup.com/
 - Tiger Python SDK: https://github.com/tigerfintech/openapi-python-sdk
 - `cryptography.fernet` (stdlib of choice for symmetric encryption)
+
+---
+
+## Addendum · 2026-05-24 · Alpaca is also per-user
+
+**Decision**: every non-mock broker (Alpaca, Tiger, future) requires an
+explicit per-user binding through the UI / API. The legacy
+`BROKER_MODE=alpaca` shared-paper-account mode is **removed**.
+
+### What changes vs the original ADR
+- §2 originally said "Module-level shared adapters are removed except for
+  `MockAdapter`". This stays true — but the original text could be read as
+  permitting an env-key fallback for Alpaca. **It does not.** As of X3:
+  - `ALPACA_API_KEY` / `ALPACA_API_SECRET` env vars MUST NOT drive any
+    production code path. They may be referenced only by smoke / diag
+    scripts that the operator runs locally.
+  - Calling `get_current_broker(broker_type="alpaca")` without a binding
+    in `credentials_store` MUST raise `BrokerError("requires user binding")`.
+  - The error surfaces to the LLM as
+    `{"success": false, "error_type": "no_broker_binding"}` so the agent
+    can prompt the user toward the UI bind flow.
+- §5 (Tiger specifics) describes the 3-step upload wizard. The same UX
+  pattern applies to Alpaca (simpler — just `api_key` + `api_secret`).
+
+### Migration impact
+- Existing operators who relied on `BROKER_MODE=alpaca` with env keys
+  must now run the bind flow once per user. The `.env.example` Alpaca
+  block stays for transparency but its docstring will note
+  "deprecated, use UI bind instead".
+
+### Why this addendum (not ADR-0002)
+Original ADR is < 24 h old and unreleased. This is a clarification of
+the same decision, not a new one. ADR-0002 will land when something
+genuinely overturns ADR-0001 (e.g. when we eventually enable live trading
+behind a separate flag).
