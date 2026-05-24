@@ -153,17 +153,25 @@ def _send_email(to_email: str, code: str):
   </div>
 </body></html>""", subtype="html")
 
+    # IMPORTANT: 163 / QQ SMTP require the envelope sender (MAIL FROM) to be
+    # IDENTICAL to the authenticated SMTP_USER. If SMTP_FROM puts a display
+    # name or a different address there, 163 returns
+    #   503 'Send command mailfrom first'
+    # We force the envelope to `user` regardless of the From: header so the
+    # display name is still pretty but the envelope is always compliant.
     if use_ssl:
         ctx = ssl.create_default_context()
         with smtplib.SMTP_SSL(host, port, context=ctx, timeout=15) as s:
+            s.ehlo()
             s.login(user, password)
-            s.send_message(msg)
+            s.send_message(msg, from_addr=user, to_addrs=[to_email])
     else:
         with smtplib.SMTP(host, port, timeout=15) as s:
             s.ehlo()
             s.starttls(context=ssl.create_default_context())
+            s.ehlo()           # second EHLO after STARTTLS — required by some servers
             s.login(user, password)
-            s.send_message(msg)
+            s.send_message(msg, from_addr=user, to_addrs=[to_email])
 
 
 # ════════════════════════════════════════════════════════════
