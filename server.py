@@ -1299,15 +1299,24 @@ class BrokerBindRequest(BaseModel):
 
 
 @app.post("/api/broker/bindings", status_code=201)
-def api_create_binding(body: BrokerBindRequest, user: User = Depends(require_user)):
+def api_create_binding(body: BrokerBindRequest,
+                       x_device_id: Optional[str] = Header(None),
+                       user: User = Depends(require_user)):
     """
     Bind a brokerage account to the logged-in user.
     Tests the credentials in-memory first (adapter.ping()) — only persists
     if the test passes. So no half-bound state on bad creds.
+
+    NOTE: the stored `user_id` is `_scope_id(user, x_device_id)` (i.e. the
+    "u:<user_id>" form), NOT raw user.user_id, so that subsequent broker
+    tool calls — which use the same _scope_id via _setup_broker_context —
+    can find this binding.
     """
     from brokers.credentials_store import store, build_credentials, CredentialsStoreError
     from brokers.registry import _build_adapter
     from brokers.base import BrokerError, redact_credentials
+
+    user_scope = _scope_id(user, x_device_id)
 
     # 1. Build typed creds from JSON
     try:
@@ -1340,10 +1349,10 @@ def api_create_binding(body: BrokerBindRequest, user: User = Depends(require_use
     except Exception as e:
         raise HTTPException(422, f"binding test failed: {redact_credentials(str(e))}")
 
-    # 3. Persist
+    # 3. Persist (under the same user_scope the broker tool path will use)
     try:
         binding_id = store.bind(
-            user_id=user.user_id,
+            user_id=user_scope,
             broker_type=body.broker_type,
             label=body.label,
             creds=creds,
@@ -1363,10 +1372,12 @@ def api_create_binding(body: BrokerBindRequest, user: User = Depends(require_use
 
 
 @app.get("/api/broker/bindings")
-def api_list_bindings(user: User = Depends(require_user)):
+def api_list_bindings(x_device_id: Optional[str] = Header(None),
+                      user: User = Depends(require_user)):
     """List the current user's broker bindings. No secrets in the response."""
     from brokers.credentials_store import store
-    rows = store.list_user_bindings(user.user_id)
+    user_scope = _scope_id(user, x_device_id)
+    rows = store.list_user_bindings(user_scope)
     return [
         {
             "id": r.id,
@@ -1381,10 +1392,13 @@ def api_list_bindings(user: User = Depends(require_user)):
 
 
 @app.delete("/api/broker/bindings/{binding_id}")
-def api_delete_binding(binding_id: int, user: User = Depends(require_user)):
+def api_delete_binding(binding_id: int,
+                       x_device_id: Optional[str] = Header(None),
+                       user: User = Depends(require_user)):
     """Delete a binding owned by the current user. 404 if not found / not theirs."""
     from brokers.credentials_store import store
-    ok = store.unbind(binding_id, user.user_id, actor="user")
+    user_scope = _scope_id(user, x_device_id)
+    ok = store.unbind(binding_id, user_scope, actor="user")
     if not ok:
         raise HTTPException(404, "binding not found")
     return {"ok": True}
