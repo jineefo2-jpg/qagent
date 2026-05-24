@@ -14,6 +14,12 @@ venv/
 rag_db/
 docs/*.pdf
 
+# 运行时生成的图表 HTML(由 html_chart_render 工具产出)
+static/charts/
+
+# 凭证 SQLite (X3 起,加密存储 broker 凭证)
+data/
+
 # IDE
 .vscode/
 .idea/
