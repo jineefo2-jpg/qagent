@@ -713,9 +713,9 @@ def broker_status(x_device_id: Optional[str] = Header(None),
     """检查 broker 是否就绪：凭证 + 连通性 + 风控当前配置"""
     _setup_broker_context(user, x_device_id)
     try:
-        from brokers import get_broker
+        from brokers.registry import get_current_broker
         from brokers.risk_gate import current_config
-        broker = get_broker()
+        broker = get_current_broker()
         configured = broker.is_configured()
         account = None
         ping_ok = False
@@ -748,7 +748,7 @@ def get_order_intent(intent_id: str,
     device_id = _scope_id(user, x_device_id)
     try:
         from brokers.intent_store import get_intent
-        from brokers import get_broker
+        from brokers.registry import get_current_broker
         from brokers.risk_gate import check_order
     except Exception as e:
         raise HTTPException(500, f"broker 模块未就绪: {e}")
@@ -757,7 +757,7 @@ def get_order_intent(intent_id: str,
     if not intent:
         raise HTTPException(404, "意图不存在或已过期（5 分钟超时）")
 
-    broker = get_broker()
+    broker = get_current_broker()
     if not broker.is_configured():
         raise HTTPException(400, "Alpaca 凭证未配置")
 
@@ -786,7 +786,8 @@ def confirm_order(body: ConfirmOrderRequest,
     device_id = _scope_id(user, x_device_id)
     try:
         from brokers.intent_store import pop_intent, save_intent
-        from brokers import get_broker, BrokerError
+        from brokers import BrokerError
+        from brokers.registry import get_current_broker
         from brokers.risk_gate import check_order, record_order_placed
     except Exception as e:
         raise HTTPException(500, f"broker 模块未就绪: {e}")
@@ -795,7 +796,7 @@ def confirm_order(body: ConfirmOrderRequest,
     if not intent:
         raise HTTPException(404, "意图不存在或已过期，请让 Agent 重新生成")
 
-    broker = get_broker()
+    broker = get_current_broker()
     if not broker.is_configured():
         raise HTTPException(400, "Alpaca 凭证未配置")
 
@@ -842,9 +843,10 @@ def api_cancel_order(broker_order_id: str,
     _setup_broker_context(user, x_device_id)
     device_id = _scope_id(user, x_device_id)
     try:
-        from brokers import get_broker, BrokerError
+        from brokers import BrokerError
+        from brokers.registry import get_current_broker
         from brokers.risk_gate import record_order_canceled
-        broker = get_broker()
+        broker = get_current_broker()
         if not broker.is_configured():
             raise HTTPException(400, "Alpaca 凭证未配置")
         broker.cancel_order(broker_order_id)
@@ -864,8 +866,9 @@ def list_orders(status: str = "open", limit: int = 50,
                  user: User = Depends(require_user)):
     _setup_broker_context(user, x_device_id)
     try:
-        from brokers import get_broker, BrokerError
-        broker = get_broker()
+        from brokers import BrokerError
+        from brokers.registry import get_current_broker
+        broker = get_current_broker()
         if not broker.is_configured():
             return {"success": False, "error": "Alpaca 凭证未配置"}
         orders = broker.list_orders(status=status, limit=limit)
@@ -880,8 +883,9 @@ def list_positions_api(x_device_id: Optional[str] = Header(None),
                        user: User = Depends(require_user)):
     _setup_broker_context(user, x_device_id)
     try:
-        from brokers import get_broker, BrokerError
-        broker = get_broker()
+        from brokers import BrokerError
+        from brokers.registry import get_current_broker
+        broker = get_current_broker()
         if not broker.is_configured():
             return {"success": False, "error": "Alpaca 凭证未配置"}
         positions = broker.list_positions()
@@ -900,8 +904,8 @@ def reset_account(x_device_id: Optional[str] = Header(None),
     """
     _setup_broker_context(user, x_device_id)
     try:
-        from brokers import get_broker
-        broker = get_broker()
+        from brokers.registry import get_current_broker
+        broker = get_current_broker()
         if broker.name != "mock-paper":
             return {"success": False,
                     "error": f"当前 broker={broker.name} 不支持重置（只有 mock 模式可重置）"}

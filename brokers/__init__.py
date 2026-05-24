@@ -47,11 +47,18 @@ __all__ = [
 
 def get_broker(name: Optional[str] = None) -> BrokerAdapter:
     """
-    [Transitional shim · X2]
-    向后兼容入口。X2 commit 2 会把所有调用点迁到 `brokers.registry.get_current_broker`,
-    之后此函数会加 DeprecationWarning(X2 commit 2)和最终删除(后续版本)。
+    [Deprecated · X2 commit 2 onwards]
+    向后兼容入口。生产代码已全部迁到 `brokers.registry.get_current_broker`。
+    保留此函数仅为防止外部脚本/旧分支断裂;新代码不要使用。
 
     行为等价于旧版:按当前 thread-local 用户 + BROKER_MODE env 解析 adapter。
     """
+    import warnings
+    warnings.warn(
+        "brokers.get_broker() is deprecated. "
+        "Use brokers.registry.get_current_broker() instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     from .registry import get_current_broker
     return get_current_broker(broker_type=name)

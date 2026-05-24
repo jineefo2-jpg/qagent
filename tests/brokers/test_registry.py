@@ -160,19 +160,23 @@ def test_get_current_broker_falls_back_to_default(monkeypatch):
 # Backward compatibility · brokers.get_broker shim
 # ─────────────────────────────────────────────────────────────────────────────
 
-def test_legacy_get_broker_still_works(monkeypatch):
-    """X2 commit 1: shim must be silent and behavioral equivalent."""
+def test_legacy_get_broker_emits_deprecation(monkeypatch):
+    """
+    X2 commit 2 onwards: all production call sites are migrated, so the
+    shim now emits DeprecationWarning. The shim still returns a working
+    adapter — that's the back-compat contract — but the warning steers
+    any new code away from it.
+    """
     monkeypatch.setenv("BROKER_MODE", "mock")
     import quant_agent
     quant_agent._request_ctx.device_id = "u_legacy"
 
-    import warnings
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")  # any warning becomes a test failure
-        from brokers import get_broker
-        from brokers.mock_adapter import MockAdapter
+    from brokers import get_broker
+    from brokers.mock_adapter import MockAdapter
+
+    with pytest.warns(DeprecationWarning, match="get_current_broker"):
         adapter = get_broker()
-        assert isinstance(adapter, MockAdapter)
+    assert isinstance(adapter, MockAdapter)
 
     try:
         del quant_agent._request_ctx.device_id

@@ -3629,8 +3629,9 @@ def broker_account(action: str = "balance",
       - orders:    订单列表
     """
     try:
-        from brokers import get_broker, BrokerError
-        broker = get_broker()
+        from brokers import BrokerError
+        from brokers.registry import get_current_broker
+        broker = get_current_broker()
     except Exception as e:
         return _broker_unavailable_response(f"broker 模块未就绪: {e}")
 
@@ -3708,8 +3709,8 @@ def place_order_intent(symbol: str,
     # 预先跑一次风控，把可能的问题在前端弹窗里就告诉用户（不阻断创建）
     pre_check = None
     try:
-        from brokers import get_broker
-        broker = get_broker()
+        from brokers.registry import get_current_broker
+        broker = get_current_broker()
         if broker.is_configured():
             acc = broker.get_account()
             pre_check = check_order(intent, acc, _get_request_device_id(),
@@ -3743,9 +3744,10 @@ def cancel_order(broker_order_id: str) -> dict:
         return {"success": False, "error": "broker_order_id 不能为空"}
 
     try:
-        from brokers import get_broker, BrokerError
+        from brokers import BrokerError
+        from brokers.registry import get_current_broker
         from brokers.risk_gate import record_order_canceled
-        broker = get_broker()
+        broker = get_current_broker()
     except Exception as e:
         return _broker_unavailable_response(f"broker 模块未就绪: {e}")
 
