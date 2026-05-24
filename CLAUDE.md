@@ -153,6 +153,41 @@ This agent can move (paper) money. The following are non-negotiable. If a task s
   - Order-related failures MUST fail loud (raise or return a structured error dict). Never `except: pass` in `brokers/` or in trading tools.
 - If you add an audit layer, every state transition of an order (intent created → confirmed → submitted → filled/canceled/rejected) MUST be recorded with: `device_id`, `user_id` (if present), `intent_id`, `broker_order_id`, `symbol`, `side`, `qty`, `timestamp`, and the actor (`llm` vs `user-confirm` vs `system`). The log MUST be append-only and MUST NOT be silenced by env flags.
 
+## Broker abstraction model (per-user multi-tenant)
+
+Detailed design: `docs/adr/0001-broker-abstraction.md`. The constraints below are the parts that MUST be observed by anyone editing this codebase.
+
+### Model
+- A user can have **1:N broker bindings**, where a binding = `(user_id, broker_type, label)`. Each binding owns its own credentials. There is no module-level shared broker credential (except `MockAdapter`, which is stateless per-user).
+- Adapters are constructed **per binding** via `brokers.registry.BrokerRegistry.get(user_id, broker_type, label=None)`. Do not introduce paths that bypass the registry.
+- Supported brokers: `mock` (always), `alpaca` (paper only), `tiger` (paper only). New brokers MUST extend `BrokerAdapter` and ship with a paper / simulator mode that works in CI without a real account.
+
+### Credentials
+- Credentials are encrypted with **envelope encryption** in `brokers/credentials_store.py`: per-binding DEK encrypts the credential blob; a versioned KEK (`BROKER_KEK_v1`, `BROKER_KEK_v2`, ... from env) wraps the DEK.
+- Persistence is SQLite (`data/brokers.db`). The DB file contains only ciphertext and is safe to back up; without the KEK env var it is useless.
+- Plaintext credentials are decrypted **in memory only**, zeroed after each use, and held inside a cached adapter for ≤ 60 s.
+- Credentials MUST NEVER:
+  - appear in any log line, exception message, traceback, or print
+  - be returned by any tool to the LLM
+  - be embedded in system prompts, RAG context, or any text that reaches the model
+  - be serialized to disk in plaintext, including caches, snapshots, or test fixtures
+- KEK rotation: operator runs `python -m brokers.rotate_kek`. Old KEKs retained 30 days then deleted. Server refuses to start if SQLite has rows but no KEK is set.
+
+### Tiger specifics
+- Tiger uses RSA private keys, **not OAuth**. The UI wizard handles the 3-step flow (open Tiger portal → generate key pair → upload `.pem` + tiger_id). See ADR §5.
+- `env` defaults to `paper` at bind time. Switching to `live` is forbidden by the current trading-safety rules — do not add code paths that flip `env='live'` without a new ADR.
+- Tiger SDK is pinned to a major version in `requirements.txt`. Do not bump without checking the changelog for breaking auth changes.
+
+### Audit & monitoring
+- Every credential lifecycle event (`bind`, `unbind`, `use`, `rotate`, `fail`, `read`) is recorded **append-only** in the `broker_audit_log` SQLite table by `brokers/audit.py`. This satisfies the audit-trail TODO in the trading-safety section above for the broker subsystem.
+- Audit writes MUST NOT be silenced by env flags or try/except. A failed audit write is a code path that needs fixing, not swallowing.
+- The most important alert is: **any audit row with `actor='llm'` and `action ∈ {'bind','unbind','rotate'}` is a critical incident.** The LLM should only ever trigger `action='use'`. Anything else means a guardrail leaked.
+- Metrics exposed at `/metrics/brokers` (in-process counters). See ADR §8 for the full list and alert thresholds.
+
+### Tool-layer integration
+- Trading tools (`place_order_intent`, `cancel_order`, `broker_account`) resolve the user's chosen binding via `BrokerRegistry`. Their LLM-facing schemas accept an optional `broker_label` argument; absent it, the user's default binding is used.
+- The two-phase order flow (intent → user confirm → submit) from the trading-safety rules remains unchanged. Multi-binding adds **which binding** to the intent payload; it does not change the contract.
+
 ## No-go zones (read-only unless task explicitly says otherwise)
 
 - `.env` — never read or commit; use `.env.example` to learn schema
