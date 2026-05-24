@@ -238,6 +238,74 @@ def test_place_order_market_is_rejected(monkeypatch):
         adapter.place_order(intent)
 
 
+def test_strip_pem_markers_returns_base64_only():
+    """Pure-function test for the PEM → raw base64 helper."""
+    from brokers.tiger_adapter import _strip_pem_markers
+
+    pem = (
+        "-----BEGIN RSA PRIVATE KEY-----\n"
+        "MIICXAIBAAKBgQDIyVcAAQUq7Q\n"
+        "TWxqMDe44XOlS/yiTbcN/eZqAA==\n"
+        "-----END RSA PRIVATE KEY-----\n"
+    )
+    body = _strip_pem_markers(pem)
+    assert "BEGIN" not in body
+    assert "END" not in body
+    assert "\n" not in body
+    assert body == "MIICXAIBAAKBgQDIyVcAAQUq7QTWxqMDe44XOlS/yiTbcN/eZqAA=="
+
+
+def test_strip_pem_markers_handles_pkcs8_label():
+    """Same helper must also handle 'BEGIN PRIVATE KEY' (no RSA, PKCS#8 label)."""
+    from brokers.tiger_adapter import _strip_pem_markers
+
+    pem = (
+        "-----BEGIN PRIVATE KEY-----\n"
+        "ABCDEFG\n"
+        "-----END PRIVATE KEY-----"
+    )
+    assert _strip_pem_markers(pem) == "ABCDEFG"
+
+
+def test_ensure_client_assigns_raw_base64_not_full_pem(monkeypatch):
+    """
+    Regression: tigeropen.common.util.signature_utils.load_private_key calls
+    base64.b64decode(private_key) directly. We MUST strip PEM markers before
+    assigning to config.private_key, or signing fails with 'Incorrect padding'.
+    """
+    from brokers.base import TigerCredentials
+    from brokers import tiger_adapter
+
+    fake_config = MagicMock()
+    fake_config_cls = MagicMock(return_value=fake_config)
+    fake_client = MagicMock()
+    fake_trade_cls = MagicMock(return_value=fake_client)
+
+    monkeypatch.setattr(tiger_adapter, "_import_tiger", lambda: {
+        "TigerOpenClientConfig": fake_config_cls,
+        "TradeClient": fake_trade_cls,
+        "Language": NS(zh_CN="zh_CN"),
+        "Order": MagicMock(),
+    })
+
+    pem = (
+        "-----BEGIN RSA PRIVATE KEY-----\n"
+        "MIICXAIBAAKBgQDIyVcAAQUq7Q\n"
+        "-----END RSA PRIVATE KEY-----\n"
+    )
+    adapter = tiger_adapter.TigerAdapter(TigerCredentials(
+        tiger_id="20151024", private_key=pem, account="U99999999",
+    ))
+    adapter._ensure_client()
+
+    # What we set on the fake config — the value tigeropen would consume.
+    assigned = fake_config.private_key
+    assert "BEGIN" not in assigned
+    assert "END" not in assigned
+    assert "\n" not in assigned
+    assert assigned == "MIICXAIBAAKBgQDIyVcAAQUq7Q"
+
+
 def test_list_orders_reads_filled_field_not_filled_quantity(monkeypatch):
     """Regression: Tiger's Order field is `filled`, not `filled_quantity`."""
     fake_client = MagicMock()

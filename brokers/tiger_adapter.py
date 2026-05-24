@@ -80,6 +80,24 @@ def _map_status(raw) -> OrderStatus:
     return _STATUS_MAP.get(s, OrderStatus.NEW)
 
 
+def _strip_pem_markers(pem: str) -> str:
+    """
+    tigeropen's signature_utils.load_private_key does `base64.b64decode(private_key)`
+    directly on its input — so it expects RAW BASE64, NOT a full PEM string.
+    Feeding it `-----BEGIN...` lines causes "Incorrect padding" errors.
+
+    This helper strips:
+      - any line containing BEGIN / END
+      - all whitespace and newlines (b64decode tolerates whitespace but we be tidy)
+    Returns just the base64 body as a single string.
+    """
+    body_lines = [
+        ln for ln in pem.strip().splitlines()
+        if "BEGIN" not in ln and "END" not in ln
+    ]
+    return "".join(body_lines).strip()
+
+
 # ════════════════════════════════════════════════════════════
 # TigerAdapter
 # ════════════════════════════════════════════════════════════
@@ -119,7 +137,11 @@ class TigerAdapter(BrokerAdapter):
         self._sdk = _import_tiger()
         try:
             config = self._sdk["TigerOpenClientConfig"]()
-            config.private_key = self._private_key
+            # IMPORTANT: tigeropen expects raw base64 here, not full PEM.
+            # If we passed the PEM verbatim, signature_utils.load_private_key()
+            # calls base64.b64decode() on it directly and explodes with
+            # "Incorrect padding" because BEGIN/END lines aren't base64.
+            config.private_key = _strip_pem_markers(self._private_key)
             config.tiger_id = self.tiger_id
             config.account = self.account
             config.license = self.license
