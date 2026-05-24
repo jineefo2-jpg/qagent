@@ -300,6 +300,44 @@ def test_wrap_error_redacts_pem_in_message():
     assert "[REDACTED-PEM]" in s
 
 
+def test_map_status_handles_real_tiger_formats():
+    """
+    Tiger SDK 实际返回 `OrderStatus.FILLED` (大写枚举值)。
+    早期映射表用 CamelCase ("Filled") 导致所有状态都 fallback 到 NEW —
+    用户报告"已成交订单还显示待成交"。这一组用例钉死真实格式都映射对。
+    """
+    from brokers.tiger_adapter import _map_status
+    from brokers.base import OrderStatus
+
+    cases = [
+        # (Tiger 返回, 我们的映射)
+        ("OrderStatus.FILLED",            OrderStatus.FILLED),
+        ("FILLED",                         OrderStatus.FILLED),
+        ("Filled",                         OrderStatus.FILLED),    # CamelCase 容错
+        ("OrderStatus.PARTIALLY_FILLED",  OrderStatus.PARTIALLY_FILLED),
+        ("PARTIALLY_FILLED",               OrderStatus.PARTIALLY_FILLED),
+        ("PartiallyFilled",                OrderStatus.PARTIALLY_FILLED),
+        ("OrderStatus.NEW",                OrderStatus.NEW),
+        ("NEW",                            OrderStatus.NEW),
+        ("OrderStatus.HELD",               OrderStatus.NEW),
+        ("OrderStatus.CANCELLED",          OrderStatus.CANCELED),
+        ("CANCELLED",                      OrderStatus.CANCELED),
+        ("CANCELED",                       OrderStatus.CANCELED),   # 美式拼法也兼容
+        ("OrderStatus.REJECTED",           OrderStatus.REJECTED),
+        ("OrderStatus.EXPIRED",            OrderStatus.EXPIRED),
+        ("OrderStatus.INACTIVE",           OrderStatus.CANCELED),
+        ("OrderStatus.INITIAL",            OrderStatus.NEW),
+        ("OrderStatus.PENDING_CANCEL",     OrderStatus.NEW),
+    ]
+    for raw, expected in cases:
+        actual = _map_status(raw)
+        assert actual == expected, f"{raw!r} → {actual} (expected {expected})"
+
+    # 未知值兜底 NEW(不抛)
+    assert _map_status("OrderStatus.SOMETHING_NEW_TIGER_INVENTED") == OrderStatus.NEW
+    assert _map_status(None) == OrderStatus.NEW
+
+
 def test_strip_pem_markers_returns_base64_only():
     """Pure-function test for the PEM → raw base64 helper."""
     from brokers.tiger_adapter import _strip_pem_markers

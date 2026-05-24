@@ -58,19 +58,23 @@ def _import_tiger():
 
 
 # Tiger 订单状态 → 我们的统一状态
+# 注意:Tiger SDK 实际返回的是 `OrderStatus.FILLED` 这种全大写枚举值,
+# 不是文档里写的 CamelCase。所以这里 key 全部 normalize 成 UPPER + 去掉下划线,
+# _map_status 输入也做同样处理,既兼容老文档也兼容真实 SDK 行为。
 _STATUS_MAP = {
-    "Initial": OrderStatus.NEW,
-    "PendingNew": OrderStatus.NEW,
-    "New": OrderStatus.NEW,
-    "Held": OrderStatus.NEW,
-    "PartiallyFilled": OrderStatus.PARTIALLY_FILLED,
-    "Filled": OrderStatus.FILLED,
-    "Cancelled": OrderStatus.CANCELED,
-    "PendingCancel": OrderStatus.NEW,
-    "Inactive": OrderStatus.CANCELED,
-    "Rejected": OrderStatus.REJECTED,
-    "Expired": OrderStatus.EXPIRED,
-    "Replaced": OrderStatus.NEW,
+    "INITIAL":          OrderStatus.NEW,
+    "PENDINGNEW":       OrderStatus.NEW,
+    "NEW":              OrderStatus.NEW,
+    "HELD":             OrderStatus.NEW,
+    "PARTIALLYFILLED":  OrderStatus.PARTIALLY_FILLED,
+    "FILLED":           OrderStatus.FILLED,
+    "CANCELLED":        OrderStatus.CANCELED,
+    "CANCELED":         OrderStatus.CANCELED,
+    "PENDINGCANCEL":    OrderStatus.NEW,
+    "INACTIVE":         OrderStatus.CANCELED,
+    "REJECTED":         OrderStatus.REJECTED,
+    "EXPIRED":          OrderStatus.EXPIRED,
+    "REPLACED":         OrderStatus.NEW,
 }
 
 
@@ -80,6 +84,8 @@ def _map_status(raw) -> OrderStatus:
     s = str(raw)
     if "." in s:
         s = s.rsplit(".", 1)[-1]
+    # 大小写 + 下划线都做归一,容忍 "Filled" / "FILLED" / "PARTIALLY_FILLED" 等所有变体
+    s = s.upper().replace("_", "")
     return _STATUS_MAP.get(s, OrderStatus.NEW)
 
 
