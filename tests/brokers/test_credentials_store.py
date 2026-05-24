@@ -305,6 +305,40 @@ def test_unbind_emits_audit(store_env):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Tiger credentials round-trip (X4)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_tiger_bind_then_load_preserves_all_fields(store_env):
+    s, _ = store_env
+    from brokers.base import TigerCredentials
+
+    original = TigerCredentials(
+        tiger_id="20151024",
+        private_key="-----BEGIN PRIVATE KEY-----\nFAKE-RSA-PEM-BLOB\n-----END PRIVATE KEY-----",
+        account="U99999999",
+        license="TBNZ",
+    )
+    s.bind("u_42", "tiger", "main", creds=original, actor="user")
+    loaded = s.load("u_42", "tiger", "main", actor="system")
+    assert loaded == original
+
+
+def test_tiger_private_key_not_in_ciphertext(store_env):
+    s, conn = store_env
+    from brokers.base import TigerCredentials
+
+    secret = "SECRET-MARKER-XYZ"
+    pem = f"-----BEGIN PRIVATE KEY-----\n{secret}\n-----END PRIVATE KEY-----"
+    s.bind("u_42", "tiger", "main",
+           TigerCredentials(tiger_id="x", private_key=pem, account="U999"),
+           actor="user")
+    row = conn.execute(
+        "SELECT encrypted_credential FROM broker_bindings WHERE broker_type='tiger'"
+    ).fetchone()
+    assert secret.encode() not in row[0]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # get_default_label
 # ─────────────────────────────────────────────────────────────────────────────
 

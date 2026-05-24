@@ -28,6 +28,10 @@ langchain-core>=0.3.0
 # 可选：Alpaca paper trading（半自动下单）
 alpaca-py>=0.30.0
 
+# 可选：老虎证券 (Tiger Brokers) paper trading (per ADR-0001 §5)
+# Major-pinned: Tiger 历史上有过 auth 字段重命名,大版本必须固定
+tigeropen>=3.2.0,<4.0.0
+
 # OAuth 账户登录（Google / GitHub）
 authlib>=1.3.0
 itsdangerous>=2.1.0

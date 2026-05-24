@@ -138,6 +138,65 @@ def test_bind_duplicate_label_exits_nonzero(cli_env, capsys):
     assert "already exists" in capsys.readouterr().err
 
 
+def test_bind_tiger_via_pem_file(cli_env, capsys, tmp_path):
+    """Tiger binding reads PEM from --private-key-file."""
+    from brokers import cli
+    from brokers.credentials_store import store
+
+    pem_file = tmp_path / "tiger.pem"
+    pem_content = "-----BEGIN PRIVATE KEY-----\nFAKE-PEM-BODY\n-----END PRIVATE KEY-----"
+    pem_file.write_text(pem_content)
+
+    rc = cli.main([
+        "bind", "tiger",
+        "--user-id", "u_42", "--label", "paper-main",
+        "--tiger-id", "20151024",
+        "--private-key-file", str(pem_file),
+        "--account", "U99999999",
+    ])
+    assert rc == 0
+    assert "bound tiger/paper-main" in capsys.readouterr().out
+
+    creds = store.load("u_42", "tiger", "paper-main", actor="system")
+    assert creds.tiger_id == "20151024"
+    assert creds.private_key == pem_content
+    assert creds.account == "U99999999"
+    assert creds.license == "TBNZ"  # default
+
+
+def test_bind_tiger_rejects_non_pem_file(cli_env, capsys, tmp_path):
+    from brokers import cli
+
+    bad = tmp_path / "not_a_key.txt"
+    bad.write_text("this is just a text file")
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main([
+            "bind", "tiger",
+            "--user-id", "u_42", "--label", "main",
+            "--tiger-id", "20151024",
+            "--private-key-file", str(bad),
+            "--account", "U999",
+        ])
+    assert "PEM" in str(exc.value)
+
+
+def test_bind_tiger_missing_args_rejected(cli_env, tmp_path):
+    from brokers import cli
+
+    pem_file = tmp_path / "k.pem"
+    pem_file.write_text("-----BEGIN PRIVATE KEY-----\nx\n-----END PRIVATE KEY-----")
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main([
+            "bind", "tiger",
+            "--user-id", "u_42", "--label", "main",
+            "--tiger-id", "20151024",
+            # missing --account and --private-key-file
+        ])
+    assert "tiger requires" in str(exc.value)
+
+
 def test_bind_mock_with_initial_cash(cli_env, capsys):
     from brokers import cli
     from brokers.credentials_store import store

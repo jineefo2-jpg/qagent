@@ -28,6 +28,7 @@ from .base import (
     Credentials,
     MockCredentials,
     AlpacaCredentials,
+    TigerCredentials,
 )
 
 
@@ -162,11 +163,14 @@ def _load_credentials(user_id: str, broker_type: str, label: Optional[str]) -> C
 
 
 def _build_adapter(creds: Credentials) -> BrokerAdapter:
-    """Credentials → Adapter 的分派。新 broker 接入时(X4 Tiger)在这里加分支。"""
+    """Credentials → Adapter 的分派。新 broker 在此加分支。"""
     if isinstance(creds, MockCredentials):
         from .mock_adapter import MockAdapter
         return MockAdapter(creds)
     if isinstance(creds, AlpacaCredentials):
         from .alpaca_adapter import AlpacaAdapter
         return AlpacaAdapter(creds)
+    if isinstance(creds, TigerCredentials):
+        from .tiger_adapter import TigerAdapter
+        return TigerAdapter(creds)
     raise BrokerError(f"No adapter for credentials type: {type(creds).__name__}")

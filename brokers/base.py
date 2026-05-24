@@ -46,6 +46,30 @@ class AlpacaCredentials(Credentials):
     base_url: str = "https://paper-api.alpaca.markets"
 
 
+@dataclass(frozen=True)
+class TigerCredentials(Credentials):
+    """
+    Tiger Brokers 凭证 (老虎证券)。
+
+    Tiger 不支持 OAuth,只能用 RSA 私钥认证。整套凭证由用户在
+    https://www.itigerup.com/openapi/ 生成密钥对后上传到本应用 (ADR-0001 §5)。
+
+    字段:
+      tiger_id:     开发者账号 ID (类似 "20151024")
+      private_key:  PEM 格式 RSA 私钥(整段,含 BEGIN/END 头尾)
+      account:      交易账户号(模拟账户以 'U' 开头)
+      license:      持牌主体 (TBNZ/TBAU/TBSG/TBHK),默认 TBNZ(新西兰,覆盖最广)
+
+    paper/live 的区分**不在这里**,在 broker_bindings.env 列。本应用当前只
+    允许 env='paper'(对应 Tiger 的"环球账户模拟")。
+    """
+    broker_type: str = "tiger"
+    tiger_id: str = ""
+    private_key: str = ""
+    account: str = ""
+    license: str = "TBNZ"
+
+
 # ════════════════════════════════════════════════════════════
 # 异常
 # ════════════════════════════════════════════════════════════

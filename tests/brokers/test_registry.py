@@ -108,6 +108,35 @@ def test_get_alpaca_resolves_label_none_to_oldest_binding(store_env):
     assert adapter.api_key == "k1"
 
 
+def test_get_tiger_unbound_raises_no_broker_binding(store_env):
+    """X4: Tiger is per-user too — unbound must raise (not env-fallback)."""
+    from brokers.registry import _registry
+    from brokers.base import BrokerError
+
+    with pytest.raises(BrokerError, match="no_broker_binding"):
+        _registry.get(user_id="u_unbound", broker_type="tiger")
+
+
+def test_get_tiger_after_bind_returns_tiger_adapter(store_env):
+    from brokers.base import TigerCredentials
+    from brokers.credentials_store import store
+    from brokers.tiger_adapter import TigerAdapter
+    from brokers.registry import _registry
+
+    store.bind(
+        user_id="u_42", broker_type="tiger", label="main",
+        creds=TigerCredentials(
+            tiger_id="20151024",
+            private_key="-----BEGIN PRIVATE KEY-----\nx\n-----END PRIVATE KEY-----",
+            account="U99999999",
+        ),
+        actor="user",
+    )
+    adapter = _registry.get(user_id="u_42", broker_type="tiger")
+    assert isinstance(adapter, TigerAdapter)
+    assert adapter.account == "U99999999"
+
+
 def test_bind_invalidates_registry_cache(store_env):
     """After bind/unbind, the registry's stale adapter must not be returned."""
     from brokers.base import AlpacaCredentials

@@ -33,7 +33,7 @@ except ImportError:
 
 def _build_creds(broker_type: str, args: argparse.Namespace):
     """Construct the right Credentials subclass; prompt for missing secrets."""
-    from .base import AlpacaCredentials, MockCredentials
+    from .base import AlpacaCredentials, MockCredentials, TigerCredentials
 
     if broker_type == "alpaca":
         api_key = args.api_key or getpass.getpass("Alpaca API Key: ")
@@ -45,7 +45,30 @@ def _build_creds(broker_type: str, args: argparse.Namespace):
     if broker_type == "mock":
         return MockCredentials(initial_cash=float(args.initial_cash or 100000.0))
 
-    # X4 will add tiger here.
+    if broker_type == "tiger":
+        if not args.tiger_id or not args.private_key_file or not args.account:
+            raise SystemExit(
+                "ERROR: tiger requires --tiger-id, --private-key-file, --account"
+            )
+        # Read PEM file. Never echo its contents.
+        try:
+            with open(args.private_key_file, "r", encoding="utf-8") as f:
+                pem = f.read()
+        except OSError as e:
+            raise SystemExit(f"ERROR: cannot read private key file: {e}")
+        if "BEGIN" not in pem or "PRIVATE KEY" not in pem:
+            raise SystemExit(
+                "ERROR: private key file doesn't look like a PEM "
+                "(missing 'BEGIN ... PRIVATE KEY' header). "
+                "Did you point at the right file from Tiger OpenAPI portal?"
+            )
+        return TigerCredentials(
+            tiger_id=args.tiger_id,
+            private_key=pem,
+            account=args.account,
+            license=args.license or "TBNZ",
+        )
+
     raise SystemExit(
         f"ERROR: broker_type {broker_type!r} not yet supported by the CLI."
     )
@@ -110,15 +133,25 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="cmd", required=True)
 
     pb = sub.add_parser("bind", help="Bind a brokerage account for a user")
-    pb.add_argument("broker_type", choices=["alpaca", "mock"],
-                    help="(tiger lands in X4)")
+    pb.add_argument("broker_type", choices=["alpaca", "mock", "tiger"])
     pb.add_argument("--user-id", required=True)
     pb.add_argument("--label", default="main")
     pb.add_argument("--env", default="paper", choices=["paper", "live"])
+    # Alpaca
     pb.add_argument("--api-key", default=None, help="(alpaca; will prompt if omitted)")
     pb.add_argument("--api-secret", default=None,
                     help="(alpaca; will prompt if omitted)")
+    # Mock
     pb.add_argument("--initial-cash", default=None, help="(mock; default 100000)")
+    # Tiger
+    pb.add_argument("--tiger-id", default=None,
+                    help="(tiger; from itigerup.com OpenAPI portal)")
+    pb.add_argument("--private-key-file", default=None,
+                    help="(tiger; path to .pem file downloaded from Tiger)")
+    pb.add_argument("--account", default=None,
+                    help="(tiger; paper account number, usually starts with 'U')")
+    pb.add_argument("--license", default=None,
+                    help="(tiger; TBNZ default; TBAU/TBSG/TBHK alternatives)")
     pb.set_defaults(func=cmd_bind)
 
     pl = sub.add_parser("list", help="List bindings for a user (no secrets shown)")
