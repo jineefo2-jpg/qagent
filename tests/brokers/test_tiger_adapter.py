@@ -146,6 +146,8 @@ def _fake_sdk(client):
         "TigerOpenClientConfig": fake_config_cls,
         "TradeClient": fake_trade_cls,
         "Language": NS(zh_CN="zh_CN"),
+        "SecurityType": NS(STK="STK", OPT="OPT", FUT="FUT", WAR="WAR"),
+        "Market": NS(US="US", HK="HK", CN="CN", ALL="ALL"),
         "Order": MagicMock(),
     }
 
@@ -345,6 +347,8 @@ def test_ensure_client_assigns_raw_base64_not_full_pem(monkeypatch):
         "TigerOpenClientConfig": fake_config_cls,
         "TradeClient": fake_trade_cls,
         "Language": NS(zh_CN="zh_CN"),
+        "SecurityType": NS(STK="STK", OPT="OPT", FUT="FUT", WAR="WAR"),
+        "Market": NS(US="US", HK="HK", CN="CN", ALL="ALL"),
         "Order": MagicMock(),
     })
 
@@ -364,6 +368,122 @@ def test_ensure_client_assigns_raw_base64_not_full_pem(monkeypatch):
     assert "END" not in assigned
     assert "\n" not in assigned
     assert assigned == "MIICXAIBAAKBgQDIyVcAAQUq7Q"
+
+
+def test_list_positions_merges_across_sec_type_and_market(monkeypatch):
+    """
+    Tiger 的 get_positions 默认只返回一种 sec_type;我们要把 US 股 + HK 股 + 美股期权
+    全部合并到一份持仓列表里返回(用户的真实需求)。
+    """
+    fake_client = MagicMock()
+    call_log = []
+
+    def get_positions(account, sec_type, market):
+        call_log.append((str(sec_type), str(market)))
+        # 模拟 Tiger 不同 (sec_type, market) 组合返回不同的持仓
+        if sec_type == "STK" and market == "US":
+            return [NS(contract=NS(symbol="AAPL", sec_type="STK"),
+                       quantity=10, average_cost=150.0,
+                       market_value=1600.0, unrealized_pnl=100.0, market_price=160.0)]
+        if sec_type == "STK" and market == "HK":
+            return [NS(contract=NS(symbol="00700", sec_type="STK"),
+                       quantity=100, average_cost=380.0,
+                       market_value=40000.0, unrealized_pnl=2000.0, market_price=400.0)]
+        if sec_type == "OPT" and market == "US":
+            return [NS(contract=NS(symbol="AAPL", sec_type="OPT",
+                                    expiry="2025-06-20", strike=200.0, put_call="CALL"),
+                       quantity=1, average_cost=5.0,
+                       market_value=600.0, unrealized_pnl=100.0, market_price=6.0)]
+        return []
+    fake_client.get_positions = get_positions
+
+    adapter = _build_adapter(monkeypatch, fake_client)
+    positions = adapter.list_positions()
+
+    symbols = [p.symbol for p in positions]
+    assert "AAPL" in symbols, f"expected US stock AAPL, got {symbols}"
+    assert "00700" in symbols, f"expected HK stock 00700, got {symbols}"
+    # 期权展开了 expiry + strike + Call/Put
+    assert any("AAPL 2025-06-20 C200" in s for s in symbols), f"expected option, got {symbols}"
+    assert len(positions) == 3
+
+    # 至少跑过 12 次组合(4 sec_type × 3 market)
+    assert len(call_log) >= 12
+
+
+def test_list_positions_deduplicates_when_combos_overlap(monkeypatch):
+    """如果不同 (sec_type, market) 查询返回了相同 contract,只保留一份。"""
+    fake_client = MagicMock()
+    same_pos = NS(contract=NS(symbol="AAPL", sec_type="STK"),
+                   quantity=10, average_cost=150.0,
+                   market_value=1600.0, unrealized_pnl=100.0, market_price=160.0)
+    fake_client.get_positions = MagicMock(return_value=[same_pos])
+
+    adapter = _build_adapter(monkeypatch, fake_client)
+    positions = adapter.list_positions()
+
+    # 12 个组合每个都返回同一条 → 去重后只有 1
+    assert len(positions) == 1
+    assert positions[0].symbol == "AAPL"
+
+
+def test_list_positions_silently_skips_failing_combos(monkeypatch):
+    """权限不足等错误应当被吞掉,只要至少一个组合成功就返回。"""
+    fake_client = MagicMock()
+
+    def get_positions(account, sec_type, market):
+        if sec_type == "STK" and market == "US":
+            return [NS(contract=NS(symbol="AAPL", sec_type="STK"),
+                       quantity=1, average_cost=100.0,
+                       market_value=110.0, unrealized_pnl=10.0, market_price=110.0)]
+        raise RuntimeError(f"permission denied for {sec_type}/{market}")
+    fake_client.get_positions = get_positions
+
+    adapter = _build_adapter(monkeypatch, fake_client)
+    positions = adapter.list_positions()
+
+    assert len(positions) == 1
+    assert positions[0].symbol == "AAPL"
+
+
+def test_list_positions_raises_if_all_combos_fail(monkeypatch):
+    """全军覆没时把最后一个错误抛出来,不要静默返回空数组。"""
+    from brokers.base import BrokerError
+    fake_client = MagicMock()
+    fake_client.get_positions = MagicMock(
+        side_effect=RuntimeError("network down")
+    )
+
+    adapter = _build_adapter(monkeypatch, fake_client)
+    with pytest.raises(BrokerError, match="network down"):
+        adapter.list_positions()
+
+
+def test_list_orders_merges_across_combos(monkeypatch):
+    """订单也跨 sec_type/market 合并,按 id 去重。"""
+    fake_client = MagicMock()
+
+    def get_orders(account, sec_type, market, limit):
+        if sec_type == "STK" and market == "US":
+            return [NS(id=111, contract=NS(symbol="AAPL"), action="BUY",
+                       order_type="LMT", quantity=10, filled=0,
+                       limit_price=150.0, status="New", avg_fill_price=0,
+                       order_time="2026-05-25 09:00")]
+        if sec_type == "OPT" and market == "US":
+            return [NS(id=222, contract=NS(symbol="AAPL 2025-06-20 C200"),
+                       action="BUY", order_type="LMT", quantity=1, filled=0,
+                       limit_price=5.0, status="New", avg_fill_price=0,
+                       order_time="2026-05-25 09:30")]
+        return []
+    fake_client.get_orders = get_orders
+
+    adapter = _build_adapter(monkeypatch, fake_client)
+    orders = adapter.list_orders(limit=50)
+
+    ids = [o.broker_order_id for o in orders]
+    assert "111" in ids
+    assert "222" in ids
+    assert len(orders) == 2
 
 
 def test_list_orders_reads_filled_field_not_filled_quantity(monkeypatch):

@@ -41,12 +41,14 @@ def _import_tiger():
     try:
         from tigeropen.tiger_open_config import TigerOpenClientConfig
         from tigeropen.trade.trade_client import TradeClient
-        from tigeropen.common.consts import Language
+        from tigeropen.common.consts import Language, SecurityType, Market
         from tigeropen.trade.domain.order import Order
         return {
             "TigerOpenClientConfig": TigerOpenClientConfig,
             "TradeClient": TradeClient,
             "Language": Language,
+            "SecurityType": SecurityType,
+            "Market": Market,
             "Order": Order,
         }
     except ImportError as e:
@@ -191,16 +193,50 @@ class TigerAdapter(BrokerAdapter):
         )
 
     def list_positions(self) -> List[Position]:
+        """
+        拉全量持仓。
+        Tiger 的 get_positions 默认 sec_type=STK,而且某些账户/市场组合需要显式
+        请求才能拿到。所以这里遍历 (sec_type × market) 全组合,失败的组合静默跳过
+        (大部分时候是权限不够,不是真错误),最后按 (symbol + 期权字段) 去重。
+        """
         client = self._ensure_client()
-        try:
-            positions = client.get_positions(account=self.account)
-        except Exception as e:
-            raise self._wrap_error(e) from e
+        sdk = self._sdk
+        SecurityType = sdk["SecurityType"]
+        Market = sdk["Market"]
+
+        sec_types = (SecurityType.STK, SecurityType.OPT,
+                     SecurityType.FUT, SecurityType.WAR)
+        markets = (Market.US, Market.HK, Market.CN)
+
+        seen: set = set()
+        raw: List[object] = []
+        last_err: Optional[Exception] = None
+
+        for st in sec_types:
+            for mk in markets:
+                try:
+                    positions = client.get_positions(
+                        account=self.account, sec_type=st, market=mk,
+                    )
+                except Exception as e:
+                    # 权限不足 / 此账户不支持该市场:静默跳过该组合
+                    last_err = e
+                    continue
+                for p in (positions or []):
+                    key = self._position_dedup_key(p)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    raw.append(p)
+
+        # 如果所有组合都失败(Tiger 网关全挂),把最后一个错误抛出来
+        if not raw and last_err is not None:
+            raise self._wrap_error(last_err) from last_err
 
         out: List[Position] = []
-        for p in positions or []:
-            symbol = getattr(p, "contract", None)
-            sym_str = getattr(symbol, "symbol", None) or str(symbol)
+        for p in raw:
+            contract = getattr(p, "contract", None)
+            sym_str = self._format_position_symbol(contract)
             qty = float(getattr(p, "quantity", 0) or 0)
             avg = float(getattr(p, "average_cost", 0) or 0)
             market_value = float(getattr(p, "market_value", qty * avg) or (qty * avg))
@@ -217,6 +253,35 @@ class TigerAdapter(BrokerAdapter):
                 current_price=float(getattr(p, "market_price", avg) or avg),
             ))
         return out
+
+    @staticmethod
+    def _position_dedup_key(p):
+        """Stable dedupe key across overlapping (sec_type, market) queries."""
+        c = getattr(p, "contract", None)
+        if c is None:
+            return ("?",)
+        return (
+            getattr(c, "symbol", None),
+            str(getattr(c, "sec_type", "") or ""),
+            getattr(c, "strike", None),
+            getattr(c, "expiry", None),
+            getattr(c, "put_call", None),
+        )
+
+    @staticmethod
+    def _format_position_symbol(contract) -> str:
+        """对期权,把 expiry + strike + P/C 展开进 symbol,前端能区分不同期权合约。"""
+        if contract is None:
+            return "?"
+        sec_type = str(getattr(contract, "sec_type", "") or "")
+        symbol = getattr(contract, "symbol", None) or "?"
+        if "OPT" in sec_type.upper():
+            expiry = getattr(contract, "expiry", "")
+            strike = getattr(contract, "strike", "")
+            pc = (getattr(contract, "put_call", "") or "")[:1].upper()
+            extra = " ".join(str(x) for x in (expiry, f"{pc}{strike}" if pc else "") if x)
+            return f"{symbol} {extra}".strip() if extra else str(symbol)
+        return symbol
 
     # ── 订单 ────────────────────────────────────────────────
 
@@ -280,15 +345,48 @@ class TigerAdapter(BrokerAdapter):
         return self._to_order_result(order)
 
     def list_orders(self, status: Optional[str] = None, limit: int = 50) -> List[OrderResult]:
+        """
+        拉全量订单(跨 sec_type × market)。每个组合最多 limit 条,合并后按 limit 截取。
+        """
         client = self._ensure_client()
-        try:
-            orders = client.get_orders(account=self.account, limit=limit)
-        except Exception as e:
-            raise self._wrap_error(e) from e
-        results = [self._to_order_result(o) for o in (orders or [])]
+        sdk = self._sdk
+        SecurityType = sdk["SecurityType"]
+        Market = sdk["Market"]
+
+        sec_types = (SecurityType.STK, SecurityType.OPT,
+                     SecurityType.FUT, SecurityType.WAR)
+        markets = (Market.US, Market.HK, Market.CN)
+
+        seen_ids: set = set()
+        raw: List[object] = []
+        last_err: Optional[Exception] = None
+
+        for st in sec_types:
+            for mk in markets:
+                try:
+                    orders = client.get_orders(
+                        account=self.account, sec_type=st, market=mk, limit=limit,
+                    )
+                except Exception as e:
+                    last_err = e
+                    continue
+                for o in (orders or []):
+                    oid = getattr(o, "id", None) or getattr(o, "order_id", None)
+                    if oid is None or oid in seen_ids:
+                        continue
+                    seen_ids.add(oid)
+                    raw.append(o)
+
+        if not raw and last_err is not None:
+            raise self._wrap_error(last_err) from last_err
+
+        results = [self._to_order_result(o) for o in raw]
         if status and status != "all":
             results = [r for r in results if r.status.value == status]
-        return results
+        # 按 submitted_at / id 降序,然后截取 limit
+        results.sort(key=lambda r: (r.submitted_at or "", r.broker_order_id),
+                     reverse=True)
+        return results[:limit]
 
     # ── helpers ─────────────────────────────────────────────
 
