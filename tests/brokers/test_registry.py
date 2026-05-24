@@ -19,6 +19,12 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+# IMPORTANT: import quant_agent at module-collection time so its load_dotenv()
+# runs ONCE here. If we let it happen lazily inside a test (after that test's
+# monkeypatch.setenv), load_dotenv(override=True) reads .env and clobbers the
+# monkeypatched value.
+import quant_agent  # noqa: E402, F401
+
 
 @pytest.fixture(autouse=True)
 def clean_registry():

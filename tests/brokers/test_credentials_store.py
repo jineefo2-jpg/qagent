@@ -305,6 +305,91 @@ def test_unbind_emits_audit(store_env):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Cross-user isolation (CLAUDE.md / ADR-0001 §3 invariant)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# 这一组测试是 "永远不要让一个用户读到别人的凭证" 的硬契约。
+# 即使攻击者拿到了另一个用户的 binding_id (例如从 URL / 日志中),
+# load/unbind 也必须以 user_id 为过滤条件,任何跨用户访问都不行。
+
+def test_isolation_load_with_wrong_user_returns_none(store_env):
+    """Even with a known binding_id, the wrong user_id MUST get None back."""
+    s, _ = store_env
+    from brokers.base import AlpacaCredentials
+
+    s.bind("u_alice", "alpaca", "main",
+           AlpacaCredentials(api_key="alice-key", api_secret="alice-secret"),
+           actor="user")
+    # Bob tries to load Alice's binding through label collision
+    bob_view = s.load("u_bob", "alpaca", "main", actor="system")
+    assert bob_view is None, "Bob must not see Alice's binding"
+
+
+def test_isolation_list_only_returns_own_bindings(store_env):
+    s, _ = store_env
+    from brokers.base import AlpacaCredentials, TigerCredentials
+
+    s.bind("u_alice", "alpaca", "main",
+           AlpacaCredentials(api_key="ak", api_secret="as"), actor="user")
+    s.bind("u_alice", "tiger", "main",
+           TigerCredentials(tiger_id="A", private_key="x", account="UA1"),
+           actor="user")
+    s.bind("u_bob", "alpaca", "main",
+           AlpacaCredentials(api_key="bk", api_secret="bs"), actor="user")
+
+    alice = s.list_user_bindings("u_alice")
+    bob = s.list_user_bindings("u_bob")
+    carol = s.list_user_bindings("u_carol")
+
+    assert {x.broker_type for x in alice} == {"alpaca", "tiger"}
+    assert {x.broker_type for x in bob} == {"alpaca"}
+    assert carol == []
+    # No id from one user's list should appear in another's
+    alice_ids = {x.id for x in alice}
+    bob_ids = {x.id for x in bob}
+    assert alice_ids.isdisjoint(bob_ids)
+
+
+def test_isolation_unbind_wrong_user_silent_no_op(store_env):
+    """Bob giving Alice's binding_id to unbind must be a no-op with audit fail."""
+    s, conn = store_env
+    from brokers.base import AlpacaCredentials
+
+    alice_binding = s.bind(
+        "u_alice", "alpaca", "main",
+        AlpacaCredentials(api_key="ak", api_secret="as"), actor="user",
+    )
+
+    # Bob attempts to delete Alice's binding by id
+    ok = s.unbind(alice_binding, "u_bob", actor="user")
+    assert ok is False, "Bob's unbind on Alice's id must return False"
+
+    # Alice's binding is still present
+    still_there = conn.execute(
+        "SELECT COUNT(*) FROM broker_bindings WHERE id = ?", (alice_binding,),
+    ).fetchone()[0]
+    assert still_there == 1
+
+    # And the failed cross-user unbind was audited
+    failed = conn.execute(
+        "SELECT actor, action, user_id, success FROM broker_audit_log "
+        "WHERE action='unbind' AND success=0"
+    ).fetchone()
+    assert failed == ("user", "unbind", "u_bob", 0)
+
+
+def test_isolation_default_label_filtered_by_user(store_env):
+    """get_default_label must also be per-user."""
+    s, _ = store_env
+    from brokers.base import AlpacaCredentials
+
+    s.bind("u_alice", "alpaca", "main",
+           AlpacaCredentials(api_key="ak", api_secret="as"), actor="user")
+    assert s.get_default_label("u_alice", "alpaca") == "main"
+    assert s.get_default_label("u_bob", "alpaca") is None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Tiger credentials round-trip (X4)
 # ─────────────────────────────────────────────────────────────────────────────
 

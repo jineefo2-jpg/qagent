@@ -1258,6 +1258,20 @@ def health():
     }
 
 
+@app.get("/api/me")
+def api_me(user: Optional[User] = Depends(current_user)):
+    """当前登录用户的简略信息。未登录返回 {logged_in: false}。"""
+    if user is None:
+        return {"logged_in": False}
+    return {
+        "logged_in": True,
+        "user_id": user.user_id,
+        "email": user.email,
+        "name": user.name,
+        "provider": user.provider,
+    }
+
+
 @app.get("/metrics/brokers")
 def metrics_brokers(_admin: User = Depends(require_admin)):
     """

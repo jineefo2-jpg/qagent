@@ -1532,6 +1532,7 @@ function renderUserArea() {
       + '<span class="user-name">' + safeName + '</span>'
       + '<div class="user-menu" id="userMenu">'
       +   '<div class="menu-info">' + (CURRENT_USER.email || '') + '<br><span style="opacity:.6;">via ' + (CURRENT_USER.provider || '') + '</span></div>'
+      +   '<a class="menu-item" href="/brokers">🔗 券商绑定</a>'
       +   '<a class="menu-item" href="/auth/logout">退出登录</a>'
       + '</div>'
       + '</div>';

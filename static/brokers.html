@@ -97,6 +97,24 @@
   details[open] > summary { margin-bottom: 8px; }
 
   .actions { display: flex; gap: 8px; margin-top: 16px; }
+
+  /* 安全告知条 */
+  .security-banner {
+    background: rgba(0, 212, 170, 0.08);
+    border: 1px solid var(--primary-dim);
+    border-radius: 8px;
+    padding: 12px 16px;
+    margin-bottom: 16px;
+    display: flex;
+    gap: 10px;
+    align-items: flex-start;
+    font-size: 13px;
+    line-height: 1.55;
+  }
+  .security-banner .icon { font-size: 18px; line-height: 1; flex-shrink: 0; }
+  .security-banner b { color: var(--primary); }
+  .security-banner .who { color: var(--text-muted); font-family: ui-monospace, Menlo, monospace;
+                          font-size: 12px; }
 </style>
 </head>
 <body>
@@ -107,6 +125,16 @@
 </header>
 
 <main>
+
+<div class="security-banner">
+  <span class="icon">🔒</span>
+  <div>
+    <b>这些绑定只属于当前登录账号</b> — 切换/退出登录后,你看到的是另一个空间的绑定列表。
+    其他用户**无法**看到、读取或解绑你的凭证(SQLite 行级隔离 + Fernet 加密 + 审计日志)。
+    凭证私钥用 envelope encryption 加密落盘,服务端运行时也只在内存解密、用完即弃。
+    <div id="current-user-info" class="who" style="margin-top:4px;"></div>
+  </div>
+</div>
 
 <div class="section">
   <h2>已绑定的账户</h2>
@@ -219,6 +247,18 @@ function clearMsg(el) {
   el.textContent = '';
 }
 
+async function loadCurrentUser() {
+  const r = await api('GET', '/api/me');
+  const el = $('#current-user-info');
+  if (!r.ok || !r.payload?.logged_in) {
+    el.innerHTML = '⚠️ 未登录 — <a href="/">回到主页登录</a>后回来';
+    return false;
+  }
+  const u = r.payload;
+  el.textContent = `当前账号: ${u.email || '(无邮箱)'} · ${u.provider || ''} · user_id=${u.user_id}`;
+  return true;
+}
+
 async function loadBindings() {
   const r = await api('GET', '/api/broker/bindings');
   const root = $('#bindings-list');
@@ -312,7 +352,10 @@ wireForm('#form-alpaca', '#msg-alpaca', 'alpaca', (fd) => ({
   api_secret: fd.get('api_secret'),
 }));
 
-loadBindings();
+(async () => {
+  await loadCurrentUser();
+  await loadBindings();
+})();
 </script>
 
 </body>
