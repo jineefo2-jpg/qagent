@@ -8,6 +8,7 @@ on first `_ensure_client()` call, which we exercise via monkeypatching.
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace as NS
 from unittest.mock import MagicMock
@@ -298,6 +299,114 @@ def test_wrap_error_redacts_pem_in_message():
     s = str(err)
     assert "SUPER_SECRET_KEY_BYTES_THAT_SHOULDNT_LEAK" not in s
     assert "[REDACTED-PEM]" in s
+
+
+def test_caches_results_within_ttl(monkeypatch):
+    """
+    Tiger 限速 60 次/分钟,前端 5 秒轮询 → adapter 必须缓存结果。
+    同一个 adapter 在 TTL 内调用 list_positions 不应再访问 Tiger。
+    """
+    fake_client = MagicMock()
+    fake_client.get_positions.return_value = [
+        NS(contract=NS(symbol="AAPL", sec_type="STK"),
+           quantity=10, average_cost=150.0,
+           market_value=1600.0, unrealized_pnl=100.0, market_price=160.0)
+    ]
+    adapter = _build_adapter(monkeypatch, fake_client)
+
+    # 第一次:打 12 次 (4 sec_type × 3 market) Tiger API
+    adapter.list_positions()
+    first_call_count = fake_client.get_positions.call_count
+    assert first_call_count >= 12
+
+    # 第二次:命中缓存,call_count 不变
+    adapter.list_positions()
+    assert fake_client.get_positions.call_count == first_call_count
+
+    # 第三、第四次也都是缓存
+    for _ in range(5):
+        adapter.list_positions()
+    assert fake_client.get_positions.call_count == first_call_count
+
+
+def test_place_order_invalidates_caches(monkeypatch):
+    """下单成功后,缓存必须失效,否则前端看到的还是下单前的状态。"""
+    from brokers.base import OrderIntent
+    fake_client = MagicMock()
+    fake_client.get_positions.return_value = []
+    fake_client.get_orders.return_value = []
+    fake_client.get_assets.return_value = [NS(summary=NS(
+        cash=100000, buying_power=100000, gross_position_value=0,
+        currency="USD", status="ACTIVE"))]
+    fake_client.get_contract.return_value = NS(symbol="AAPL")
+    fake_client.create_order.return_value = NS(filled=0, status="NEW",
+                                                 avg_fill_price=0, order_time="t")
+    fake_client.place_order.return_value = 12345
+
+    adapter = _build_adapter(monkeypatch, fake_client)
+
+    # 预热三个缓存
+    adapter.list_positions()
+    adapter.list_orders()
+    adapter.get_account()
+    assert adapter._positions_cache is not None
+    assert adapter._orders_cache is not None
+    assert adapter._account_cache is not None
+
+    # 下单 → 三个缓存都应该被清
+    intent = OrderIntent.new(symbol="AAPL", side="buy", qty=1,
+                              order_type="limit", limit_price=1.0)
+    adapter.place_order(intent)
+
+    assert adapter._positions_cache is None
+    assert adapter._orders_cache is None
+    assert adapter._account_cache is None
+
+
+def test_cancel_order_invalidates_caches(monkeypatch):
+    fake_client = MagicMock()
+    fake_client.get_positions.return_value = []
+    fake_client.get_orders.return_value = []
+    fake_client.get_assets.return_value = [NS(summary=NS(
+        cash=100000, buying_power=100000, gross_position_value=0,
+        currency="USD", status="ACTIVE"))]
+    fake_client.cancel_order.return_value = None
+
+    adapter = _build_adapter(monkeypatch, fake_client)
+
+    adapter.list_positions()
+    adapter.list_orders()
+    adapter.get_account()
+    assert adapter._positions_cache is not None
+
+    adapter.cancel_order("12345")
+
+    assert adapter._positions_cache is None
+    assert adapter._orders_cache is None
+    assert adapter._account_cache is None
+
+
+def test_cache_ttl_expires(monkeypatch):
+    """超过 TTL 后,缓存自动失效,重新调 Tiger。"""
+    fake_client = MagicMock()
+    fake_client.get_positions.return_value = []
+
+    adapter = _build_adapter(monkeypatch, fake_client)
+
+    adapter.list_positions()
+    first = fake_client.get_positions.call_count
+
+    # mock time.monotonic 跳到 TTL 之后
+    real_monotonic = time.monotonic
+    base = real_monotonic()
+    monkeypatch.setattr(
+        "brokers.tiger_adapter.time.monotonic",
+        lambda: base + adapter._CACHE_TTL_SEC + 1,
+    )
+
+    adapter.list_positions()
+    # 应该重新调用
+    assert fake_client.get_positions.call_count > first
 
 
 def test_map_status_handles_real_tiger_formats():

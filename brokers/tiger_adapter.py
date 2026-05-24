@@ -12,7 +12,9 @@ Tiger Brokers (老虎证券) 适配器 —— paper / 环球账户模拟环境�
 """
 from __future__ import annotations
 
-from typing import List, Optional
+import os
+import time
+from typing import List, Optional, Tuple
 
 from .base import (
     AccountInfo,
@@ -114,6 +116,17 @@ def _strip_pem_markers(pem: str) -> str:
 class TigerAdapter(BrokerAdapter):
     name = "tiger-paper"
 
+    # Tiger rate-limits each REST endpoint to 60 calls/min per account.
+    # Each list_positions / list_orders fans out to ~12 HTTP calls
+    # (4 sec_types × 3 markets), so without caching even a single drawer
+    # poll cycle blows past the budget. 30s TTL keeps us at most:
+    #   list_positions: 12 calls per 30s = 24/min
+    #   list_orders:    12 calls per 30s = 24/min
+    #   get_account:     1 call  per 30s =  2/min
+    # Total ≤ 50/min, comfortably below 60. Place_order/cancel_order
+    # invalidate the caches so post-trade state is fresh.
+    _CACHE_TTL_SEC = int(os.getenv("BROKER_TIGER_CACHE_TTL_SEC", "30"))
+
     def __init__(self, credentials: TigerCredentials):
         if not isinstance(credentials, TigerCredentials):
             raise BrokerError(
@@ -126,6 +139,23 @@ class TigerAdapter(BrokerAdapter):
         self.license = credentials.license
         self._client = None
         self._sdk = None
+        # TTL caches — (timestamp_monotonic, value). None = never fetched.
+        self._account_cache: Optional[Tuple[float, AccountInfo]] = None
+        self._positions_cache: Optional[Tuple[float, List[Position]]] = None
+        self._orders_cache: Optional[Tuple[float, List[OrderResult]]] = None
+
+    def _cache_is_fresh(self, entry: Optional[tuple]) -> bool:
+        if entry is None:
+            return False
+        ts, _ = entry
+        return (time.monotonic() - ts) < self._CACHE_TTL_SEC
+
+    def _invalidate_caches(self) -> None:
+        """Drop all TTL caches. Called after place_order / cancel_order so the
+        next list_positions / list_orders / get_account reflects the new state."""
+        self._account_cache = None
+        self._positions_cache = None
+        self._orders_cache = None
 
     def is_configured(self) -> bool:
         return bool(self.tiger_id and self._private_key and self.account)
@@ -170,6 +200,8 @@ class TigerAdapter(BrokerAdapter):
     # ── 账户 ────────────────────────────────────────────────
 
     def get_account(self) -> AccountInfo:
+        if self._cache_is_fresh(self._account_cache):
+            return self._account_cache[1]
         client = self._ensure_client()
         try:
             assets = client.get_assets(account=self.account)
@@ -188,7 +220,7 @@ class TigerAdapter(BrokerAdapter):
         gross_position_value = float(getattr(summary, "gross_position_value", 0) or 0)
         equity = cash + gross_position_value
 
-        return AccountInfo(
+        info = AccountInfo(
             cash=cash,
             buying_power=buying_power,
             equity=equity,
@@ -197,6 +229,8 @@ class TigerAdapter(BrokerAdapter):
             status=str(getattr(summary, "status", "ACTIVE") or "ACTIVE"),
             raw={"backend": "tiger", "license": self.license},
         )
+        self._account_cache = (time.monotonic(), info)
+        return info
 
     def list_positions(self) -> List[Position]:
         """
@@ -204,7 +238,12 @@ class TigerAdapter(BrokerAdapter):
         Tiger 的 get_positions 默认 sec_type=STK,而且某些账户/市场组合需要显式
         请求才能拿到。所以这里遍历 (sec_type × market) 全组合,失败的组合静默跳过
         (大部分时候是权限不够,不是真错误),最后按 (symbol + 期权字段) 去重。
+
+        结果按 _CACHE_TTL_SEC 缓存,以避免触发 Tiger 60 次/分钟的限速。
+        place_order / cancel_order 会通过 _invalidate_caches() 主动失效。
         """
+        if self._cache_is_fresh(self._positions_cache):
+            return self._positions_cache[1]
         client = self._ensure_client()
         sdk = self._sdk
         SecurityType = sdk["SecurityType"]
@@ -258,6 +297,7 @@ class TigerAdapter(BrokerAdapter):
                 unrealized_pl_pct=pct,
                 current_price=float(getattr(p, "market_price", avg) or avg),
             ))
+        self._positions_cache = (time.monotonic(), out)
         return out
 
     @staticmethod
@@ -314,6 +354,9 @@ class TigerAdapter(BrokerAdapter):
         if order_id is None:
             raise BrokerNetworkError("Tiger place_order 返回 None (未拿到 broker_order_id)")
 
+        # 下单成功 → 持仓/订单/资金都可能变,清缓存让下次刷新拿真实状态
+        self._invalidate_caches()
+
         # Tiger 在 place_order 后会把 id 回写到 order 对象,但 filled/status 还未更新。
         # 我们只信任明确拿到的 broker_order_id;其余字段读 order 上的当前快照,
         # 后续 get_order(broker_order_id) 可以拿到最新成交状态。
@@ -336,9 +379,11 @@ class TigerAdapter(BrokerAdapter):
         client = self._ensure_client()
         try:
             client.cancel_order(account=self.account, id=int(broker_order_id))
-            return True
         except Exception as e:
             raise self._wrap_error(e) from e
+        # 撤单影响订单列表 + 可能影响资金(撤单后余额恢复),清缓存
+        self._invalidate_caches()
+        return True
 
     def get_order(self, broker_order_id: str) -> OrderResult:
         client = self._ensure_client()
@@ -353,7 +398,20 @@ class TigerAdapter(BrokerAdapter):
     def list_orders(self, status: Optional[str] = None, limit: int = 50) -> List[OrderResult]:
         """
         拉全量订单(跨 sec_type × market)。每个组合最多 limit 条,合并后按 limit 截取。
+
+        缓存到 _CACHE_TTL_SEC,后续不同 status/limit 的查询都在缓存基础上 filter,
+        不会触发新的 Tiger 调用。下单/撤单时主动失效。
         """
+        if self._cache_is_fresh(self._orders_cache):
+            results = list(self._orders_cache[1])
+        else:
+            results = self._fetch_all_orders(limit=max(limit, 100))
+            self._orders_cache = (time.monotonic(), results)
+        if status and status != "all":
+            results = [r for r in results if r.status.value == status]
+        return results[:limit]
+
+    def _fetch_all_orders(self, limit: int) -> List[OrderResult]:
         client = self._ensure_client()
         sdk = self._sdk
         SecurityType = sdk["SecurityType"]
@@ -387,12 +445,10 @@ class TigerAdapter(BrokerAdapter):
             raise self._wrap_error(last_err) from last_err
 
         results = [self._to_order_result(o) for o in raw]
-        if status and status != "all":
-            results = [r for r in results if r.status.value == status]
-        # 按 submitted_at / id 降序,然后截取 limit
+        # 按 submitted_at / id 降序
         results.sort(key=lambda r: (r.submitted_at or "", r.broker_order_id),
                      reverse=True)
-        return results[:limit]
+        return results
 
     # ── helpers ─────────────────────────────────────────────
 
