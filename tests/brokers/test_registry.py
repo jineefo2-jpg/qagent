@@ -1,9 +1,11 @@
 """
-BrokerRegistry / get_current_broker 行为契约。
+BrokerRegistry / get_current_broker 行为契约.
 
-This covers X2 commit 1's deliverable: a per-(user, broker, label) factory
-with caching. Credentials are still env-sourced (transitional); the same tests
-should keep passing after X3 swaps in credentials_store.
+X3 c2 baseline:
+  - Mock is the only broker that gets credentials from env (it has none).
+  - Every other broker (alpaca, tiger, ...) requires an explicit per-user
+    binding in `credentials_store`. Calling `get(...)` without a binding
+    raises `BrokerError("no_broker_binding: ...")`.
 """
 
 import os
@@ -11,6 +13,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from cryptography.fernet import Fernet
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
@@ -26,6 +29,25 @@ def clean_registry():
     _registry.clear()
 
 
+@pytest.fixture
+def store_env(monkeypatch, tmp_path):
+    """
+    A real SQLite-backed credential store wired into the production singletons,
+    plus a fresh KEK. Used by tests that exercise the bind → get round-trip.
+    """
+    for name in list(os.environ):
+        if name.startswith("BROKER_KEK_v"):
+            monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("BROKER_KEK_v1", Fernet.generate_key().decode("ascii"))
+
+    from brokers import _db
+    _db.close_default()
+    # Redirect singleton path to a tmp file by patching the module constant.
+    monkeypatch.setattr(_db, "_DEFAULT_DB_PATH", tmp_path / "creds.db")
+    yield
+    _db.close_default()
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Registry · 基础工厂行为
 # ─────────────────────────────────────────────────────────────────────────────
@@ -39,42 +61,97 @@ def test_get_mock_returns_mock_adapter(monkeypatch):
     assert isinstance(adapter, MockAdapter)
 
 
-def test_get_alpaca_returns_alpaca_adapter(monkeypatch):
-    monkeypatch.setenv("ALPACA_API_KEY", "PKtest")
-    monkeypatch.setenv("ALPACA_API_SECRET", "secrettest")
-    from brokers.registry import _registry
-    from brokers.alpaca_adapter import AlpacaAdapter
-
-    adapter = _registry.get(user_id="u_42", broker_type="alpaca")
-    assert isinstance(adapter, AlpacaAdapter)
-    # Constructor must have stored the creds without hitting the network.
-    assert adapter.api_key == "PKtest"
-    assert adapter.api_secret == "secrettest"
-    assert "paper-api.alpaca.markets" in adapter.base_url
-
-
-def test_get_unknown_broker_raises(monkeypatch):
+def test_get_alpaca_unbound_raises_no_broker_binding(store_env):
+    """X3 c2: env-based Alpaca fallback is gone. Unbound user → clear error."""
     from brokers.registry import _registry
     from brokers.base import BrokerError
 
-    with pytest.raises(BrokerError, match="Unknown broker_type"):
+    with pytest.raises(BrokerError, match="no_broker_binding"):
+        _registry.get(user_id="u_unbound", broker_type="alpaca")
+
+
+def test_get_alpaca_after_bind_returns_alpaca_adapter(store_env):
+    """Full bind → get round-trip. Adapter is constructed from stored creds."""
+    from brokers.base import AlpacaCredentials
+    from brokers.credentials_store import store
+    from brokers.alpaca_adapter import AlpacaAdapter
+    from brokers.registry import _registry
+
+    store.bind(
+        user_id="u_42", broker_type="alpaca", label="main",
+        creds=AlpacaCredentials(api_key="PKstored", api_secret="ssstored"),
+        actor="user",
+    )
+
+    adapter = _registry.get(user_id="u_42", broker_type="alpaca")
+    assert isinstance(adapter, AlpacaAdapter)
+    assert adapter.api_key == "PKstored"
+    assert adapter.api_secret == "ssstored"
+
+
+def test_get_alpaca_resolves_label_none_to_oldest_binding(store_env):
+    """label=None → store.get_default_label → oldest binding wins."""
+    import time
+    from brokers.base import AlpacaCredentials
+    from brokers.credentials_store import store
+    from brokers.registry import _registry
+
+    store.bind("u_42", "alpaca", "first",
+               AlpacaCredentials(api_key="k1", api_secret="s1"),
+               actor="user")
+    time.sleep(1.01)
+    store.bind("u_42", "alpaca", "second",
+               AlpacaCredentials(api_key="k2", api_secret="s2"),
+               actor="user")
+
+    adapter = _registry.get(user_id="u_42", broker_type="alpaca", label=None)
+    assert adapter.api_key == "k1"
+
+
+def test_bind_invalidates_registry_cache(store_env):
+    """After bind/unbind, the registry's stale adapter must not be returned."""
+    from brokers.base import AlpacaCredentials
+    from brokers.credentials_store import store
+    from brokers.registry import _registry
+
+    store.bind("u_42", "alpaca", "main",
+               AlpacaCredentials(api_key="old", api_secret="s"),
+               actor="user")
+    a1 = _registry.get(user_id="u_42", broker_type="alpaca", label="main")
+    assert a1.api_key == "old"
+
+    # Unbind + re-bind with new creds; registry must reflect new state.
+    [summary] = store.list_user_bindings("u_42")
+    store.unbind(summary.id, "u_42", actor="user")
+    store.bind("u_42", "alpaca", "main",
+               AlpacaCredentials(api_key="new", api_secret="s"),
+               actor="user")
+
+    a2 = _registry.get(user_id="u_42", broker_type="alpaca", label="main")
+    assert a2.api_key == "new"
+    assert a1 is not a2
+
+
+def test_get_unknown_broker_raises():
+    from brokers.registry import _registry
+    from brokers.base import BrokerError
+
+    with pytest.raises(BrokerError):
         _registry.get(user_id="u_42", broker_type="not_a_broker")
 
 
-def test_default_broker_type_from_env(monkeypatch):
-    monkeypatch.setenv("BROKER_MODE", "alpaca")
-    monkeypatch.setenv("ALPACA_API_KEY", "PKtest")
-    monkeypatch.setenv("ALPACA_API_SECRET", "secrettest")
+def test_default_broker_type_falls_back_to_mock(monkeypatch):
+    """BROKER_MODE unset → default 'mock'."""
+    monkeypatch.delenv("BROKER_MODE", raising=False)
     from brokers.registry import _registry
-    from brokers.alpaca_adapter import AlpacaAdapter
+    from brokers.mock_adapter import MockAdapter
 
-    # broker_type omitted → use BROKER_MODE env
     adapter = _registry.get(user_id="u_42")
-    assert isinstance(adapter, AlpacaAdapter)
+    assert isinstance(adapter, MockAdapter)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Registry · 缓存语义
+# Registry · 缓存语义(mock-based,不依赖 store)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def test_cache_hit_returns_same_instance(monkeypatch):
@@ -121,17 +198,13 @@ def test_invalidate_drops_cache_entry(monkeypatch):
 
 def test_get_current_broker_uses_thread_local(monkeypatch):
     monkeypatch.setenv("BROKER_MODE", "mock")
-    import quant_agent  # touches thread-local
-    from brokers.registry import get_current_broker, _registry
+    import quant_agent
+    from brokers.registry import get_current_broker
 
-    # Simulate the request context that server.py would set up
     quant_agent._request_ctx.device_id = "u_thread_test"
-
     adapter = get_current_broker()
-    # Same user_id should reuse cache
     assert get_current_broker() is adapter
 
-    # Cleanup
     try:
         del quant_agent._request_ctx.device_id
     except AttributeError:
@@ -144,14 +217,12 @@ def test_get_current_broker_falls_back_to_default(monkeypatch):
     import quant_agent
     from brokers.registry import get_current_broker, _registry
 
-    # Ensure no device_id set
     try:
         del quant_agent._request_ctx.device_id
     except AttributeError:
         pass
 
     adapter = get_current_broker()
-    # "default" should be cached under key ("default", "mock", "")
     cached = _registry._cache.get(("default", "mock", ""))
     assert cached is adapter
 
@@ -161,12 +232,7 @@ def test_get_current_broker_falls_back_to_default(monkeypatch):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def test_legacy_get_broker_emits_deprecation(monkeypatch):
-    """
-    X2 commit 2 onwards: all production call sites are migrated, so the
-    shim now emits DeprecationWarning. The shim still returns a working
-    adapter — that's the back-compat contract — but the warning steers
-    any new code away from it.
-    """
+    """X2 commit 2 onwards: deprecation warning is emitted; adapter still works."""
     monkeypatch.setenv("BROKER_MODE", "mock")
     import quant_agent
     quant_agent._request_ctx.device_id = "u_legacy"

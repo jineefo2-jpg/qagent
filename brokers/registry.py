@@ -46,11 +46,25 @@ class BrokerRegistry:
         label: Optional[str] = None,
     ) -> BrokerAdapter:
         broker_type = (broker_type or _default_broker_type()).lower()
+
+        # Stabilize cache key: if label is None and a non-mock binding exists,
+        # resolve to the actual label so we don't double-cache the same adapter.
+        if label is None and broker_type not in _MOCK_ALIASES:
+            try:
+                from .credentials_store import store
+                resolved = store.get_default_label(user_id, broker_type)
+                if resolved:
+                    label = resolved
+            except Exception:
+                # Store not initialised / DB unavailable. Fall through to
+                # _load_credentials which will raise a clearer error.
+                pass
+
         cache_key = (user_id or "default", broker_type, label or "")
         cached = self._cache.get(cache_key)
         if cached is not None:
             return cached
-        creds = _load_credentials_transitional(broker_type)
+        creds = _load_credentials(user_id or "default", broker_type, label)
         adapter = _build_adapter(creds)
         self._cache[cache_key] = adapter
         return adapter
@@ -61,7 +75,7 @@ class BrokerRegistry:
         broker_type: str,
         label: Optional[str] = None,
     ) -> None:
-        """X3 钩子:credentials_store 更新/删除凭证后必须调它。"""
+        """credentials_store 更新/删除凭证后调它,丢弃陈旧 adapter 实例。"""
         self._cache.pop((user_id or "default", broker_type.lower(), label or ""), None)
 
     def clear(self) -> None:
@@ -102,33 +116,49 @@ def _resolve_current_user_id() -> str:
 
 
 # ════════════════════════════════════════════════════════════
-# Transitional 凭证加载(X3 替换)
+# Credentials 加载(X3 起走 credentials_store)
 # ════════════════════════════════════════════════════════════
+
+# Aliases for the Mock backend; Mock never has real credentials and is
+# permitted to fall back to env (MOCK_INITIAL_CASH) without a binding.
+_MOCK_ALIASES = frozenset({"mock", "virtual", "paper-mock"})
+
 
 def _default_broker_type() -> str:
     return (os.getenv("BROKER_MODE", "mock") or "mock").strip().lower()
 
 
-def _load_credentials_transitional(broker_type: str) -> Credentials:
+def _load_credentials(user_id: str, broker_type: str, label: Optional[str]) -> Credentials:
     """
-    X2 过渡版本:从 env 拿凭证(与旧 get_broker 等价)。
-    X3 会替换成 `credentials_store.load(user_id, broker_type, label)`。
+    X3 c2 form: real brokers MUST come from credentials_store.
+    Mock keeps the env path (no real credentials to protect).
+
+    Raises BrokerError(no_broker_binding) if the user hasn't bound this
+    broker — that's the signal the LLM / UI relays back as a hint to
+    the user to go bind via the UI flow.
     """
-    if broker_type in ("mock", "virtual", "paper-mock"):
+    if broker_type in _MOCK_ALIASES:
         return MockCredentials(
             initial_cash=float(
                 (os.getenv("MOCK_INITIAL_CASH", "100000") or "100000").strip()
             ),
         )
-    if broker_type in ("alpaca", "alpaca-paper"):
-        return AlpacaCredentials(
-            api_key=os.getenv("ALPACA_API_KEY", "").strip(),
-            api_secret=os.getenv("ALPACA_API_SECRET", "").strip(),
-            base_url=os.getenv(
-                "ALPACA_BASE_URL", "https://paper-api.alpaca.markets"
-            ).strip(),
+
+    # All non-mock brokers: per-user binding required (CLAUDE.md addendum).
+    from .credentials_store import store
+    creds = store.load(
+        user_id=user_id,
+        broker_type=broker_type,
+        label=label,
+        actor="system",
+    )
+    if creds is None:
+        raise BrokerError(
+            f"no_broker_binding: user has no {broker_type} binding"
+            + (f" with label={label!r}" if label else "")
+            + ". Please bind via UI (POST /api/broker/bindings) first."
         )
-    raise BrokerError(f"Unknown broker_type: {broker_type!r}")
+    return creds
 
 
 def _build_adapter(creds: Credentials) -> BrokerAdapter:
