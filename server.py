@@ -1240,6 +1240,15 @@ def index():
     return FileResponse(index_file)
 
 
+@app.get("/brokers")
+def brokers_page():
+    """券商绑定页面 (X5)"""
+    f = STATIC_DIR / "brokers.html"
+    if not f.exists():
+        raise HTTPException(404, "static/brokers.html missing")
+    return FileResponse(f)
+
+
 @app.get("/health")
 def health():
     return {

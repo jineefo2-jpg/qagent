@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>券商绑定 · QuantAgent</title>
+<style>
+  :root {
+    --bg:          #0d1117;
+    --bg-elev:     #161b22;
+    --bg-elev-2:   #1f2937;
+    --border:      #30363d;
+    --text:        #e6edf3;
+    --text-muted:  #8b949e;
+    --primary:     #00d4aa;
+    --primary-dim: #00d4aa33;
+    --danger:      #f85149;
+    --warning:     #d29922;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; font-family: -apple-system, BlinkMacSystemFont,
+                "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+               background: var(--bg); color: var(--text); line-height: 1.5; }
+  a { color: var(--primary); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  header {
+    padding: 16px 24px; border-bottom: 1px solid var(--border);
+    background: var(--bg-elev); display: flex; align-items: center; gap: 16px;
+  }
+  header h1 { font-size: 18px; font-weight: 600; }
+  header .back { color: var(--text-muted); font-size: 14px; }
+
+  main { max-width: 880px; margin: 0 auto; padding: 32px 24px; }
+
+  .section { background: var(--bg-elev); border: 1px solid var(--border);
+             border-radius: 8px; padding: 20px; margin-bottom: 24px; }
+  .section h2 { font-size: 16px; margin-bottom: 12px; font-weight: 600; }
+  .muted { color: var(--text-muted); font-size: 13px; }
+  .danger { color: var(--danger); }
+  .warn { color: var(--warning); }
+
+  /* Bindings table */
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th { text-align: left; padding: 10px 8px; border-bottom: 1px solid var(--border);
+       font-weight: 600; color: var(--text-muted); }
+  td { padding: 10px 8px; border-bottom: 1px solid var(--border); }
+  tr:last-child td { border-bottom: 0; }
+  .empty { padding: 24px; text-align: center; color: var(--text-muted); }
+
+  button {
+    background: var(--primary); color: #0d1117; border: 0;
+    padding: 8px 14px; border-radius: 6px; cursor: pointer;
+    font-weight: 600; font-size: 14px;
+  }
+  button:hover { opacity: 0.85; }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  button.secondary { background: var(--bg-elev-2); color: var(--text); }
+  button.danger-btn { background: transparent; color: var(--danger);
+                      border: 1px solid var(--danger); padding: 4px 10px; }
+
+  /* Forms */
+  .form-row { margin: 12px 0; }
+  .form-row label { display: block; font-size: 13px; margin-bottom: 4px;
+                    color: var(--text-muted); }
+  .form-row input, .form-row select, .form-row textarea {
+    width: 100%; padding: 8px 10px; background: var(--bg);
+    border: 1px solid var(--border); border-radius: 6px;
+    color: var(--text); font-family: inherit; font-size: 14px;
+  }
+  .form-row textarea {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 12px; min-height: 200px; resize: vertical;
+  }
+  .form-row input:focus, .form-row textarea:focus, .form-row select:focus {
+    outline: none; border-color: var(--primary);
+  }
+
+  .step-list { list-style: none; counter-reset: step; margin: 8px 0 12px; }
+  .step-list li { counter-increment: step; position: relative;
+                  padding: 4px 0 4px 28px; font-size: 14px; }
+  .step-list li::before {
+    content: counter(step); position: absolute; left: 0; top: 4px;
+    width: 20px; height: 20px; line-height: 20px; text-align: center;
+    background: var(--primary-dim); color: var(--primary); border-radius: 50%;
+    font-size: 12px; font-weight: 600;
+  }
+
+  .msg { padding: 10px 12px; border-radius: 6px; margin: 12px 0; font-size: 13px;
+         display: none; }
+  .msg.ok    { background: var(--primary-dim);   color: var(--primary); }
+  .msg.error { background: rgba(248,81,73,0.15); color: var(--danger); }
+  .msg.show  { display: block; }
+
+  details > summary { cursor: pointer; padding: 8px 0; user-select: none;
+                      font-weight: 600; font-size: 15px; }
+  details[open] > summary { margin-bottom: 8px; }
+
+  .actions { display: flex; gap: 8px; margin-top: 16px; }
+</style>
+</head>
+<body>
+
+<header>
+  <a href="/" class="back">← 返回对话</a>
+  <h1>券商绑定</h1>
+</header>
+
+<main>
+
+<div class="section">
+  <h2>已绑定的账户</h2>
+  <div id="bindings-list">
+    <div class="empty">加载中…</div>
+  </div>
+</div>
+
+<div class="section">
+  <h2>添加新绑定</h2>
+  <p class="muted" style="margin-bottom:16px;">
+    ⚠️ 当前仅支持 <strong>paper / 模拟</strong> 环境;实盘按 ADR-0001 被禁用。
+  </p>
+
+  <details>
+    <summary>🐯 老虎证券 (Tiger Brokers)</summary>
+    <ol class="step-list">
+      <li>登录 <a href="https://www.itigerup.com/openapi/" target="_blank">老虎 OpenAPI 控制台</a>,首次申请会要简短开发者信息。</li>
+      <li>在控制台 <strong>生成 RSA 密钥对</strong> → 下载私钥 <code>.pem</code>(不要在 macOS TextEdit/Notes 里打开,会被改成 RTF)。</li>
+      <li>抄下你的 <code>tiger_id</code> + 模拟账号(以 <code>U</code> 开头)。</li>
+      <li>把 <code>.pem</code> 内容粘到下面的"私钥"框,填好其它字段提交。</li>
+    </ol>
+    <form id="form-tiger">
+      <div class="form-row">
+        <label>Label 标签(自取,用于区分多个账户)</label>
+        <input type="text" name="label" value="paper-main" required>
+      </div>
+      <div class="form-row">
+        <label>Tiger ID(开发者账号 ID,通常 8-9 位数字)</label>
+        <input type="text" name="tiger_id" required>
+      </div>
+      <div class="form-row">
+        <label>账户号(以 U 开头的模拟账户)</label>
+        <input type="text" name="account" required placeholder="U99999999">
+      </div>
+      <div class="form-row">
+        <label>License 持牌主体</label>
+        <select name="license">
+          <option value="TBNZ" selected>TBNZ(新西兰,覆盖最广)</option>
+          <option value="TBAU">TBAU(澳大利亚)</option>
+          <option value="TBSG">TBSG(新加坡)</option>
+          <option value="TBHK">TBHK(香港)</option>
+        </select>
+      </div>
+      <div class="form-row">
+        <label>RSA 私钥(完整 PEM,含 <code>-----BEGIN/END-----</code> 标签)</label>
+        <textarea name="private_key" required spellcheck="false"
+                  placeholder="-----BEGIN PRIVATE KEY-----&#10;... 整段粘到这里 ...&#10;-----END PRIVATE KEY-----"></textarea>
+        <p class="muted" style="margin-top:6px;">
+          私钥落盘前会被本应用用 Fernet 加密,KEK 不在 DB 里。<a href="https://github.com/anthropics/" target="_blank">了解凭证存储</a>
+        </p>
+      </div>
+      <div class="actions">
+        <button type="submit">测试 + 绑定</button>
+      </div>
+      <div class="msg" id="msg-tiger"></div>
+    </form>
+  </details>
+
+  <details style="margin-top:16px;">
+    <summary>📈 Alpaca (Paper Trading)</summary>
+    <ol class="step-list">
+      <li>到 <a href="https://app.alpaca.markets/signup" target="_blank">Alpaca 注册</a>(走 trading API,不要走 broker-app)。</li>
+      <li>登录后切到 <strong>Paper Trading</strong> 模式 → <strong>API Keys</strong> → <strong>Generate New Key</strong>。</li>
+      <li>把 Key ID(PK 开头)和 Secret Key 填到下面提交。</li>
+    </ol>
+    <form id="form-alpaca">
+      <div class="form-row">
+        <label>Label</label>
+        <input type="text" name="label" value="paper-main" required>
+      </div>
+      <div class="form-row">
+        <label>API Key(PK 开头)</label>
+        <input type="text" name="api_key" required placeholder="PKxxxxxxxxxxxxxxxxxxxx">
+      </div>
+      <div class="form-row">
+        <label>API Secret</label>
+        <input type="password" name="api_secret" required>
+      </div>
+      <div class="actions">
+        <button type="submit">测试 + 绑定</button>
+      </div>
+      <div class="msg" id="msg-alpaca"></div>
+    </form>
+  </details>
+</div>
+
+</main>
+
+<script>
+const $ = (s) => document.querySelector(s);
+
+async function api(method, path, body) {
+  const opts = { method, headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin' };
+  if (body !== undefined) opts.body = JSON.stringify(body);
+  const r = await fetch(path, opts);
+  const text = await r.text();
+  let payload;
+  try { payload = text ? JSON.parse(text) : null; } catch (_) { payload = { detail: text }; }
+  return { ok: r.ok, status: r.status, payload };
+}
+
+function showMsg(el, kind, text) {
+  el.className = 'msg ' + kind + ' show';
+  el.textContent = text;
+}
+
+function clearMsg(el) {
+  el.className = 'msg';
+  el.textContent = '';
+}
+
+async function loadBindings() {
+  const r = await api('GET', '/api/broker/bindings');
+  const root = $('#bindings-list');
+  if (!r.ok) {
+    if (r.status === 401) {
+      root.innerHTML = '<div class="empty">未登录。<a href="/">回到对话登录</a>后再来。</div>';
+    } else {
+      root.innerHTML = `<div class="empty error">读取失败 (${r.status}): ${r.payload?.detail || ''}</div>`;
+    }
+    return;
+  }
+  const rows = r.payload || [];
+  if (rows.length === 0) {
+    root.innerHTML = '<div class="empty">还没有任何绑定。下面添加一个。</div>';
+    return;
+  }
+  let html = '<table><thead><tr>'
+    + '<th>ID</th><th>券商</th><th>Label</th><th>环境</th><th>最后使用</th><th></th>'
+    + '</tr></thead><tbody>';
+  for (const b of rows) {
+    const last = b.last_used_at ? new Date(b.last_used_at * 1000).toLocaleString() : '—';
+    html += '<tr>'
+      + `<td>${b.id}</td>`
+      + `<td>${b.broker_type}</td>`
+      + `<td>${b.label}</td>`
+      + `<td>${b.env}</td>`
+      + `<td class="muted">${last}</td>`
+      + `<td><button class="danger-btn" data-id="${b.id}" data-label="${b.label}">解绑</button></td>`
+      + '</tr>';
+  }
+  html += '</tbody></table>';
+  root.innerHTML = html;
+
+  root.querySelectorAll('button.danger-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const id = btn.dataset.id;
+      if (!confirm(`确认解绑 ${btn.dataset.label}(id=${id})?`)) return;
+      btn.disabled = true;
+      const r = await api('DELETE', `/api/broker/bindings/${id}`);
+      if (r.ok) {
+        loadBindings();
+      } else {
+        alert(`解绑失败: ${r.status} ${r.payload?.detail || ''}`);
+        btn.disabled = false;
+      }
+    });
+  });
+}
+
+function wireForm(formId, msgId, broker_type, gatherCreds) {
+  const form = $(formId);
+  const msg = $(msgId);
+  form.addEventListener('submit', async (ev) => {
+    ev.preventDefault();
+    clearMsg(msg);
+    const fd = new FormData(form);
+    const submitBtn = form.querySelector('button[type=submit]');
+    submitBtn.disabled = true;
+    submitBtn.textContent = '正在测试 + 绑定…';
+    try {
+      const body = {
+        broker_type,
+        label: fd.get('label'),
+        env: 'paper',
+        credentials: gatherCreds(fd),
+      };
+      const r = await api('POST', '/api/broker/bindings', body);
+      if (r.ok) {
+        showMsg(msg, 'ok', `✅ 绑定成功 (id=${r.payload.id})`);
+        form.reset();
+        loadBindings();
+      } else {
+        showMsg(msg, 'error', `❌ ${r.status} · ${r.payload?.detail || '未知错误'}`);
+      }
+    } finally {
+      submitBtn.disabled = false;
+      submitBtn.textContent = '测试 + 绑定';
+    }
+  });
+}
+
+wireForm('#form-tiger', '#msg-tiger', 'tiger', (fd) => ({
+  tiger_id: fd.get('tiger_id'),
+  private_key: fd.get('private_key'),
+  account: fd.get('account'),
+  license: fd.get('license'),
+}));
+
+wireForm('#form-alpaca', '#msg-alpaca', 'alpaca', (fd) => ({
+  api_key: fd.get('api_key'),
+  api_secret: fd.get('api_secret'),
+}));
+
+loadBindings();
+</script>
+
+</body>
+</html>
