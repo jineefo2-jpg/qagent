@@ -339,10 +339,16 @@ async function loadBrokerSnapshot() {
   }
   const s = statusR.payload || {};
   if (s.error) {
-    root.innerHTML = `<div class="snap-error">⚠️ ${s.broker || 'broker'}: ${s.error}</div>
-      <p class="muted" style="margin-top:8px;">
-        如果是 <code>no_broker_binding</code>,在上面"已绑定的账户"里添加一个对应类型 (alpaca/tiger) 的 binding 后再来。
-      </p>`;
+    // 区分两种错误:no_broker_binding 是"还没绑",中性提示;其它才用红框
+    const m = String(s.error).match(/no_broker_binding:\s*user has no (\w+) binding/);
+    if (m) {
+      const broker = m[1];
+      root.innerHTML = `<div class="empty" style="text-align:left;line-height:1.7;">
+        当前账号还没绑定 <b>${broker}</b> 账户。下方"添加新绑定"里展开 <b>${broker}</b> 区块,填好之后这里就会显示账户/持仓/订单/资金。
+      </div>`;
+    } else {
+      root.innerHTML = `<div class="snap-error">⚠️ ${s.broker || 'broker'}: ${s.error}</div>`;
+    }
     return;
   }
   const acc = s.account || {};

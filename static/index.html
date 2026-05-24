@@ -1627,6 +1627,17 @@ function escapeHtmlSafe(s) {
   });
 }
 
+// 当 broker API 返回 no_broker_binding 时,渲染成中性的提示而不是红色错误
+function friendlyBrokerErrorHTML(err) {
+  if (!err) return null;
+  var m = String(err).match(/no_broker_binding:\s*user has no (\w+) binding/);
+  if (!m) return null;
+  var broker = m[1];
+  return '当前账号还没绑定 <b>' + escapeHtmlSafe(broker) + '</b> 账户。<br>'
+       + '前往 <a href="/brokers" style="color:var(--primary);">券商绑定</a> 添加一个后,'
+       + '这里就能看到你的账户数据。';
+}
+
 function fmtMoney(v) {
   if (v == null || isNaN(v)) return '-';
   return '$' + Number(v).toLocaleString('en-US', {
@@ -1926,7 +1937,9 @@ async function refreshDrawer(silent) {
 function renderPositions(d) {
   var body = document.getElementById('drawerBody');
   if (!d || !d.success) {
-    body.innerHTML = '<div class="empty">' + escapeHtmlSafe((d && d.error) || '加载失败') + '</div>';
+    var err = (d && d.error) || '加载失败';
+    var friendly = friendlyBrokerErrorHTML(err);
+    body.innerHTML = '<div class="empty">' + (friendly || escapeHtmlSafe(err)) + '</div>';
     return;
   }
   var items = d.positions || [];
@@ -1960,7 +1973,9 @@ function renderPositions(d) {
 function renderOrders(d) {
   var body = document.getElementById('drawerBody');
   if (!d || !d.success) {
-    body.innerHTML = '<div class="empty">' + escapeHtmlSafe((d && d.error) || '加载失败') + '</div>';
+    var err = (d && d.error) || '加载失败';
+    var friendly = friendlyBrokerErrorHTML(err);
+    body.innerHTML = '<div class="empty">' + (friendly || escapeHtmlSafe(err)) + '</div>';
     return;
   }
   var items = d.orders || [];
@@ -1991,13 +2006,19 @@ function renderOrders(d) {
 function renderBalance(d) {
   var body = document.getElementById('drawerBody');
   if (!d || !d.configured) {
-    body.innerHTML = '<div class="empty">'
-      + (d && d.error ? escapeHtmlSafe(d.error) : '未配置 Alpaca 凭证')
-      + '</div>';
+    var err = (d && d.error) || '当前账号未绑定 broker';
+    var friendly = friendlyBrokerErrorHTML(err);
+    body.innerHTML = '<div class="empty">' + (friendly || escapeHtmlSafe(err)) + '</div>';
     return;
   }
   if (!d.ping_ok) {
-    body.innerHTML = '<div class="empty">无法连接 Alpaca：' + escapeHtmlSafe(d.error || '') + '</div>';
+    var err2 = d.error || '';
+    var friendly2 = friendlyBrokerErrorHTML(err2);
+    if (friendly2) {
+      body.innerHTML = '<div class="empty">' + friendly2 + '</div>';
+    } else {
+      body.innerHTML = '<div class="empty">无法连接 broker：' + escapeHtmlSafe(err2) + '</div>';
+    }
     return;
   }
   var acc = d.account || {};
