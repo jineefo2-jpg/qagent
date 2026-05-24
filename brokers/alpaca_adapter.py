@@ -20,6 +20,7 @@ from .base import (
     BrokerNetworkError, BrokerRejectedError,
     AccountInfo, Position, OrderIntent, OrderResult,
     OrderSide, OrderType, OrderStatus,
+    AlpacaCredentials,
 )
 
 
@@ -101,12 +102,18 @@ def _map_status(raw) -> OrderStatus:
 class AlpacaAdapter(BrokerAdapter):
     name = "alpaca-paper"
 
-    def __init__(self):
-        self.api_key = os.getenv("ALPACA_API_KEY", "").strip()
-        self.api_secret = os.getenv("ALPACA_API_SECRET", "").strip()
-        self.base_url = os.getenv(
-            "ALPACA_BASE_URL", "https://paper-api.alpaca.markets"
-        ).strip()
+    def __init__(self, credentials: AlpacaCredentials):
+        """
+        X2:凭证由 BrokerRegistry 通过 credentials 注入,不再从 env 读。
+        env 读路径由 `registry._load_credentials_transitional` 在工厂层完成。
+        """
+        if not isinstance(credentials, AlpacaCredentials):
+            raise BrokerError(
+                f"AlpacaAdapter requires AlpacaCredentials, got {type(credentials).__name__}"
+            )
+        self.api_key = credentials.api_key
+        self.api_secret = credentials.api_secret
+        self.base_url = credentials.base_url
         self._client = None
         self._sdk = None
 

@@ -15,6 +15,38 @@ from typing import Optional, List
 
 
 # ════════════════════════════════════════════════════════════
+# Credentials —— 凭证类型层(X2 引入)
+# ════════════════════════════════════════════════════════════
+# 设计原则:
+#   1. 类型安全(每个 broker 一个子类,字段明确)
+#   2. 不可变(frozen=True),防止运行时偷改 api_key
+#   3. 不实现 __repr__/__str__ 时的脱敏 —— 我们靠"绝不让凭证进日志"
+#      的工程纪律来保证,而不是依赖 dataclass 的默认 repr
+# X3 会在 credentials_store.py 里加密存储这些对象的序列化结果。
+
+@dataclass(frozen=True)
+class Credentials:
+    """所有 broker 凭证子类的抽象基类。子类必须设 broker_type。"""
+    broker_type: str = ""
+
+
+@dataclass(frozen=True)
+class MockCredentials(Credentials):
+    """MockAdapter 凭证。Mock 没有真实凭证,只是配置项。"""
+    broker_type: str = "mock"
+    initial_cash: float = 100000.0
+
+
+@dataclass(frozen=True)
+class AlpacaCredentials(Credentials):
+    """Alpaca paper trading 凭证。base_url 默认 paper —— live URL 由 CLAUDE.md 安全规则禁止。"""
+    broker_type: str = "alpaca"
+    api_key: str = ""
+    api_secret: str = ""
+    base_url: str = "https://paper-api.alpaca.markets"
+
+
+# ════════════════════════════════════════════════════════════
 # 异常
 # ════════════════════════════════════════════════════════════
 

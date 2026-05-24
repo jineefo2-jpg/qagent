@@ -23,10 +23,11 @@ from .base import (
     BrokerAdapter, BrokerError, BrokerRejectedError,
     AccountInfo, Position, OrderIntent, OrderResult,
     OrderSide, OrderType, OrderStatus,
+    MockCredentials,
 )
 
 
-# 起始虚拟现金，可被环境变量覆盖
+# 起始虚拟现金，可被环境变量覆盖(向后兼容路径)
 INITIAL_CASH = float(os.getenv("MOCK_INITIAL_CASH", "100000").strip() or "100000")
 
 
@@ -226,6 +227,20 @@ def _try_fill_order(ns: str, order: dict) -> bool:
 class MockAdapter(BrokerAdapter):
     name = "mock-paper"
 
+    def __init__(self, credentials: Optional[MockCredentials] = None):
+        """
+        X2:凭证可选注入。MockAdapter 的用户隔离继续走 thread-local namespace
+        (见 _current_user_ns),仅 initial_cash 通过 credentials 传入。
+        无 credentials 时回落到模块级 INITIAL_CASH(向后兼容路径)。
+        """
+        if credentials is not None and not isinstance(credentials, MockCredentials):
+            raise BrokerError(
+                f"MockAdapter requires MockCredentials, got {type(credentials).__name__}"
+            )
+        self._initial_cash = (
+            credentials.initial_cash if credentials is not None else INITIAL_CASH
+        )
+
     def is_configured(self) -> bool:
         return True
 
@@ -257,7 +272,7 @@ class MockAdapter(BrokerAdapter):
             currency="USD",
             account_id=ns,
             status="ACTIVE",
-            raw={"backend": "mock", "initial_cash": INITIAL_CASH},
+            raw={"backend": "mock", "initial_cash": self._initial_cash},
         )
 
     def list_positions(self) -> List[Position]:
