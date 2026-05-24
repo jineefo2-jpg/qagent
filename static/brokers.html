@@ -72,6 +72,29 @@
     font-family: ui-monospace, "SF Mono", Menlo, monospace;
     font-size: 12px; min-height: 200px; resize: vertical;
   }
+
+  /* PEM marker-wrapped textarea (Tiger 私钥) */
+  .pem-wrap {
+    border: 1px solid var(--border); border-radius: 6px;
+    background: var(--bg); overflow: hidden;
+  }
+  .pem-wrap .pem-marker {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 12px; color: var(--text-muted);
+    padding: 8px 12px; user-select: none;
+    background: rgba(255,255,255,0.02);
+  }
+  .pem-wrap textarea {
+    border: 0; border-top: 1px dashed var(--border);
+    border-bottom: 1px dashed var(--border);
+    border-radius: 0; background: transparent;
+    width: 100%; min-height: 160px;
+    padding: 10px 12px;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 12px; color: var(--text);
+    resize: vertical;
+  }
+  .pem-wrap textarea:focus { outline: none; border-color: var(--primary); }
   .form-row input:focus, .form-row textarea:focus, .form-row select:focus {
     outline: none; border-color: var(--primary);
   }
@@ -180,11 +203,17 @@
         </select>
       </div>
       <div class="form-row">
-        <label>RSA 私钥(完整 PEM,含 <code>-----BEGIN/END-----</code> 标签)</label>
-        <textarea name="private_key" required spellcheck="false"
-                  placeholder="-----BEGIN PRIVATE KEY-----&#10;... 整段粘到这里 ...&#10;-----END PRIVATE KEY-----"></textarea>
+        <label>RSA 私钥 base64(<strong>只粘中间的 base64 内容</strong>,头尾标签下面会自动拼)</label>
+        <div class="pem-wrap">
+          <div class="pem-marker">-----BEGIN RSA PRIVATE KEY-----</div>
+          <textarea name="private_key_body" required spellcheck="false"
+                    placeholder="MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAA... 粘 base64 内容"></textarea>
+          <div class="pem-marker">-----END RSA PRIVATE KEY-----</div>
+        </div>
         <p class="muted" style="margin-top:6px;">
-          私钥落盘前会被本应用用 Fernet 加密,KEK 不在 DB 里。<a href="https://github.com/anthropics/" target="_blank">了解凭证存储</a>
+          📌 在 Tiger OpenAPI 控制台里复制时,只复制两条 <code>-----</code> 标签之间的部分;
+          整段也行,JS 会自动剥掉重复的标签。<br>
+          🔒 落盘前 Fernet 加密,KEK 在 env 不在 DB,服务端运行时只在内存解密。
         </p>
       </div>
       <div class="actions">
@@ -340,9 +369,24 @@ function wireForm(formId, msgId, broker_type, gatherCreds) {
   });
 }
 
+// Tiger: 自动把 body 拼成 PEM,容错"用户粘了整段含标签"的情况
+function _buildTigerPEM(raw) {
+  // 剥任何已有的 BEGIN/END 行,把剩下的非空内容当作 body
+  const lines = (raw || '').split(/\r?\n/);
+  const bodyLines = lines.filter(ln => {
+    const s = ln.trim();
+    return s && !/^-----.*-----$/.test(s);
+  });
+  // 注意:tigeropen 实际不在乎是 PRIVATE KEY 还是 RSA PRIVATE KEY,我们用 RSA 标签
+  // 因为 Tiger 自己生成的就是 PKCS#1 (RSA PRIVATE KEY)
+  return '-----BEGIN RSA PRIVATE KEY-----\n'
+       + bodyLines.join('\n') + '\n'
+       + '-----END RSA PRIVATE KEY-----';
+}
+
 wireForm('#form-tiger', '#msg-tiger', 'tiger', (fd) => ({
   tiger_id: fd.get('tiger_id'),
-  private_key: fd.get('private_key'),
+  private_key: _buildTigerPEM(fd.get('private_key_body')),
   account: fd.get('account'),
   license: fd.get('license'),
 }));
