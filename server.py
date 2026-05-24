@@ -1260,6 +1260,109 @@ def metrics_brokers(_admin: User = Depends(require_admin)):
 
 
 # ════════════════════════════════════════════════════════════
+# Broker bindings — per-user OAuth-style binding management (X5)
+# ════════════════════════════════════════════════════════════
+
+class BrokerBindRequest(BaseModel):
+    broker_type: str            # "alpaca" | "tiger" | "mock"
+    label: str = "main"
+    env: str = "paper"
+    credentials: dict           # shape depends on broker_type (see credentials_store.build_credentials)
+
+
+@app.post("/api/broker/bindings", status_code=201)
+def api_create_binding(body: BrokerBindRequest, user: User = Depends(require_user)):
+    """
+    Bind a brokerage account to the logged-in user.
+    Tests the credentials in-memory first (adapter.ping()) — only persists
+    if the test passes. So no half-bound state on bad creds.
+    """
+    from brokers.credentials_store import store, build_credentials, CredentialsStoreError
+    from brokers.registry import _build_adapter
+    from brokers.base import BrokerError, redact_credentials
+
+    # 1. Build typed creds from JSON
+    try:
+        creds = build_credentials(body.broker_type, body.credentials)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+    if body.env not in ("paper", "live"):
+        raise HTTPException(400, "env must be 'paper' or 'live'")
+    # CLAUDE.md trading-safety: live is forbidden until a future ADR.
+    if body.env == "live":
+        raise HTTPException(400, "live trading is currently disabled (see ADR-0001)")
+
+    # 2. Test BEFORE persisting (defensive — no half-bound state)
+    try:
+        test_adapter = _build_adapter(creds)
+    except BrokerError as e:
+        raise HTTPException(400, redact_credentials(str(e)))
+
+    if not test_adapter.is_configured():
+        raise HTTPException(400, "missing required credential fields")
+
+    try:
+        if not test_adapter.ping():
+            raise HTTPException(
+                422, f"{body.broker_type} ping returned False (credentials rejected)"
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(422, f"binding test failed: {redact_credentials(str(e))}")
+
+    # 3. Persist
+    try:
+        binding_id = store.bind(
+            user_id=user.user_id,
+            broker_type=body.broker_type,
+            label=body.label,
+            creds=creds,
+            actor="user",
+            env=body.env,
+        )
+    except CredentialsStoreError as e:
+        # UNIQUE constraint / validation failures map to 409
+        raise HTTPException(409, str(e))
+
+    return {
+        "id": binding_id,
+        "broker_type": body.broker_type,
+        "label": body.label,
+        "env": body.env,
+    }
+
+
+@app.get("/api/broker/bindings")
+def api_list_bindings(user: User = Depends(require_user)):
+    """List the current user's broker bindings. No secrets in the response."""
+    from brokers.credentials_store import store
+    rows = store.list_user_bindings(user.user_id)
+    return [
+        {
+            "id": r.id,
+            "broker_type": r.broker_type,
+            "label": r.label,
+            "env": r.env,
+            "created_at": r.created_at,
+            "last_used_at": r.last_used_at,
+        }
+        for r in rows
+    ]
+
+
+@app.delete("/api/broker/bindings/{binding_id}")
+def api_delete_binding(binding_id: int, user: User = Depends(require_user)):
+    """Delete a binding owned by the current user. 404 if not found / not theirs."""
+    from brokers.credentials_store import store
+    ok = store.unbind(binding_id, user.user_id, actor="user")
+    if not ok:
+        raise HTTPException(404, "binding not found")
+    return {"ok": True}
+
+
+# ════════════════════════════════════════════════════════════
 # 启动入口
 # ════════════════════════════════════════════════════════════
 

@@ -33,6 +33,7 @@ from .base import (
     AlpacaCredentials,
     Credentials,
     MockCredentials,
+    TigerCredentials,
 )
 
 
@@ -53,6 +54,42 @@ class BindingSummary:
 
 class CredentialsStoreError(Exception):
     """Bind/unbind/load errors. Message never includes plaintext or keys."""
+
+
+# ════════════════════════════════════════════════════════════
+# Credentials factory from API payload (used by REST endpoints)
+# ════════════════════════════════════════════════════════════
+
+def build_credentials(broker_type: str, payload: dict) -> Credentials:
+    """
+    Construct the right Credentials subclass from a generic dict payload.
+    Used by the /api/broker/bindings endpoint to turn JSON into a typed
+    Credentials object. Raises ValueError on unknown broker_type so the
+    HTTP layer can return 400.
+    """
+    if not isinstance(payload, dict):
+        raise ValueError("credentials payload must be an object")
+
+    if broker_type == "alpaca":
+        return AlpacaCredentials(
+            api_key=str(payload.get("api_key", "")).strip(),
+            api_secret=str(payload.get("api_secret", "")).strip(),
+            base_url=str(payload.get(
+                "base_url", "https://paper-api.alpaca.markets",
+            )).strip(),
+        )
+    if broker_type == "tiger":
+        return TigerCredentials(
+            tiger_id=str(payload.get("tiger_id", "")).strip(),
+            private_key=str(payload.get("private_key", "")),
+            account=str(payload.get("account", "")).strip(),
+            license=str(payload.get("license", "TBNZ")).strip() or "TBNZ",
+        )
+    if broker_type == "mock":
+        return MockCredentials(
+            initial_cash=float(payload.get("initial_cash", 100000.0)),
+        )
+    raise ValueError(f"Unsupported broker_type: {broker_type!r}")
 
 
 # ════════════════════════════════════════════════════════════

@@ -360,3 +360,69 @@ def test_get_default_label_returns_first_bound(store_env):
 def test_get_default_label_none_when_no_binding(store_env):
     s, _ = store_env
     assert s.get_default_label("u_42", "alpaca") is None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# build_credentials — JSON payload → Credentials subclass (X5 c1)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_build_credentials_alpaca():
+    from brokers.credentials_store import build_credentials
+    from brokers.base import AlpacaCredentials
+
+    creds = build_credentials("alpaca", {
+        "api_key": "PKtest", "api_secret": "ssstest",
+    })
+    assert isinstance(creds, AlpacaCredentials)
+    assert creds.api_key == "PKtest"
+    assert creds.api_secret == "ssstest"
+    assert "paper-api.alpaca.markets" in creds.base_url
+
+
+def test_build_credentials_tiger():
+    from brokers.credentials_store import build_credentials
+    from brokers.base import TigerCredentials
+
+    creds = build_credentials("tiger", {
+        "tiger_id": "20151024",
+        "private_key": "-----BEGIN PRIVATE KEY-----\nx\n-----END PRIVATE KEY-----",
+        "account": "U99999999",
+        "license": "TBSG",
+    })
+    assert isinstance(creds, TigerCredentials)
+    assert creds.tiger_id == "20151024"
+    assert creds.account == "U99999999"
+    assert creds.license == "TBSG"
+
+
+def test_build_credentials_tiger_defaults_license_to_tbnz():
+    from brokers.credentials_store import build_credentials
+    creds = build_credentials("tiger", {
+        "tiger_id": "1", "private_key": "x", "account": "U1",
+    })
+    assert creds.license == "TBNZ"
+
+
+def test_build_credentials_mock_with_initial_cash():
+    from brokers.credentials_store import build_credentials
+    from brokers.base import MockCredentials
+
+    creds = build_credentials("mock", {"initial_cash": 50000})
+    assert isinstance(creds, MockCredentials)
+    assert creds.initial_cash == 50000.0
+
+
+def test_build_credentials_unknown_broker_raises():
+    from brokers.credentials_store import build_credentials
+    import pytest
+
+    with pytest.raises(ValueError, match="Unsupported broker_type"):
+        build_credentials("ftx", {})
+
+
+def test_build_credentials_non_dict_payload_raises():
+    from brokers.credentials_store import build_credentials
+    import pytest
+
+    with pytest.raises(ValueError, match="must be an object"):
+        build_credentials("alpaca", "not a dict")
