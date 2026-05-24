@@ -203,8 +203,7 @@ class TigerAdapter(BrokerAdapter):
             # CLAUDE.md trading safety: 市价单默认禁(滑点保护)
             raise BrokerRejectedError("TigerAdapter 默认仅支持限价单 (market 已被风控禁)")
         try:
-            # 构造 Tiger 订单对象。注意:具体方法名随 SDK 版本可能微调;
-            # 这里走主流 v3.x 的 place_limit_order(...) 接口。
+            # 1) create_order 在本地组装一个 Order 对象 (不发请求)
             order = client.create_order(
                 account=self.account,
                 contract=client.get_contract(symbol=intent.symbol),
@@ -213,22 +212,29 @@ class TigerAdapter(BrokerAdapter):
                 quantity=int(intent.qty),
                 limit_price=float(intent.limit_price or 0),
             )
-            placed = client.place_order(order)
+            # 2) place_order 发请求,**返回 Optional[int]** = broker_order_id
+            order_id = client.place_order(order)
         except Exception as e:
             raise self._wrap_error(e)
 
+        if order_id is None:
+            raise BrokerNetworkError("Tiger place_order 返回 None (未拿到 broker_order_id)")
+
+        # Tiger 在 place_order 后会把 id 回写到 order 对象,但 filled/status 还未更新。
+        # 我们只信任明确拿到的 broker_order_id;其余字段读 order 上的当前快照,
+        # 后续 get_order(broker_order_id) 可以拿到最新成交状态。
         return OrderResult(
-            broker_order_id=str(getattr(placed, "id", None) or getattr(placed, "order_id", "")),
+            broker_order_id=str(order_id),
             intent_id=intent.intent_id,
             symbol=intent.symbol,
             side=intent.side,
             qty=float(intent.qty),
-            filled_qty=float(getattr(placed, "filled_quantity", 0) or 0),
+            filled_qty=float(getattr(order, "filled", 0) or 0),
             order_type=intent.order_type,
             limit_price=intent.limit_price,
-            status=_map_status(getattr(placed, "status", "New")),
-            filled_avg_price=getattr(placed, "avg_fill_price", None),
-            submitted_at=str(getattr(placed, "order_time", "") or ""),
+            status=_map_status(getattr(order, "status", "New")),
+            filled_avg_price=getattr(order, "avg_fill_price", None) or None,
+            submitted_at=str(getattr(order, "order_time", "") or ""),
             raw={"backend": "tiger"},
         )
 
@@ -275,11 +281,12 @@ class TigerAdapter(BrokerAdapter):
             symbol=sym,
             side=side,
             qty=float(getattr(order, "quantity", 0) or 0),
-            filled_qty=float(getattr(order, "filled_quantity", 0) or 0),
+            # NOTE: Tiger SDK 的字段叫 `filled` (不是 `filled_quantity`)
+            filled_qty=float(getattr(order, "filled", 0) or 0),
             order_type=otype,
             limit_price=getattr(order, "limit_price", None),
             status=_map_status(getattr(order, "status", "New")),
-            filled_avg_price=getattr(order, "avg_fill_price", None),
+            filled_avg_price=getattr(order, "avg_fill_price", None) or None,
             submitted_at=str(getattr(order, "order_time", "") or ""),
             raw={"backend": "tiger"},
         )

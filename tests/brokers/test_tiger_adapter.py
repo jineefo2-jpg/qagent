@@ -138,12 +138,32 @@ def test_ensure_client_unconfigured_raises_auth_error():
 # Mocked happy path — make sure get_account() reads SDK fields correctly
 # ─────────────────────────────────────────────────────────────────────────────
 
-def test_get_account_with_mocked_sdk(monkeypatch):
-    """Mock the lazy import + TradeClient so we never need a real Tiger account."""
+def _fake_sdk(client):
+    """Build a fake _import_tiger() return value bound to the given client mock."""
+    fake_config_cls = MagicMock()
+    fake_trade_cls = MagicMock(return_value=client)
+    return {
+        "TigerOpenClientConfig": fake_config_cls,
+        "TradeClient": fake_trade_cls,
+        "Language": NS(zh_CN="zh_CN"),
+        "Order": MagicMock(),
+    }
+
+
+def _build_adapter(monkeypatch, client):
+    """Construct a TigerAdapter wired to a mocked SDK."""
     from brokers.base import TigerCredentials
     from brokers import tiger_adapter
-    from brokers.tiger_adapter import TigerAdapter
+    monkeypatch.setattr(tiger_adapter, "_import_tiger", lambda: _fake_sdk(client))
+    return tiger_adapter.TigerAdapter(TigerCredentials(
+        tiger_id="20151024",
+        private_key="-----BEGIN PRIVATE KEY-----\nx\n-----END PRIVATE KEY-----",
+        account="U99999999",
+    ))
 
+
+def test_get_account_with_mocked_sdk(monkeypatch):
+    """Mock the lazy import + TradeClient so we never need a real Tiger account."""
     fake_client = MagicMock()
     fake_summary = NS(
         cash=12345.67, buying_power=15000.0,
@@ -152,22 +172,7 @@ def test_get_account_with_mocked_sdk(monkeypatch):
     fake_account = NS(summary=fake_summary)
     fake_client.get_assets.return_value = [fake_account]
 
-    fake_config_cls = MagicMock()  # returns a config object
-    fake_trade_cls = MagicMock(return_value=fake_client)
-    fake_lang = NS(zh_CN="zh_CN")
-
-    monkeypatch.setattr(tiger_adapter, "_import_tiger", lambda: {
-        "TigerOpenClientConfig": fake_config_cls,
-        "TradeClient": fake_trade_cls,
-        "Language": fake_lang,
-        "Order": MagicMock(),
-    })
-
-    adapter = TigerAdapter(TigerCredentials(
-        tiger_id="20151024",
-        private_key="-----BEGIN PRIVATE KEY-----\nx\n-----END PRIVATE KEY-----",
-        account="U99999999",
-    ))
+    adapter = _build_adapter(monkeypatch, fake_client)
     acct = adapter.get_account()
 
     assert acct.cash == 12345.67
@@ -176,3 +181,79 @@ def test_get_account_with_mocked_sdk(monkeypatch):
     assert acct.currency == "USD"
     assert acct.account_id == "U99999999"
     fake_client.get_assets.assert_called_once_with(account="U99999999")
+
+
+def test_place_order_uses_returned_int_as_broker_order_id(monkeypatch):
+    """
+    Tiger's place_order returns Optional[int] (the new broker order id),
+    NOT an Order object. Regression test for the bug found while the
+    user installed the real SDK.
+    """
+    from brokers.base import OrderIntent, OrderSide, OrderType
+    fake_client = MagicMock()
+    fake_client.get_contract.return_value = NS(symbol="AAPL")
+    # create_order returns a local Order object (no id yet, no fill)
+    fake_order = NS(
+        filled=0, status="New", avg_fill_price=0, order_time="2026-05-25",
+    )
+    fake_client.create_order.return_value = fake_order
+    # place_order returns the broker_order_id as an int
+    fake_client.place_order.return_value = 7788
+
+    adapter = _build_adapter(monkeypatch, fake_client)
+    intent = OrderIntent.new(
+        symbol="AAPL", side="buy", qty=10, order_type="limit", limit_price=150.0,
+    )
+    result = adapter.place_order(intent)
+
+    assert result.broker_order_id == "7788"
+    assert result.symbol == "AAPL"
+    assert result.qty == 10.0
+    assert result.filled_qty == 0
+    assert result.limit_price == 150.0
+
+
+def test_place_order_none_return_raises_network(monkeypatch):
+    """If Tiger returns None (network failure mid-submit) → BrokerNetworkError."""
+    from brokers.base import OrderIntent, BrokerNetworkError
+    fake_client = MagicMock()
+    fake_client.get_contract.return_value = NS(symbol="AAPL")
+    fake_client.create_order.return_value = NS()
+    fake_client.place_order.return_value = None
+
+    adapter = _build_adapter(monkeypatch, fake_client)
+    intent = OrderIntent.new(
+        symbol="AAPL", side="buy", qty=10, order_type="limit", limit_price=150.0,
+    )
+    with pytest.raises(BrokerNetworkError, match="返回 None"):
+        adapter.place_order(intent)
+
+
+def test_place_order_market_is_rejected(monkeypatch):
+    """Market orders are blocked at the adapter level per CLAUDE.md trading safety."""
+    from brokers.base import OrderIntent, BrokerRejectedError
+    adapter = _build_adapter(monkeypatch, MagicMock())
+    intent = OrderIntent.new(symbol="AAPL", side="buy", qty=10, order_type="market")
+    with pytest.raises(BrokerRejectedError, match="仅支持限价单"):
+        adapter.place_order(intent)
+
+
+def test_list_orders_reads_filled_field_not_filled_quantity(monkeypatch):
+    """Regression: Tiger's Order field is `filled`, not `filled_quantity`."""
+    fake_client = MagicMock()
+    fake_order = NS(
+        id=12345, contract=NS(symbol="AAPL"),
+        action="BUY", order_type="LMT", quantity=100,
+        filled=37,                     # tigeropen's actual field name
+        filled_quantity=999,           # what my old code wrongly read — must NOT be used
+        limit_price=150.0, status="PartiallyFilled",
+        avg_fill_price=149.5, order_time="2026-05-25",
+    )
+    fake_client.get_orders.return_value = [fake_order]
+
+    adapter = _build_adapter(monkeypatch, fake_client)
+    [result] = adapter.list_orders(limit=10)
+
+    assert result.broker_order_id == "12345"
+    assert result.filled_qty == 37.0   # confirms we read `filled`
+    assert result.qty == 100.0
