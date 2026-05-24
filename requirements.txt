@@ -31,3 +31,6 @@ alpaca-py>=0.30.0
 # OAuth 账户登录（Google / GitHub）
 authlib>=1.3.0
 itsdangerous>=2.1.0
+
+# 凭证加密存储（broker 多租户绑定，X3 起）
+cryptography>=42.0.0
