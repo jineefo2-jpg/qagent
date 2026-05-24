@@ -238,6 +238,66 @@ def test_place_order_market_is_rejected(monkeypatch):
         adapter.place_order(intent)
 
 
+def test_wrap_error_preserves_message():
+    """X4 follow-up: _wrap_error no longer swallows the SDK message."""
+    from brokers.base import TigerCredentials, BrokerAuthError
+    from brokers.tiger_adapter import TigerAdapter
+
+    a = TigerAdapter(TigerCredentials(
+        tiger_id="x", private_key="-----BEGIN PRIVATE KEY-----\nbody\n-----END PRIVATE KEY-----",
+        account="U1",
+    ))
+    err = a._wrap_error(RuntimeError(
+        "[uuid-here]request sign failed. Unable to load PEM file. MismatchedTags(...)"
+    ))
+    s = str(err)
+    assert isinstance(err, BrokerAuthError)         # "sign" → auth bucket
+    assert "RuntimeError" in s                       # exception class is named
+    assert "MismatchedTags" in s                     # original detail preserved
+    assert "request sign failed" in s
+
+
+def test_wrap_error_classifies_buckets():
+    from brokers.base import (
+        TigerCredentials, BrokerAuthError, BrokerNetworkError, BrokerRejectedError,
+        BrokerError,
+    )
+    from brokers.tiger_adapter import TigerAdapter
+
+    a = TigerAdapter(TigerCredentials(
+        tiger_id="x", private_key="-----BEGIN PRIVATE KEY-----\nb\n-----END PRIVATE KEY-----",
+        account="U1",
+    ))
+    assert isinstance(a._wrap_error(RuntimeError("sign verification failed")), BrokerAuthError)
+    assert isinstance(a._wrap_error(RuntimeError("connection timeout")), BrokerNetworkError)
+    assert isinstance(a._wrap_error(RuntimeError("insufficient buying power")), BrokerRejectedError)
+    # No keyword match → generic BrokerError
+    err = a._wrap_error(RuntimeError("something weird"))
+    assert isinstance(err, BrokerError)
+    # but NOT one of the subclasses
+    assert type(err) is BrokerError
+
+
+def test_wrap_error_redacts_pem_in_message():
+    """Defence in depth: even if the SDK echoes a key, it gets redacted."""
+    from brokers.base import TigerCredentials
+    from brokers.tiger_adapter import TigerAdapter
+
+    a = TigerAdapter(TigerCredentials(
+        tiger_id="x", private_key="-----BEGIN PRIVATE KEY-----\nb\n-----END PRIVATE KEY-----",
+        account="U1",
+    ))
+    leak = (
+        "sign with key -----BEGIN RSA PRIVATE KEY-----\n"
+        "SUPER_SECRET_KEY_BYTES_THAT_SHOULDNT_LEAK\n"
+        "-----END RSA PRIVATE KEY-----"
+    )
+    err = a._wrap_error(RuntimeError(leak))
+    s = str(err)
+    assert "SUPER_SECRET_KEY_BYTES_THAT_SHOULDNT_LEAK" not in s
+    assert "[REDACTED-PEM]" in s
+
+
 def test_strip_pem_markers_returns_base64_only():
     """Pure-function test for the PEM → raw base64 helper."""
     from brokers.tiger_adapter import _strip_pem_markers

@@ -46,6 +46,41 @@ class AlpacaCredentials(Credentials):
     base_url: str = "https://paper-api.alpaca.markets"
 
 
+# ════════════════════════════════════════════════════════════
+# Credential redaction (shared by adapter _wrap_error implementations)
+# ════════════════════════════════════════════════════════════
+
+import re as _re
+
+# Match an entire PEM block (BEGIN ... END) including newlines in between.
+_PEM_BLOCK_RE = _re.compile(
+    r"-----BEGIN[^-\n]{0,40}-----.*?-----END[^-\n]{0,40}-----",
+    _re.DOTALL,
+)
+# Match long contiguous base64-looking blobs (50+ chars of base64 alphabet).
+# Catches stray RSA bodies that escaped a PEM block.
+_BASE64_BLOB_RE = _re.compile(r"[A-Za-z0-9+/=]{50,}")
+
+
+def redact_credentials(text: str, max_len: int = 400) -> str:
+    """
+    Sanitize a string before it goes into an exception message / log / response.
+
+    Removes:
+      - any -----BEGIN ... -----END----- PEM block (RSA, EC, etc.)
+      - any 50+ char base64-looking run (catches naked key bodies)
+
+    Truncates to `max_len` to bound exception size.
+    """
+    if not isinstance(text, str):
+        text = str(text)
+    text = _PEM_BLOCK_RE.sub("[REDACTED-PEM]", text)
+    text = _BASE64_BLOB_RE.sub("[REDACTED-BASE64]", text)
+    if len(text) > max_len:
+        text = text[:max_len] + "...[truncated]"
+    return text
+
+
 @dataclass(frozen=True)
 class TigerCredentials(Credentials):
     """

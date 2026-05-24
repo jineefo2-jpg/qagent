@@ -28,6 +28,7 @@ from .base import (
     OrderType,
     Position,
     TigerCredentials,
+    redact_credentials,
 )
 
 
@@ -165,7 +166,7 @@ class TigerAdapter(BrokerAdapter):
         try:
             assets = client.get_assets(account=self.account)
         except Exception as e:
-            raise self._wrap_error(e)
+            raise self._wrap_error(e) from e
 
         # tigeropen 的 get_assets 返回 list[PortfolioAccount]
         if not assets:
@@ -194,7 +195,7 @@ class TigerAdapter(BrokerAdapter):
         try:
             positions = client.get_positions(account=self.account)
         except Exception as e:
-            raise self._wrap_error(e)
+            raise self._wrap_error(e) from e
 
         out: List[Position] = []
         for p in positions or []:
@@ -237,7 +238,7 @@ class TigerAdapter(BrokerAdapter):
             # 2) place_order 发请求,**返回 Optional[int]** = broker_order_id
             order_id = client.place_order(order)
         except Exception as e:
-            raise self._wrap_error(e)
+            raise self._wrap_error(e) from e
 
         if order_id is None:
             raise BrokerNetworkError("Tiger place_order 返回 None (未拿到 broker_order_id)")
@@ -266,14 +267,14 @@ class TigerAdapter(BrokerAdapter):
             client.cancel_order(account=self.account, id=int(broker_order_id))
             return True
         except Exception as e:
-            raise self._wrap_error(e)
+            raise self._wrap_error(e) from e
 
     def get_order(self, broker_order_id: str) -> OrderResult:
         client = self._ensure_client()
         try:
             order = client.get_order(account=self.account, id=int(broker_order_id))
         except Exception as e:
-            raise self._wrap_error(e)
+            raise self._wrap_error(e) from e
         if order is None:
             raise BrokerError(f"Tiger 未找到订单 id={broker_order_id}")
         return self._to_order_result(order)
@@ -283,7 +284,7 @@ class TigerAdapter(BrokerAdapter):
         try:
             orders = client.get_orders(account=self.account, limit=limit)
         except Exception as e:
-            raise self._wrap_error(e)
+            raise self._wrap_error(e) from e
         results = [self._to_order_result(o) for o in (orders or [])]
         if status and status != "all":
             results = [r for r in results if r.status.value == status]
@@ -314,14 +315,26 @@ class TigerAdapter(BrokerAdapter):
         )
 
     def _wrap_error(self, exc: Exception) -> BrokerError:
-        """把 Tiger SDK 的杂乱异常归一为 BrokerError 子类,不带 stack/凭证字段。"""
+        """
+        Categorize a Tiger SDK exception while preserving the message for
+        debugging. Credential-shaped content (PEM blocks, long base64 blobs)
+        is redacted in the wrapped message so private-key bytes never leak.
+
+        Callers should `raise self._wrap_error(e) from e` so the original
+        traceback (including the un-redacted local frame, not the wrapped
+        message) is preserved for in-process debugging while the public
+        exception remains safe.
+        """
         name = type(exc).__name__
-        # 凭证类错误关键词
-        msg = str(exc).lower()
-        if "auth" in msg or "key" in msg or "permission" in msg:
-            return BrokerAuthError(f"Tiger 鉴权失败: {name}")
-        if "timeout" in msg or "network" in msg or "connect" in msg:
-            return BrokerNetworkError(f"Tiger 网络错误: {name}")
-        if "reject" in msg or "insufficient" in msg or "not eligible" in msg:
-            return BrokerRejectedError(f"Tiger 拒单: {name}")
-        return BrokerError(f"Tiger 调用失败: {name}")
+        msg = redact_credentials(str(exc))
+        low = msg.lower()
+        if ("sign" in low or "auth" in low or "permission" in low
+                or "private key" in low or "invalid token" in low):
+            return BrokerAuthError(f"Tiger {name}: {msg}")
+        if ("timeout" in low or "network" in low or "connect" in low
+                or "name resolution" in low or "unreachable" in low):
+            return BrokerNetworkError(f"Tiger {name}: {msg}")
+        if ("reject" in low or "insufficient" in low or "not eligible" in low
+                or "buying power" in low or "not tradable" in low):
+            return BrokerRejectedError(f"Tiger {name}: {msg}")
+        return BrokerError(f"Tiger {name}: {msg}")
