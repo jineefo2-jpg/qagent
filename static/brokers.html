@@ -73,6 +73,31 @@
     font-size: 12px; min-height: 200px; resize: vertical;
   }
 
+  /* Drag-drop zone for Tiger config files */
+  .drop-zone {
+    border: 2px dashed var(--border); border-radius: 8px;
+    padding: 24px 16px; background: var(--bg);
+    text-align: center; cursor: pointer;
+    transition: all 0.15s ease;
+  }
+  .drop-zone:hover, .drop-zone:focus {
+    border-color: var(--primary); background: rgba(0, 212, 170, 0.04);
+    outline: none;
+  }
+  .drop-zone.dragover {
+    border-color: var(--primary); background: rgba(0, 212, 170, 0.1);
+    transform: scale(1.01);
+  }
+  .drop-zone .dz-main { font-size: 14px; margin-bottom: 6px; }
+  .drop-zone .dz-sub { font-size: 12px; color: var(--text-muted); }
+  .drop-zone code { background: var(--bg-elev-2); padding: 1px 5px; border-radius: 3px; }
+
+  details.how-to summary { font-weight: 500; padding: 4px 0; }
+  details.how-to[open] summary { color: var(--text); }
+  details.how-to .step-list code {
+    background: var(--bg-elev-2); padding: 1px 5px; border-radius: 3px; font-size: 12px;
+  }
+
   /* PEM marker-wrapped textarea (Tiger 私钥) */
   .pem-wrap {
     border: 1px solid var(--border); border-radius: 6px;
@@ -193,13 +218,60 @@
 
   <details>
     <summary>🐯 老虎证券 (Tiger Brokers)</summary>
-    <ol class="step-list">
-      <li>登录 <a href="https://www.itigerup.com/openapi/" target="_blank">老虎 OpenAPI 控制台</a>,首次申请会要简短开发者信息。</li>
-      <li>在控制台 <strong>生成 RSA 密钥对</strong> → 下载私钥 <code>.pem</code>(不要在 macOS TextEdit/Notes 里打开,会被改成 RTF)。</li>
-      <li>抄下你的 <code>tiger_id</code> + 模拟账号(以 <code>U</code> 开头)。</li>
-      <li>把 <code>.pem</code> 内容粘到下面的"私钥"框,填好其它字段提交。</li>
-    </ol>
+
+    <details class="how-to" open style="margin:8px 0 16px;">
+      <summary style="font-size:14px;color:var(--text-muted);">
+        📘 绑定指南(展开看 Tiger 配置文件怎么下)
+      </summary>
+      <ol class="step-list" style="margin-top:8px;">
+        <li>
+          打开
+          <a href="https://www.itigerup.com/openapi/" target="_blank">Tiger OpenAPI 控制台</a>
+          (用你的老虎账号登录)。<br>
+          <span class="muted">如果是第一次进,会要你申请 OpenAPI 权限,填一个简短的开发者信息表,
+          通常即时通过 / 1-2 天审核。</span>
+        </li>
+        <li>
+          进入 <strong>"密钥管理"</strong>(或 "OpenAPI 设置")页面 →
+          点击 <strong>"生成 RSA 密钥对"</strong>(已经有的可以"重新生成",但**老旧密钥会立刻作废**)。
+        </li>
+        <li>
+          生成后,点 <strong>"下载配置文件"</strong>。Tiger 通常给的是:
+          <ul style="margin:4px 0 0 18px;color:var(--text-muted);font-size:13px;">
+            <li><code>tiger_openapi_config.properties</code> — <strong>推荐</strong>,包含 tiger_id / 账号 / 私钥 / license 全部字段</li>
+            <li>或单独的 <code>private_key.pem</code> + 你需要去账户页面抄 <code>tiger_id</code> 和账号</li>
+          </ul>
+        </li>
+        <li>
+          <strong>把那个文件直接拖到下面的灰框</strong>,字段会自动填好。无需手抄。<br>
+          <span class="muted">支持:<code>.properties</code> / <code>.pem</code> / <code>.json</code> / <code>.txt</code></span>
+        </li>
+      </ol>
+      <p style="margin-top:8px;font-size:12px;color:var(--text-muted);line-height:1.6;">
+        ⚠️ macOS 提示:不要双击 <code>.pem</code>(会被 Keychain Access 接管);也不要用 TextEdit 编辑,
+        会偷偷存成 RTF 富文本格式让解析失败。<br>
+        🔒 这个文件全程**只在你浏览器里**解析,不上传到任何服务器(直到你点"测试 + 绑定")。
+      </p>
+    </details>
+
     <form id="form-tiger">
+      <!-- 拖拽配置文件区 -->
+      <div class="form-row">
+        <label>① 把 Tiger 配置文件拖到这里(可选,纯客户端解析)</label>
+        <div class="drop-zone" id="tiger-drop-zone" tabindex="0">
+          <div class="dz-main">⬇ 把 <code>.properties</code> / <code>.pem</code> / <code>.json</code> 文件拖进来</div>
+          <div class="dz-sub">或者 <a href="#" id="tiger-pick-file">点击选文件</a></div>
+          <input type="file" id="tiger-file-input"
+                 accept=".properties,.pem,.json,.txt,text/plain"
+                 style="display:none;">
+        </div>
+        <div id="tiger-drop-status" class="muted" style="margin-top:6px;display:none;"></div>
+      </div>
+
+      <p style="margin:10px 0 6px;font-size:13px;color:var(--text-muted);">
+        ② 如果拖拽没解析全,或者只想手动填,下面字段都可以自己改:
+      </p>
+
       <div class="form-row">
         <label>Label 标签(自取,用于区分多个账户)</label>
         <input type="text" name="label" value="paper-main" required>
@@ -469,6 +541,181 @@ function wireForm(formId, msgId, broker_type, gatherCreds) {
   });
 }
 
+// ─── Tiger 配置文件解析(拖拽 / 点选) ───
+//
+// 兼容 3 种 Tiger 官方/常见格式:
+//   1. tiger_openapi_config.properties — Java properties (key=value), 包含
+//      tigerId / defaultAccount / private_key_pk1|pk8 / license / env
+//   2. private_key.pem — 只含私钥,其它字段用户手填
+//   3. tiger_config.json — 自定义 JSON
+//
+// 全程客户端解析,private_key 不会经过任何额外网络往返。
+
+function _stripPemMarkers(s) {
+  return String(s || '')
+    .split(/\r?\n/)
+    .filter(function (ln) { return !/^-----.*-----\s*$/.test(ln.trim()); })
+    .join('\n')
+    .trim();
+}
+
+function parseTigerConfig(fileName, content) {
+  var result = {};
+  var lowName = (fileName || '').toLowerCase();
+  var trimmed = String(content || '').trim();
+
+  // 1. JSON
+  if (lowName.endsWith('.json') || (trimmed.startsWith('{') && trimmed.endsWith('}'))) {
+    try {
+      var obj = JSON.parse(trimmed);
+      for (var k in obj) {
+        var lk = k.toLowerCase();
+        if (lk === 'tigerid' || lk === 'tiger_id') result.tiger_id = String(obj[k] || '');
+        else if (lk === 'defaultaccount' || lk === 'account') result.account = String(obj[k] || '');
+        else if (lk === 'license') result.license = String(obj[k] || '').toUpperCase();
+        else if (lk.indexOf('private_key') === 0 || lk === 'privatekey') {
+          result.private_key = _stripPemMarkers(obj[k]);
+        }
+      }
+      if (Object.keys(result).length > 0) return result;
+    } catch (_) { /* fall through */ }
+  }
+
+  // 2. PEM (just private key, no other fields)
+  if (lowName.endsWith('.pem') || /-----BEGIN[^-]*PRIVATE KEY-----/.test(trimmed)) {
+    if (/-----BEGIN/.test(trimmed)) {
+      result.private_key = _stripPemMarkers(trimmed);
+      return result;
+    }
+  }
+
+  // 3. Properties 格式 (Tiger 官方 tiger_openapi_config.properties)
+  var lines = String(content || '').split(/\r?\n/);
+  var i = 0;
+  while (i < lines.length) {
+    var line = lines[i];
+    var s = line.trim();
+    // skip comments / blank
+    if (!s || s.startsWith('#') || s.startsWith('!') || s.startsWith('//')) { i++; continue; }
+    var m = s.match(/^([A-Za-z_][\w.-]*)\s*[=:]\s*(.*)$/);
+    if (!m) { i++; continue; }
+    var key = m[1].toLowerCase();
+    var value = m[2];
+    // properties multiline: 行尾 \ 续行
+    while (value.endsWith('\\') && i + 1 < lines.length) {
+      value = value.slice(0, -1) + lines[++i];
+    }
+    value = value.trim();
+    if (!value) { i++; continue; }
+
+    if (key === 'tigerid' || key === 'tiger_id') {
+      result.tiger_id = value;
+    } else if (key === 'defaultaccount' || key === 'account') {
+      result.account = value;
+    } else if (key === 'license') {
+      result.license = value.toUpperCase();
+    } else if (key === 'private_key' || key === 'private_key_pk1' || key === 'private_key_pk8'
+            || key === 'privatekey') {
+      // 优先取 pk1(PKCS#1, RSA PRIVATE KEY),否则 pk8
+      if (!result.private_key || key === 'private_key_pk1') {
+        result.private_key = _stripPemMarkers(value);
+      }
+    }
+    i++;
+  }
+
+  return result;
+}
+
+function applyParsedToTigerForm(parsed) {
+  var form = document.getElementById('form-tiger');
+  if (!form) return 0;
+  var filled = 0;
+  if (parsed.tiger_id) { form.querySelector('[name=tiger_id]').value = parsed.tiger_id; filled++; }
+  if (parsed.account)  { form.querySelector('[name=account]').value = parsed.account; filled++; }
+  if (parsed.license) {
+    var sel = form.querySelector('[name=license]');
+    var opt = Array.from(sel.options).find(function (o) { return o.value === parsed.license; });
+    if (opt) { sel.value = parsed.license; filled++; }
+  }
+  if (parsed.private_key) {
+    form.querySelector('[name=private_key_body]').value = parsed.private_key;
+    filled++;
+  }
+  return filled;
+}
+
+function _readAndParseTigerFile(file) {
+  var statusEl = document.getElementById('tiger-drop-status');
+  statusEl.style.display = 'block';
+  statusEl.style.color = 'var(--text-muted)';
+  statusEl.textContent = '解析 ' + file.name + ' ...';
+
+  var reader = new FileReader();
+  reader.onload = function () {
+    try {
+      var parsed = parseTigerConfig(file.name, reader.result);
+      var n = applyParsedToTigerForm(parsed);
+      if (n === 0) {
+        statusEl.style.color = 'var(--danger)';
+        statusEl.textContent = '❌ ' + file.name + ' 里没识别到 Tiger 字段。手动填表单也行。';
+      } else {
+        statusEl.style.color = 'var(--primary)';
+        var fields = [];
+        if (parsed.tiger_id)    fields.push('tiger_id');
+        if (parsed.account)     fields.push('account');
+        if (parsed.license)     fields.push('license');
+        if (parsed.private_key) fields.push('私钥');
+        statusEl.textContent = '✅ 从 ' + file.name + ' 自动填好: ' + fields.join(' / ');
+      }
+    } catch (e) {
+      statusEl.style.color = 'var(--danger)';
+      statusEl.textContent = '❌ 解析失败: ' + e.message;
+    }
+  };
+  reader.onerror = function () {
+    statusEl.style.color = 'var(--danger)';
+    statusEl.textContent = '❌ 读文件失败: ' + reader.error;
+  };
+  reader.readAsText(file);
+}
+
+function setupTigerDropZone() {
+  var zone = document.getElementById('tiger-drop-zone');
+  var fileInput = document.getElementById('tiger-file-input');
+  var pickLink = document.getElementById('tiger-pick-file');
+  if (!zone) return;
+
+  zone.addEventListener('dragover', function (e) {
+    e.preventDefault();
+    zone.classList.add('dragover');
+  });
+  zone.addEventListener('dragleave', function () {
+    zone.classList.remove('dragover');
+  });
+  zone.addEventListener('drop', function (e) {
+    e.preventDefault();
+    zone.classList.remove('dragover');
+    if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0]) {
+      _readAndParseTigerFile(e.dataTransfer.files[0]);
+    }
+  });
+  zone.addEventListener('click', function () { fileInput.click(); });
+  zone.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fileInput.click(); }
+  });
+  pickLink.addEventListener('click', function (e) {
+    e.preventDefault(); e.stopPropagation(); fileInput.click();
+  });
+  fileInput.addEventListener('change', function () {
+    if (fileInput.files && fileInput.files[0]) {
+      _readAndParseTigerFile(fileInput.files[0]);
+      fileInput.value = '';  // 让同一文件可以再次选
+    }
+  });
+}
+
+
 // Tiger: 自动把 body 拼成 PEM,容错"用户粘了整段含标签"的情况
 function _buildTigerPEM(raw) {
   // 剥任何已有的 BEGIN/END 行,把剩下的非空内容当作 body
@@ -497,6 +744,7 @@ wireForm('#form-alpaca', '#msg-alpaca', 'alpaca', (fd) => ({
 }));
 
 (async () => {
+  setupTigerDropZone();    // 拖拽配置文件 → 自动填表单
   const loggedIn = await loadCurrentUser();
   await loadBindings();
   if (loggedIn) {
