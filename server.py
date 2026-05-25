@@ -768,10 +768,34 @@ def get_order_intent(intent_id: str,
     except Exception as e:
         raise HTTPException(502, f"账户查询失败: {e}")
 
+    # ADR-0002: surface the binding's env + live_orders_enabled so the
+    # UI can render the red 实盘 banner and refuse the click pre-emptively.
+    binding_info = {"env": "paper", "live_orders_enabled": False, "is_live_blocked": False}
+    try:
+        from brokers.credentials_store import store as _bstore
+        name = (broker.name or "").lower()
+        bt = "tiger" if name.startswith("tiger") else (
+            "alpaca" if name.startswith("alpaca") else None
+        )
+        if bt is not None:
+            bindings = [b for b in _bstore.list_user_bindings(device_id) if b.broker_type == bt]
+            if bindings:
+                b = bindings[0]
+                binding_info = {
+                    "env": b.env,
+                    "live_orders_enabled": bool(b.live_orders_enabled),
+                    "is_live_blocked": (b.env == "live" and not b.live_orders_enabled),
+                    "broker_type": b.broker_type,
+                    "label": b.label,
+                }
+    except Exception:
+        pass
+
     return {
         "intent": intent.to_dict(),
         "account": acc.to_dict(),
         "risk_check": check.to_dict(),
+        "binding": binding_info,
     }
 
 

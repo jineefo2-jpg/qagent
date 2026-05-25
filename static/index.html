@@ -1684,6 +1684,7 @@ function renderOrderConfirmModal(detail) {
   var intent = detail.intent || {};
   var account = detail.account || {};
   var check = detail.risk_check || {};
+  var binding = detail.binding || {env: 'paper', live_orders_enabled: false, is_live_blocked: false};
   var side = intent.side === 'sell' ? 'sell' : 'buy';
   var sideText = side === 'buy' ? '买入' : '卖出';
   var sideClass = side === 'buy' ? 'order-side-buy' : 'order-side-sell';
@@ -1691,9 +1692,42 @@ function renderOrderConfirmModal(detail) {
   var pct = (check.notional_pct || 0) * 100;
   var notes = intent.notes || '';
 
+  // ADR-0002 Layer 4: red banner for live, distinct labels for paper / mock
+  var brokerLabel;
+  if (binding.broker_type === 'tiger') {
+    brokerLabel = binding.env === 'live'
+      ? '🐯 Tiger Brokers · ⚠️ 实盘账户'
+      : '🐯 Tiger Brokers · 模拟环境';
+  } else if (binding.broker_type === 'alpaca') {
+    brokerLabel = '📈 Alpaca Paper Trading';
+  } else {
+    brokerLabel = '本地模拟账户';
+  }
+
   var html = '<h3><span class="' + sideClass + '">' + sideText + '</span> '
     + escapeHtmlSafe(intent.symbol) + '</h3>'
-    + '<p class="sub">Alpaca Paper Trading · 限价单 · TIF: ' + (intent.time_in_force || 'day') + '</p>';
+    + '<p class="sub">' + brokerLabel + ' · 限价单 · TIF: ' + (intent.time_in_force || 'day') + '</p>';
+
+  // 实盘 红色横幅
+  if (binding.env === 'live') {
+    if (binding.is_live_blocked) {
+      html += '<div class="risk-reasons" style="background:rgba(248,81,73,0.15);'
+        + 'border:1px solid #f85149;color:#ff8a82;font-weight:600;">'
+        + '🚫 这是实盘账户但「启用实盘下单」开关未开,无法下单。<br>'
+        + '<span style="font-weight:400;font-size:12px;">'
+        + '前往 <a href="/brokers" style="color:#ff8a82;text-decoration:underline;">/brokers</a> '
+        + '页面点击"只读 · 点击启用实盘"开关。意图会保留,启用后回来重试。'
+        + '</span></div>';
+    } else {
+      html += '<div class="risk-warnings" style="background:rgba(248,81,73,0.2);'
+        + 'border:1px solid #f85149;color:#ff8a82;font-weight:600;font-size:14px;'
+        + 'padding:12px;border-radius:6px;margin:10px 0;">'
+        + '⚠️ 实盘 - 真金白银<br>'
+        + '<span style="font-weight:400;font-size:12px;">'
+        + '点击确认后将向你的真实老虎账户提交订单。'
+        + '</span></div>';
+    }
+  }
 
   html += '<div class="row"><span class="k">数量</span><span class="v">' + (intent.qty || 0) + ' 股</span></div>';
   html += '<div class="row"><span class="k">限价</span><span class="v">' + fmtMoney(intent.limit_price) + '</span></div>';
@@ -1732,6 +1766,10 @@ function renderOrderConfirmModal(detail) {
   if (!check.passed && needDouble && check.reasons && check.reasons.length === 1
         && /大额订单|双重确认|二次确认|勾选/.test(check.reasons[0])) {
     canConfirm = false;   // 等用户勾选
+  }
+  // ADR-0002 Layer 4: 实盘且未启用 → 客户端层面禁用按钮 (服务端 Layer 5 还会再 reject)
+  if (binding.is_live_blocked) {
+    canConfirm = false;
   }
 
   html += '<div class="actions">'
@@ -2543,13 +2581,18 @@ function _buildLoggedInHintHTML(bindings) {
       + '<span class="small">在你完成绑定前,LLM 只能查行情 / 算因子,不能下单。</span>';
   }
 
-  // 按 broker_type 聚合,统计 paper / live 数量
+  // 按 broker_type 聚合,统计 paper / live(只读) / live(已启用) 三态
   var brokers = {};
   for (var i = 0; i < nonMock.length; i++) {
     var b = nonMock[i];
-    if (!brokers[b.broker_type]) brokers[b.broker_type] = { paper: 0, live: 0, labels: [] };
-    brokers[b.broker_type][b.env === 'live' ? 'live' : 'paper']++;
-    brokers[b.broker_type].labels.push(b.label);
+    if (!brokers[b.broker_type]) {
+      brokers[b.broker_type] = { paper: 0, live_readonly: 0, live_enabled: 0 };
+    }
+    if (b.env === 'live') {
+      brokers[b.broker_type][b.live_orders_enabled ? 'live_enabled' : 'live_readonly']++;
+    } else {
+      brokers[b.broker_type].paper++;
+    }
   }
 
   var displayNames = {
@@ -2557,13 +2600,21 @@ function _buildLoggedInHintHTML(bindings) {
     alpaca: '📈 Alpaca',
   };
   var lines = [];
-  var hasLive = false;
+  var hasLiveEnabled = false;
+  var hasLiveReadonly = false;
   for (var bt in brokers) {
     var name = displayNames[bt] || bt;
     var counts = brokers[bt];
     var envText = [];
     if (counts.paper > 0) envText.push(counts.paper + ' 个模拟');
-    if (counts.live > 0) { envText.push(counts.live + ' 个实盘'); hasLive = true; }
+    if (counts.live_readonly > 0) {
+      envText.push(counts.live_readonly + ' 个实盘(只读)');
+      hasLiveReadonly = true;
+    }
+    if (counts.live_enabled > 0) {
+      envText.push(counts.live_enabled + ' 个实盘(已开启下单)');
+      hasLiveEnabled = true;
+    }
     lines.push(name + ' · ' + envText.join(' + '));
   }
 
@@ -2580,16 +2631,23 @@ function _buildLoggedInHintHTML(bindings) {
     return '「' + escapeHtmlSafe(e) + '」';
   }).join(' · ');
 
-  var warning = hasLive
-    ? '⚠️ 你绑定了实盘账户,下单会消耗真金白银。每笔订单仍需 UI 二次确认。'
-    : '⚠️ 当前全部为模拟盘(paper),使用虚拟资金,不涉及真金白银';
+  var warning;
+  var warnStyle = '';
+  if (hasLiveEnabled) {
+    warning = '🚨 你的实盘下单已启用 — LLM 通过此 binding 下的单将消耗 真金白银。仍需 UI 二次确认每笔。';
+    warnStyle = 'color:#ff8a82;font-weight:700;';
+  } else if (hasLiveReadonly) {
+    warning = '⚠️ 实盘账户当前为「只读」模式,LLM 看得到持仓但下不了单。要下单去 /brokers 打开开关。';
+    warnStyle = 'color:var(--warning);font-weight:600;';
+  } else {
+    warning = '当前全部为模拟盘(paper),使用虚拟资金,不涉及真金白银。';
+  }
 
   return ''
     + '<div class="badge-line">✅ 已登录,可在对话中下单</div>'
     + '<div style="margin-top:4px;">绑定: ' + escapeHtmlSafe(lines.join('  ·  ')) + '</div>'
     + '<div style="margin-top:4px;">试试问: ' + examplesHtml + '</div>'
-    + '<span class="small" style="' + (hasLive ? 'color:var(--warning);font-weight:600;' : '') + '">'
-    + warning + '</span>';
+    + '<span class="small" style="' + warnStyle + '">' + warning + '</span>';
 }
 
 // ════════════════════════════════════════════════════════════

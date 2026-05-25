@@ -73,6 +73,59 @@
     font-size: 12px; min-height: 200px; resize: vertical;
   }
 
+  /* ADR-0002 env radio + live badges */
+  .env-radio-group {
+    display: flex; flex-direction: column; gap: 8px;
+  }
+  .env-opt {
+    display: flex; align-items: flex-start; gap: 10px;
+    padding: 10px 12px;
+    border: 1px solid var(--border); border-radius: 6px;
+    background: var(--bg);
+    cursor: pointer;
+    transition: border-color 0.15s ease, background 0.15s ease;
+  }
+  .env-opt:has(input:checked) {
+    border-color: var(--primary);
+    background: rgba(0, 212, 170, 0.04);
+  }
+  .env-opt:has(input[value="live"]:checked) {
+    border-color: var(--danger);
+    background: rgba(248, 81, 73, 0.05);
+  }
+  .env-opt input { margin-top: 4px; flex-shrink: 0; }
+  .env-opt small { color: var(--text-muted); font-size: 12px; line-height: 1.55; }
+  .env-tag {
+    display: inline-block;
+    padding: 2px 8px; border-radius: 12px;
+    font-size: 12px; font-weight: 600;
+    margin-right: 8px;
+  }
+  .env-tag.paper { background: rgba(140, 160, 200, 0.18); color: #a6c1f0; }
+  .env-tag.live  { background: rgba(248, 81, 73, 0.18); color: #ff8a82; }
+
+  /* live badge in bindings list */
+  .live-badge {
+    display: inline-block;
+    padding: 1px 7px; border-radius: 10px;
+    font-size: 11px; font-weight: 600;
+    background: rgba(248, 81, 73, 0.18); color: #ff8a82;
+    margin-left: 6px;
+  }
+  .live-badge.enabled {
+    background: rgba(248, 81, 73, 0.28); color: #ffb0a8;
+  }
+  .live-toggle-btn {
+    background: transparent; color: var(--danger);
+    border: 1px solid var(--danger);
+    padding: 3px 9px; font-size: 12px; border-radius: 4px;
+    cursor: pointer;
+  }
+  .live-toggle-btn:hover { background: rgba(248,81,73,0.1); }
+  .live-toggle-btn.on {
+    background: var(--danger); color: var(--bg);
+  }
+
   /* Drag-drop zone for Tiger config files */
   .drop-zone {
     border: 2px dashed var(--border); border-radius: 8px;
@@ -273,6 +326,21 @@
       </p>
 
       <div class="form-row">
+        <label>账户类型(实盘需要在 ADR-0002 多层闸门下才允许下单)</label>
+        <div class="env-radio-group">
+          <label class="env-opt">
+            <input type="radio" name="env" value="paper" checked>
+            <span class="env-tag paper">📄 模拟 paper</span>
+            <small>Tiger 给的虚拟资金,U 开头账号</small>
+          </label>
+          <label class="env-opt">
+            <input type="radio" name="env" value="live">
+            <span class="env-tag live">⚠️ 实盘 live</span>
+            <small>你的真实老虎账户,真金白银。绑了之后**默认只读**,要单独打开"启用实盘下单"开关才能下单</small>
+          </label>
+        </div>
+      </div>
+      <div class="form-row">
         <label>Label 标签(自取,用于区分多个账户)</label>
         <input type="text" name="label" value="paper-main" required>
       </div>
@@ -281,8 +349,8 @@
         <input type="text" name="tiger_id" required>
       </div>
       <div class="form-row">
-        <label>账户号(以 U 开头的模拟账户)</label>
-        <input type="text" name="account" required placeholder="U99999999">
+        <label>账户号(模拟通常以 U 开头;实盘账户号也填这里)</label>
+        <input type="text" name="account" required placeholder="U99999999 或 D...">
       </div>
       <div class="form-row">
         <label>License 持牌主体</label>
@@ -475,15 +543,30 @@ async function loadBindings() {
     return;
   }
   let html = '<table><thead><tr>'
-    + '<th>ID</th><th>券商</th><th>Label</th><th>环境</th><th>最后使用</th><th></th>'
+    + '<th>ID</th><th>券商</th><th>Label</th><th>环境</th>'
+    + '<th>下单权限</th><th>最后使用</th><th></th>'
     + '</tr></thead><tbody>';
   for (const b of rows) {
     const last = b.last_used_at ? new Date(b.last_used_at * 1000).toLocaleString() : '—';
+    const envTag = b.env === 'live'
+      ? '<span class="env-tag live">⚠️ live</span>'
+      : '<span class="env-tag paper">paper</span>';
+
+    let liveCol;
+    if (b.env === 'paper') {
+      liveCol = '<span class="muted">N/A</span>';
+    } else if (b.live_orders_enabled) {
+      liveCol = `<button class="live-toggle-btn on" data-id="${b.id}" data-on="1">已启用 · 点击关闭</button>`;
+    } else {
+      liveCol = `<button class="live-toggle-btn" data-id="${b.id}" data-on="0">只读 · 点击启用实盘</button>`;
+    }
+
     html += '<tr>'
       + `<td>${b.id}</td>`
       + `<td>${b.broker_type}</td>`
       + `<td>${b.label}</td>`
-      + `<td>${b.env}</td>`
+      + `<td>${envTag}</td>`
+      + `<td>${liveCol}</td>`
       + `<td class="muted">${last}</td>`
       + `<td><button class="danger-btn" data-id="${b.id}" data-label="${b.label}">解绑</button></td>`
       + '</tr>';
@@ -505,15 +588,66 @@ async function loadBindings() {
       }
     });
   });
+
+  // ADR-0002 Layer 2: live orders toggle
+  root.querySelectorAll('button.live-toggle-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const id = btn.dataset.id;
+      const turningOn = btn.dataset.on === '0';
+      let ack = '';
+      if (turningOn) {
+        const phrase = 'I understand this will use real money';
+        const typed = prompt(
+          '🚨 启用实盘下单(LLM 将能用真金白银下单)\n\n' +
+          '为确认你完全理解风险,请把下面这句英文 逐字粘贴 进输入框:\n\n' +
+          phrase + '\n\n' +
+          '取消则不启用。'
+        );
+        if (typed === null) return;
+        if (typed.trim() !== phrase) {
+          alert('❌ 未启用 — 输入与要求不一致。');
+          return;
+        }
+        ack = phrase;
+      } else {
+        if (!confirm('确认关闭实盘下单?关闭后此 binding 回到只读。')) return;
+      }
+      btn.disabled = true;
+      const r = await api('POST', `/api/broker/bindings/${id}/live-orders`, {
+        enabled: turningOn,
+        acknowledge: ack,
+      });
+      if (r.ok) {
+        await loadBindings();
+      } else {
+        alert(`操作失败: ${r.status} ${r.payload?.detail || ''}`);
+        btn.disabled = false;
+      }
+    });
+  });
 }
 
-function wireForm(formId, msgId, broker_type, gatherCreds) {
+function wireForm(formId, msgId, broker_type, gatherCreds, envExtractor) {
   const form = $(formId);
   const msg = $(msgId);
   form.addEventListener('submit', async (ev) => {
     ev.preventDefault();
     clearMsg(msg);
     const fd = new FormData(form);
+    const env = (envExtractor ? envExtractor(fd) : 'paper') || 'paper';
+
+    // ADR-0002 Layer 4-equivalent for bind: confirm live before submit
+    if (env === 'live') {
+      const ok = confirm(
+        '⚠️ 确认绑定 实盘账户(live)?\n\n' +
+        '这是你的真实老虎账户,不是模拟资金。\n' +
+        '绑定后默认仍为只读 — 必须在绑定成功后单独打开"启用实盘下单"开关,\n' +
+        '系统才会允许 LLM 通过此绑定下单。\n\n' +
+        '继续?'
+      );
+      if (!ok) return;
+    }
+
     const submitBtn = form.querySelector('button[type=submit]');
     submitBtn.disabled = true;
     submitBtn.textContent = '正在测试 + 绑定…';
@@ -521,16 +655,20 @@ function wireForm(formId, msgId, broker_type, gatherCreds) {
       const body = {
         broker_type,
         label: fd.get('label'),
-        env: 'paper',
+        env,
         credentials: gatherCreds(fd),
       };
       const r = await api('POST', '/api/broker/bindings', body);
       if (r.ok) {
-        showMsg(msg, 'ok', `✅ 绑定成功 (id=${r.payload.id}) · 正在拉取账户快照…`);
+        showMsg(msg, 'ok', `✅ 绑定成功 (id=${r.payload.id} · env=${env}) · 正在拉取账户快照…`);
         form.reset();
         // 并发刷新:列表 + 当前 broker 快照(账户/持仓/订单/资金)
         await Promise.all([loadBindings(), loadBrokerSnapshot()]);
-        showMsg(msg, 'ok', `✅ 绑定成功 (id=${r.payload.id}) · 已刷新`);
+        showMsg(msg, 'ok',
+          env === 'live'
+            ? `✅ 绑定成功 (id=${r.payload.id} · 实盘) · 当前只读,如要下单请在上方列表开"启用实盘下单"`
+            : `✅ 绑定成功 (id=${r.payload.id} · 模拟) · 已刷新`
+        );
       } else {
         showMsg(msg, 'error', `❌ ${r.status} · ${r.payload?.detail || '未知错误'}`);
       }
@@ -736,7 +874,7 @@ wireForm('#form-tiger', '#msg-tiger', 'tiger', (fd) => ({
   private_key: _buildTigerPEM(fd.get('private_key_body')),
   account: fd.get('account'),
   license: fd.get('license'),
-}));
+}), /*envExtractor=*/(fd) => fd.get('env') || 'paper');
 
 wireForm('#form-alpaca', '#msg-alpaca', 'alpaca', (fd) => ({
   api_key: fd.get('api_key'),
