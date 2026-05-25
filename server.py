@@ -1401,7 +1401,181 @@ def api_delete_binding(binding_id: int,
     ok = store.unbind(binding_id, user_scope, actor="user")
     if not ok:
         raise HTTPException(404, "binding not found")
+
+    # Tear down any running Tiger push connection for this binding
+    try:
+        from brokers.tiger_push import hub
+        if hub.is_running(user_scope):
+            hub.stop(user_scope)
+    except Exception:
+        pass
+
     return {"ok": True}
+
+
+# ════════════════════════════════════════════════════════════
+# Real-time broker stream (X6 c3) — SSE push from RealtimeStateStore
+# ════════════════════════════════════════════════════════════
+
+_PUSH_GRACE_PERIOD_SEC = int(_os.getenv("BROKER_PUSH_GRACE_SEC", "60"))
+
+
+def _ensure_tiger_push_started(user_scope: str) -> bool:
+    """
+    Lazily start a TigerPushHub connection for this user if they have a
+    tiger binding. Returns True if a push connection is running (now or
+    already was).
+    """
+    from brokers.tiger_push import hub
+    from brokers.credentials_store import store
+
+    if hub.is_running(user_scope):
+        return True
+
+    bindings = [
+        b for b in store.list_user_bindings(user_scope)
+        if b.broker_type == "tiger"
+    ]
+    if not bindings:
+        return False
+
+    binding = bindings[0]
+    creds = store.load(user_scope, "tiger", binding.label, actor="system")
+    if creds is None:
+        return False
+    try:
+        hub.start(user_scope, creds)
+    except Exception:
+        return False
+    return True
+
+
+def _populate_initial_state(user_scope: str) -> None:
+    """
+    Best-effort: populate RealtimeStateStore from the current REST snapshot
+    so the UI has data before the first push tick arrives.
+
+    Reads via TigerAdapter (cached for 30s, so cheap on repeat connect).
+    Errors are silenced — push will fill in within seconds anyway.
+    """
+    from brokers.registry import _registry
+    from brokers.realtime_state import state
+
+    try:
+        adapter = _registry.get(user_scope, broker_type="tiger")
+    except Exception:
+        return
+
+    try:
+        acct = adapter.get_account()
+        state.update_account(user_scope, acct.to_dict())
+    except Exception:
+        pass
+    try:
+        for p in adapter.list_positions():
+            state.update_position(user_scope, p.to_dict())
+    except Exception:
+        pass
+    try:
+        for o in adapter.list_orders(limit=50):
+            state.update_order(user_scope, o.to_dict())
+    except Exception:
+        pass
+
+
+def _schedule_push_stop_if_idle(user_scope: str) -> None:
+    """After the last SSE client disconnects, wait grace period then stop."""
+    import threading
+    from brokers.realtime_state import state
+    from brokers.tiger_push import hub
+
+    def check():
+        if state.subscriber_count(user_scope) == 0:
+            try:
+                hub.stop(user_scope)
+            except Exception:
+                pass
+
+    threading.Timer(_PUSH_GRACE_PERIOD_SEC, check).start()
+
+
+@app.get("/api/broker/stream")
+async def broker_stream(
+    request: Request,
+    x_device_id: Optional[str] = Header(None),
+    user: User = Depends(require_user),
+):
+    """
+    Server-Sent Events stream of real-time broker updates for the
+    current user. Frontend uses EventSource('/api/broker/stream').
+
+    Events emitted:
+      event: open       (one-shot, on connection)
+      event: account    {cash, buying_power, equity, ...}
+      event: position   {symbol, qty, market_value, unrealized_pl, ...}
+      event: order      {broker_order_id, symbol, status, filled_qty, ...}
+      event: quote      {symbol, price, change, change_pct, ...}
+      event: error      {message}
+
+    Plus ":ping" comment lines every ~15s to detect dead clients.
+    """
+    import asyncio
+    import json as _json
+    from queue import Empty
+    from brokers.realtime_state import state
+
+    user_scope = _scope_id(user, x_device_id)
+    _setup_broker_context(user, x_device_id)
+
+    # 1. Start push connection if user has a tiger binding (lazy)
+    has_push = _ensure_tiger_push_started(user_scope)
+
+    # 2. Populate initial state from REST so UI has data before first push
+    if has_push:
+        await asyncio.to_thread(_populate_initial_state, user_scope)
+
+    # 3. Subscribe to state events
+    queue = state.subscribe(user_scope)
+
+    async def event_generator():
+        try:
+            # Initial 'open' so the client knows the stream is alive
+            yield (
+                "event: open\n"
+                f"data: {_json.dumps({'has_push': has_push, 'user_scope': user_scope})}\n\n"
+            )
+
+            ping_interval = 15.0
+            last_ping = asyncio.get_event_loop().time()
+
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    event_type, payload = await asyncio.to_thread(
+                        queue.get, True, 1.0,
+                    )
+                    yield (
+                        f"event: {event_type}\n"
+                        f"data: {_json.dumps(payload, default=str)}\n\n"
+                    )
+                except Empty:
+                    now = asyncio.get_event_loop().time()
+                    if now - last_ping >= ping_interval:
+                        yield ": ping\n\n"
+                        last_ping = now
+        finally:
+            state.unsubscribe(user_scope, queue)
+            _schedule_push_stop_if_idle(user_scope)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",  # disable nginx buffering
+        },
+    )
 
 
 # ════════════════════════════════════════════════════════════
