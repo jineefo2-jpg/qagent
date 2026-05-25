@@ -53,7 +53,7 @@ one MUST stop execution and surface a clear error.
   - Explicit POST to a separate endpoint
     `/api/broker/bindings/{id}/live-orders`
   - Confirmation acknowledgement in the request body
-    (`acknowledge: "I understand this will use real money"`)
+    (`acknowledge: "我确认开启下单"`)
 - The LLM has no tool that can set this flag. Tools resolve adapters
   via `BrokerRegistry`; setting the flag is a UI / API surface, not a
   tool surface.

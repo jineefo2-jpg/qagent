@@ -3595,6 +3595,8 @@ def _is_request_authenticated() -> bool:
 TRADING_TOOLS = {
     "broker_account", "place_order_intent", "cancel_order",
     "get_user_profile", "update_user_profile", "record_memory",
+    # 只读但用 Tiger 凭证 + 用户绑定,登录后可用
+    "search_symbol_options",
 }
 
 
@@ -3768,6 +3770,104 @@ def cancel_order(broker_order_id: str) -> dict:
 
 
 # ════════════════════════════════════════════════════════════
+# 行情/期权搜索工具 (X8) — Tiger QuoteClient 只读封装
+# 不下单 / 不修改状态。需要登录 + Tiger 绑定。
+# ════════════════════════════════════════════════════════════
+
+def search_symbol_options(query: str,
+                          include_chain: bool = False,
+                          max_results: int = 5) -> dict:
+    """
+    模糊搜索股票 + 当前价 + (可选) 期权链摘要。只读、不下单。
+    """
+    user_ns = _get_request_device_id()
+    if not user_ns or not user_ns.startswith("u:"):
+        return {"success": False, "error_type": "auth_required",
+                "error": "行情搜索仅登录用户可用"}
+
+    try:
+        from brokers.credentials_store import store
+        from brokers.tiger_quote import get_quote_client
+    except Exception as e:
+        return _broker_unavailable_response(f"broker 模块未就绪: {e}")
+
+    bindings = [b for b in store.list_user_bindings(user_ns)
+                if b.broker_type == "tiger"]
+    if not bindings:
+        return {"success": False, "error_type": "no_tiger_binding",
+                "error": "请先在 /brokers 页面绑定老虎账户后再使用搜索",
+                "hint": "搜索 + 期权链数据来自老虎,目前未支持其他数据源"}
+
+    binding = bindings[0]
+    creds = store.load(user_ns, "tiger", binding.label, actor="system")
+    if creds is None:
+        return {"success": False, "error_type": "creds_load_failed",
+                "error": "老虎凭证读取失败,请到 /brokers 重新绑定"}
+
+    qc = get_quote_client(user_ns, creds)
+    q = (query or "").strip()
+    if not q:
+        return {"success": False, "error": "query 不能为空"}
+
+    try:
+        matches = qc.search_symbols(q, market="US", limit=max(min(max_results, 10), 1))
+    except Exception as e:
+        return {"success": False, "error_type": "search_failed", "error": str(e)}
+
+    if not matches:
+        return {"success": True, "query": q, "matches": [],
+                "hint": "无匹配。试试更短/更准确的关键词。"}
+
+    # 头号匹配 → 当前价 + 期权到期日 + (可选) 精简期权链
+    top = matches[0]
+    sym = top["symbol"]
+    try:
+        brief = qc.get_brief(sym)
+    except Exception:
+        brief = {"symbol": sym, "available": False}
+
+    expiries: list = []
+    try:
+        expiries = qc.get_option_expirations(sym)
+    except Exception:
+        expiries = []
+
+    chain: list = []
+    chain_note = None
+    if include_chain and expiries:
+        nearest = expiries[0]
+        try:
+            full = qc.get_option_chain(sym, nearest["date"])
+        except Exception:
+            full = []
+        atm = brief.get("latest_price") if isinstance(brief, dict) else None
+        if atm and full:
+            # 按距 ATM 排序取最近 11 档,再按 strike 升序输出,控制 LLM 上下文
+            picked = sorted(full, key=lambda r: abs((r.get("strike") or 0) - atm))[:11]
+            chain = sorted(picked, key=lambda r: r.get("strike") or 0)
+            chain_note = f"已按 ATM={atm} ± 截取 {len(chain)} 档,完整链可用 expiry={nearest['date']} 调 /api/broker/symbols/option-chain"
+        else:
+            chain = full[:20]
+            chain_note = f"已截取前 20 行,完整链调 /api/broker/symbols/option-chain"
+
+    return {
+        "success": True,
+        "query": q,
+        "matches": matches,
+        "top_match": {
+            "symbol": sym,
+            "name": top.get("name", ""),
+            "brief": brief,
+            "option_expiries": [e["date"] for e in expiries[:10]],
+            "option_chain": chain if include_chain else None,
+            "option_chain_note": chain_note,
+        },
+        "data_source": "老虎证券 实时行情",
+        "disclaimer": "只读行情。要下单仍需走 place_order_intent → 用户在 UI 确认。",
+    }
+
+
+# ════════════════════════════════════════════════════════════
 # 长记忆工具（Layer 1: 结构化档案）
 #   - get_user_profile:    读取当前用户档案
 #   - update_user_profile: 更新指定字段（增量）
@@ -3876,6 +3976,8 @@ TOOL_REGISTRY = {
     "broker_account":       broker_account,
     "place_order_intent":   place_order_intent,
     "cancel_order":         cancel_order,
+    # ── 行情/期权搜索（老虎只读）──
+    "search_symbol_options": search_symbol_options,
     # ── 长记忆工具 ──
     "get_user_profile":     get_user_profile,
     "update_user_profile":  update_user_profile,
@@ -4395,6 +4497,46 @@ action 取值：
                 },
             },
             "required": ["broker_order_id"],
+        }
+    },
+
+    # ════════════════════════════════════════════════════════════
+    # 行情/期权搜索 (X8) — 只读,通过老虎 QuoteClient
+    # 适合:用户只给了名字 / 不确定 ticker,或者要看某只股票的期权链概览
+    # ════════════════════════════════════════════════════════════
+    {
+        "name": "search_symbol_options",
+        "description": """模糊搜索股票 + 返回实时行情 + 期权到期日 (+ 可选精简期权链)。
+只读、不下单。数据来源:老虎证券 (需用户已绑定 Tiger 账户)。
+
+使用场景:
+  - 用户用公司名而非 ticker 提问("苹果"、"特斯拉"、"英伟达")
+  - 想看某标的的期权概况(到期日、ATM 附近期权链)
+  - 在调 black_scholes / implied_volatility 之前先确认 ticker 和现价
+
+include_chain=true 时只返回 ATM ± 5 档,避免上下文爆炸;
+若需完整期权链,提示用户在 UI 侧栏(🔍 行情)查看,或前端调 /api/broker/symbols/option-chain。
+
+注意:这是只读工具,不能用它下单。下单仍需 place_order_intent + 用户 UI 确认。""",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "搜索关键词,可以是 ticker (AAPL) 或公司名 (Apple)",
+                },
+                "include_chain": {
+                    "type": "boolean",
+                    "description": "是否返回最近到期日的精简期权链 (ATM ± 5 档),默认 false",
+                    "default": False,
+                },
+                "max_results": {
+                    "type": "integer",
+                    "description": "匹配列表上限,1-10,默认 5",
+                    "default": 5,
+                },
+            },
+            "required": ["query"],
         }
     },
 

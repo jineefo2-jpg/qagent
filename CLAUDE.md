@@ -145,7 +145,7 @@ A live (real-money) order requires **all five** layers below to be true. Failing
 1. `binding.env = 'live'` — user picked "live" explicitly at bind time.
 2. `binding.live_orders_enabled = 1` — separate POST to
    `/api/broker/bindings/{id}/live-orders` with an explicit
-   `acknowledge: "I understand this will use real money"` payload.
+   `acknowledge: "我确认开启下单"` payload.
 3. `risk_gate` checks (single-position cap / daily order cap /
    market-order block / whitelist) — unchanged from paper.
 4. UI two-phase confirm with a RED "⚠️ 实盘 - 真金白银" banner on the

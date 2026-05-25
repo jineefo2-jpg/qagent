@@ -140,7 +140,7 @@ class TigerPushClientWrapper:
             return self._connected
 
     def subscribe_quotes(self, symbols: List[str]) -> None:
-        """Subscribe to real-time quote ticks for the given symbols.
+        """Subscribe to real-time quote ticks for the given stock symbols.
         Safe to call before connect completes; tigeropen queues it."""
         with self._lock:
             client = self._client
@@ -150,6 +150,32 @@ class TigerPushClientWrapper:
             client.subscribe_quote(list(symbols))
         except Exception:
             log.warning("tiger_push: subscribe_quote failed", exc_info=True)
+
+    def unsubscribe_quotes(self, symbols: Optional[List[str]] = None) -> None:
+        """Drop stock-quote subscriptions. None = drop all."""
+        with self._lock:
+            client = self._client
+        if client is None:
+            return
+        try:
+            client.unsubscribe_quote(symbols=list(symbols) if symbols else None)
+        except Exception:
+            log.warning("tiger_push: unsubscribe_quote failed", exc_info=True)
+
+    def subscribe_options(self, identifiers: List[str]) -> None:
+        """
+        Subscribe to real-time option ticks. Tiger routes option quotes
+        through the same `quote_changed` callback as stocks, just with the
+        option identifier (OSI format) as the symbol field.
+        """
+        with self._lock:
+            client = self._client
+        if client is None or not identifiers:
+            return
+        try:
+            client.subscribe_option(list(identifiers))
+        except Exception:
+            log.warning("tiger_push: subscribe_option failed", exc_info=True)
 
     # ── connection lifecycle callbacks ──────────────────────
 
@@ -319,6 +345,12 @@ class TigerPushHub:
             wrapper = self._clients.get(user_scope)
         if wrapper is not None:
             wrapper.subscribe_quotes(symbols)
+
+    def subscribe_options(self, user_scope: str, identifiers: List[str]) -> None:
+        with self._lock:
+            wrapper = self._clients.get(user_scope)
+        if wrapper is not None:
+            wrapper.subscribe_options(identifiers)
 
     def get(self, user_scope: str) -> Optional[TigerPushClientWrapper]:
         with self._lock:

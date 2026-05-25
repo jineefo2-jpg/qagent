@@ -596,10 +596,10 @@ async function loadBindings() {
       const turningOn = btn.dataset.on === '0';
       let ack = '';
       if (turningOn) {
-        const phrase = 'I understand this will use real money';
+        const phrase = '我确认开启下单';
         const typed = prompt(
           '🚨 启用实盘下单(LLM 将能用真金白银下单)\n\n' +
-          '为确认你完全理解风险,请把下面这句英文 逐字粘贴 进输入框:\n\n' +
+          '为确认你完全理解风险,请把下面这句话 逐字粘贴 进输入框:\n\n' +
           phrase + '\n\n' +
           '取消则不启用。'
         );

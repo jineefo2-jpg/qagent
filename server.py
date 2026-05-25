@@ -1516,11 +1516,11 @@ def api_set_live_orders(binding_id: int,
     from brokers.credentials_store import store, CredentialsStoreError
 
     user_scope = _scope_id(user, x_device_id)
-    required_ack = "I understand this will use real money"
+    required_ack = "我确认开启下单"
     if body.enabled and (body.acknowledge or "").strip() != required_ack:
         raise HTTPException(
             400,
-            f"To enable live orders, set acknowledge='{required_ack}' in the request body.",
+            f"启用实盘下单需在请求体里设置 acknowledge='{required_ack}'。",
         )
 
     try:
@@ -1564,6 +1564,212 @@ def api_delete_binding(binding_id: int,
         pass
 
     return {"ok": True}
+
+
+# ════════════════════════════════════════════════════════════
+# Symbol search / option chain (X8) — Tiger QuoteClient endpoints
+# ════════════════════════════════════════════════════════════
+
+def _require_tiger_quote(user_scope: str):
+    """
+    Resolve a TigerQuoteClient for the current user. 400 if no tiger
+    binding — search/option features are Tiger-only by design.
+    """
+    from brokers.credentials_store import store
+    from brokers.tiger_quote import get_quote_client
+
+    bindings = [
+        b for b in store.list_user_bindings(user_scope)
+        if b.broker_type == "tiger"
+    ]
+    if not bindings:
+        raise HTTPException(
+            400,
+            "未绑定老虎账户。请先在 /brokers 页面绑定 Tiger,才能使用行情/期权搜索。",
+        )
+    binding = bindings[0]
+    creds = store.load(user_scope, "tiger", binding.label, actor="system")
+    if creds is None:
+        raise HTTPException(500, "Tiger 凭证读取失败")
+    return get_quote_client(user_scope, creds)
+
+
+def _friendly_tiger_error(exc: Exception, what: str) -> HTTPException:
+    """
+    把 Tiger SDK 抛出来的英文异常翻成对用户友好的中文 HTTP error。
+    最常见的两类:
+      - 权限不足 (没开 US 期权 / 实时股票行情包) → 403
+      - 网络/认证错误 → 502
+    """
+    msg = str(exc)
+    low = msg.lower()
+    if "permission" in low or "not have permission" in low or "permission denied" in low:
+        # 进一步区分股票 vs 期权 vs 港股
+        if "opt" in low or "option" in low:
+            hint = (
+                f"老虎账户暂无【美股期权(OPRA)实时行情】权限,无法查询{what}。"
+                "请到老虎 App / 官网『行情』栏开通 US OPT 行情包后重试。"
+            )
+        elif "hk" in low:
+            hint = f"老虎账户暂无【港股实时行情】权限,无法查询{what}。"
+        elif "us" in low:
+            hint = (
+                f"老虎账户暂无【美股实时行情】权限,无法查询{what}。"
+                "可在老虎 App 开通基础行情包(部分用户首单免费)。"
+            )
+        else:
+            hint = f"老虎账户行情权限不足,无法查询{what}。原始错误: {msg}"
+        return HTTPException(403, hint)
+    if "timeout" in low or "network" in low or "connect" in low:
+        return HTTPException(504, f"老虎接口连接超时: {msg}")
+    if "sign" in low or "auth" in low or "invalid token" in low:
+        return HTTPException(401, f"老虎凭证认证失败,请到 /brokers 重新绑定。原始错误: {msg}")
+    return HTTPException(502, f"查询{what}失败: {msg}")
+
+
+@app.get("/api/broker/symbols/search")
+def api_symbols_search(q: str,
+                       market: str = "US",
+                       limit: int = 20,
+                       x_device_id: Optional[str] = Header(None),
+                       user: User = Depends(require_user)):
+    """模糊搜索股票代码/名称。返回 [{symbol, name, market}, ...]"""
+    if not q or not q.strip():
+        return {"results": []}
+    user_scope = _scope_id(user, x_device_id)
+    qc = _require_tiger_quote(user_scope)
+    try:
+        results = qc.search_symbols(q, market=market, limit=min(max(limit, 1), 50))
+    except Exception as e:
+        raise HTTPException(502, f"搜索失败: {e}")
+    return {"query": q, "market": market.upper(), "results": results}
+
+
+@app.get("/api/broker/symbols/brief")
+def api_symbol_brief(symbol: str,
+                     x_device_id: Optional[str] = Header(None),
+                     user: User = Depends(require_user)):
+    """单只股票当前行情快照。"""
+    if not symbol or not symbol.strip():
+        raise HTTPException(400, "symbol 不能为空")
+    user_scope = _scope_id(user, x_device_id)
+    qc = _require_tiger_quote(user_scope)
+    try:
+        brief = qc.get_brief(symbol)
+    except Exception as e:
+        raise _friendly_tiger_error(e, "股票行情")
+    return brief
+
+
+def _is_permission_error(exc: Exception) -> bool:
+    """判定一个异常是不是『Tiger 行情权限不足』,用于决定要不要 fallback。"""
+    low = str(exc).lower()
+    return "permission" in low or "permission denied" in low or "code=4" in low
+
+
+@app.get("/api/broker/symbols/option-expiries")
+def api_option_expiries(symbol: str,
+                        x_device_id: Optional[str] = Header(None),
+                        user: User = Depends(require_user)):
+    """该 symbol 的可用期权到期日列表。Tiger 权限不足时回退到 yfinance。"""
+    if not symbol or not symbol.strip():
+        raise HTTPException(400, "symbol 不能为空")
+    user_scope = _scope_id(user, x_device_id)
+    qc = _require_tiger_quote(user_scope)
+    source = "tiger"
+    try:
+        expiries = qc.get_option_expirations(symbol)
+    except Exception as e:
+        if not _is_permission_error(e):
+            raise _friendly_tiger_error(e, "期权到期日")
+        # 权限不足 → yfinance
+        from brokers.quote_fallback import yf_get_expiries, yf_available
+        if not yf_available():
+            raise _friendly_tiger_error(e, "期权到期日")
+        expiries = yf_get_expiries(symbol)
+        source = "yahoo_delay"
+    return {"symbol": symbol.upper(), "expiries": expiries, "source": source}
+
+
+@app.get("/api/broker/symbols/option-chain")
+def api_option_chain(symbol: str,
+                     expiry: str,
+                     x_device_id: Optional[str] = Header(None),
+                     user: User = Depends(require_user)):
+    """
+    指定到期日的期权链。Tiger 权限不足时自动 fallback 到 yfinance (~15min 延迟)。
+    expiry 接受 'YYYY-MM-DD' 或毫秒时间戳字符串。
+    """
+    if not symbol or not symbol.strip() or not expiry:
+        raise HTTPException(400, "symbol 与 expiry 都必填")
+    user_scope = _scope_id(user, x_device_id)
+    qc = _require_tiger_quote(user_scope)
+    # 数字串当成时间戳传给 SDK,日期串原样传
+    expiry_arg: object = expiry
+    if expiry.isdigit():
+        try:
+            expiry_arg = int(expiry)
+        except ValueError:
+            pass
+
+    source = "tiger"
+    try:
+        chain = qc.get_option_chain(symbol, expiry_arg)
+    except Exception as e:
+        if not _is_permission_error(e):
+            raise _friendly_tiger_error(e, "期权链")
+        # 权限不足 → yfinance (要求 expiry 是日期格式)
+        from brokers.quote_fallback import yf_get_chain, yf_available
+        if not yf_available() or not isinstance(expiry, str) or expiry.isdigit():
+            raise _friendly_tiger_error(e, "期权链")
+        chain = yf_get_chain(symbol, expiry)
+        source = "yahoo_delay"
+        if not chain:
+            raise HTTPException(
+                502,
+                f"老虎无期权权限,且 Yahoo 也没拿到 {symbol} {expiry} 的期权链。",
+            )
+
+    return {
+        "symbol": symbol.upper(),
+        "expiry": expiry,
+        "chain": chain,
+        "source": source,
+    }
+
+
+class _QuoteSubscribeRequest(BaseModel):
+    stocks: Optional[list] = None         # ["AAPL", "TSLA"]
+    options: Optional[list] = None        # ["AAPL  240620C00220000", ...]
+
+
+@app.post("/api/broker/symbols/subscribe")
+def api_symbols_subscribe(body: _QuoteSubscribeRequest,
+                          x_device_id: Optional[str] = Header(None),
+                          user: User = Depends(require_user)):
+    """
+    打开 Tiger push 并订阅指定 stock/option 行情。后续 tick 通过
+    /api/broker/stream 的 'quote' SSE 事件推给前端。
+    """
+    user_scope = _scope_id(user, x_device_id)
+    # 先确保用户有 tiger binding (否则 push 也起不来)
+    _require_tiger_quote(user_scope)
+
+    started = _ensure_tiger_push_started(user_scope)
+    if not started:
+        raise HTTPException(502, "Tiger 推送连接启动失败")
+
+    from brokers.tiger_push import hub
+    stocks = [s for s in (body.stocks or []) if isinstance(s, str) and s.strip()]
+    options = [o for o in (body.options or []) if isinstance(o, str) and o.strip()]
+    if stocks:
+        hub.subscribe_quotes(user_scope, stocks)
+    if options:
+        hub.subscribe_options(user_scope, options)
+    return {
+        "ok": True,
+        "subscribed": {"stocks": stocks, "options": options},
+    }
 
 
 # ════════════════════════════════════════════════════════════

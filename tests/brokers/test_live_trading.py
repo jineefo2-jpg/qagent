@@ -106,7 +106,7 @@ def test_set_live_orders_enabled_happy_path(store_env):
 
     ok = store.set_live_orders_enabled(
         binding_id, "u:alice", True, actor="user",
-        ack="I understand this will use real money",
+        ack="我确认开启下单",
     )
     assert ok is True
     assert store.is_live_orders_enabled(binding_id, "u:alice") is True
@@ -146,7 +146,7 @@ def test_set_live_orders_enabled_REFUSES_llm_actor(store_env):
     with pytest.raises(CredentialsStoreError, match="MUST NOT be flipped by the LLM"):
         store.set_live_orders_enabled(
             binding_id, "u:alice", True, actor="llm",
-            ack="I understand this will use real money",
+            ack="我确认开启下单",
         )
     # Flag stays 0
     assert store.is_live_orders_enabled(binding_id, "u:alice") is False
@@ -159,7 +159,7 @@ def test_set_live_orders_writes_audit_with_ack(store_env):
     binding_id = _bind_tiger("u:alice", "live-main", "live", store)
     store.set_live_orders_enabled(
         binding_id, "u:alice", True, actor="user",
-        ack="I understand this will use real money",
+        ack="我确认开启下单",
     )
 
     conn = _db.init()
@@ -175,7 +175,7 @@ def test_set_live_orders_writes_audit_with_ack(store_env):
     assert "live_orders_enabled = 1" in detail
     # ack phrase is recorded (truncated to 80) so forensic logs prove
     # the user explicitly opted in
-    assert "real money" in detail
+    assert "我确认开启下单" in detail
 
 
 def test_set_live_orders_failure_audits(store_env):
@@ -242,7 +242,7 @@ def test_live_block_allows_enabled_live_binding(store_env):
     binding_id = _bind_tiger("u:alice", "live-main", "live", store)
     store.set_live_orders_enabled(
         binding_id, "u:alice", True, actor="user",
-        ack="I understand this will use real money",
+        ack="我确认开启下单",
     )
 
     broker = MagicMock()
