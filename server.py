@@ -1738,7 +1738,7 @@ async def broker_stream(
 if __name__ == "__main__":
     import uvicorn
     _host = _os.getenv("HOST", "0.0.0.0")
-    _port = int(_os.getenv("PORT", "8001"))
+    _port = int(_os.getenv("PORT", "5000"))
     print("🚀 QuantAgent Web Server")
     print(f"   访问: http://localhost:{_port}")
     print(f"   API:  http://localhost:{_port}/docs")
