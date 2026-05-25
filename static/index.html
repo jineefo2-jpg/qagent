@@ -1832,11 +1832,71 @@ async function confirmOrder() {
   }
 }
 
-// ────────── 持仓/订单抽屉 ──────────
+// ────────── BrokerStream(SSE 实时推送) ──────────
+//
+// 后端 /api/broker/stream 用 SSE 推:account / position / order / quote 事件。
+// 这里只负责"事件到来 → 触发已有 refreshDrawer"。refreshDrawer 走 REST 端点,
+// 但 TigerAdapter 有 30s TTL 缓存,所以 1 分钟内最多打 Tiger 2 轮,不会撞限速。
+// EventSource 自带断线重连,我们不用管。
+var BrokerStream = {
+  es: null,
+  hasPush: null,
+  _debounceTimer: null,
+
+  start: function () {
+    if (this.es) return;
+    var self = this;
+    try {
+      this.es = new EventSource('/api/broker/stream');
+    } catch (e) {
+      this.es = null;
+      return;
+    }
+    this.es.addEventListener('open', function (ev) {
+      try {
+        var d = JSON.parse(ev.data || '{}');
+        self.hasPush = !!d.has_push;
+      } catch (_) {}
+    });
+    var onAnyChange = function () {
+      // 抽屉关着 / 标签页隐藏 → 不刷新
+      var drawer = document.getElementById('drawer');
+      if (!drawer || !drawer.classList.contains('open')) return;
+      if (document.visibilityState === 'hidden') return;
+      // 把短时间内多个事件合并成一次刷新(quote 高频会重复触发)
+      if (self._debounceTimer) clearTimeout(self._debounceTimer);
+      self._debounceTimer = setTimeout(function () {
+        self._debounceTimer = null;
+        if (typeof refreshDrawer === 'function') {
+          refreshDrawer(/*silent=*/true);
+        }
+      }, 300);
+    };
+    ['account', 'position', 'order', 'quote'].forEach(function (t) {
+      self.es.addEventListener(t, onAnyChange);
+    });
+    this.es.onerror = function () {
+      // EventSource 内置重连,不主动 close;只在 stop 时彻底关
+    };
+  },
+
+  stop: function () {
+    if (this.es) {
+      try { this.es.close(); } catch (_) {}
+      this.es = null;
+    }
+    if (this._debounceTimer) {
+      clearTimeout(this._debounceTimer);
+      this._debounceTimer = null;
+    }
+  },
+};
+
 
 var _drawerTab = 'positions';
 var _drawerPollTimer = null;
-var DRAWER_POLL_MS = 5000;   // 持仓 tab 每 5 秒自动刷新
+// 真实更新走 BrokerStream(SSE),轮询只做 fallback,所以拉长到 30s。
+var DRAWER_POLL_MS = 30000;
 
 function _stopDrawerPoll() {
   if (_drawerPollTimer) {
@@ -1868,12 +1928,14 @@ function openDrawer() {
   document.getElementById('drawerMask').classList.add('show');
   refreshDrawer();
   _startDrawerPoll();
+  BrokerStream.start();    // SSE 实时推送(成交/资金变动会立即触发 refreshDrawer)
 }
 
 function closeDrawer() {
   document.getElementById('drawer').classList.remove('open');
   document.getElementById('drawerMask').classList.remove('show');
   _stopDrawerPoll();
+  BrokerStream.stop();
 }
 
 function switchDrawerTab(name) {
