@@ -801,6 +801,15 @@ def confirm_order(body: ConfirmOrderRequest,
     if not broker.is_configured():
         raise HTTPException(400, "Alpaca 凭证未配置")
 
+    # ADR-0002 Layer 5: server-side recheck. If the user's default binding
+    # for this broker_type is `env='live'` AND `live_orders_enabled=0`, the
+    # binding is view-only — refuse the order. Stash the intent back so the
+    # user can re-attempt after enabling live trading in /brokers.
+    _live_block = _live_order_blocked(device_id, broker)
+    if _live_block is not None:
+        save_intent(device_id, intent)  # let user retry after enabling
+        raise HTTPException(422, _live_block)
+
     # 取当前账户
     try:
         acc = broker.get_account()
@@ -1326,9 +1335,11 @@ def api_create_binding(body: BrokerBindRequest,
 
     if body.env not in ("paper", "live"):
         raise HTTPException(400, "env must be 'paper' or 'live'")
-    # CLAUDE.md trading-safety: live is forbidden until a future ADR.
-    if body.env == "live":
-        raise HTTPException(400, "live trading is currently disabled (see ADR-0001)")
+    # ADR-0002: env='live' is now allowed at bind time, but the binding
+    # starts with live_orders_enabled=0 (view-only). Order placement is
+    # gated by a separate POST /api/broker/bindings/{id}/live-orders.
+    # Alpaca live remains separately forbidden (its base_url is a different
+    # safety surface — handled in AlpacaCredentials default).
 
     # 2. Cheap pre-flight: validate creds SHAPE only — no network call.
     # The full SDK ping has moved to step 5 below, so we only ever create
@@ -1412,6 +1423,97 @@ def api_list_bindings(x_device_id: Optional[str] = Header(None),
         }
         for r in rows
     ]
+
+
+def _live_order_blocked(user_scope: str, broker) -> Optional[str]:
+    """
+    ADR-0002 Layer 5: check the binding being used for live-order safety.
+
+    Returns a user-facing error message (string) if the order MUST be
+    blocked, or None if it may proceed.
+
+    A binding is blocked if env='live' AND live_orders_enabled=0.
+    Mock and paper bindings always return None.
+    """
+    # broker.name is like 'tiger-paper' / 'alpaca-paper' / 'mock-paper'.
+    # Map to the broker_type prefix used by credentials_store.
+    name = (getattr(broker, "name", "") or "").lower()
+    if name.startswith("mock"):
+        return None
+    broker_type = "tiger" if name.startswith("tiger") else (
+        "alpaca" if name.startswith("alpaca") else None
+    )
+    if broker_type is None:
+        return None  # unknown broker; let downstream handle
+
+    from brokers.credentials_store import store
+    bindings = [
+        b for b in store.list_user_bindings(user_scope)
+        if b.broker_type == broker_type
+    ]
+    if not bindings:
+        return None  # no binding to check (registry will error its own way)
+    binding = bindings[0]  # default binding (matches _registry.get(label=None))
+    if binding.env != "live":
+        return None
+    if binding.live_orders_enabled:
+        return None
+    return (
+        f"⚠️ 这是 {broker_type} 实盘账户(env=live),但 live_orders_enabled=0,"
+        f"处于只读模式。在 /brokers 页面打开\"启用实盘下单\"开关后再下单。"
+        f"订单意图已保留,可重试。"
+    )
+
+
+class LiveOrdersToggleRequest(BaseModel):
+    enabled: bool
+    # ADR-0002: enabling live orders requires an explicit acknowledgement
+    # string. Front-end checks the user typed the magic phrase before
+    # submitting; server records it in the audit row for forensic trail.
+    acknowledge: Optional[str] = None
+
+
+@app.post("/api/broker/bindings/{binding_id}/live-orders")
+def api_set_live_orders(binding_id: int,
+                        body: LiveOrdersToggleRequest,
+                        x_device_id: Optional[str] = Header(None),
+                        user: User = Depends(require_user)):
+    """
+    Flip the live_orders_enabled flag for one of the current user's
+    bindings (ADR-0002 Layer 2). Refuses if:
+      - binding doesn't exist or doesn't belong to the user (404)
+      - binding.env != 'live' (400 — flag only applies to live bindings)
+      - enabling without the magic ack phrase (400)
+    """
+    from brokers.credentials_store import store, CredentialsStoreError
+
+    user_scope = _scope_id(user, x_device_id)
+    required_ack = "I understand this will use real money"
+    if body.enabled and (body.acknowledge or "").strip() != required_ack:
+        raise HTTPException(
+            400,
+            f"To enable live orders, set acknowledge='{required_ack}' in the request body.",
+        )
+
+    try:
+        ok = store.set_live_orders_enabled(
+            binding_id=binding_id,
+            user_id=user_scope,
+            enabled=body.enabled,
+            actor="user",
+            ack=body.acknowledge or "",
+        )
+    except CredentialsStoreError as e:
+        raise HTTPException(400, str(e))
+
+    if not ok:
+        raise HTTPException(
+            404,
+            "binding not found, or it's not a live binding (paper bindings "
+            "do not need this flag)",
+        )
+
+    return {"binding_id": binding_id, "live_orders_enabled": body.enabled}
 
 
 @app.delete("/api/broker/bindings/{binding_id}")
