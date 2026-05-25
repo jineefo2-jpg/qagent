@@ -13,6 +13,11 @@ CREATE TABLE IF NOT EXISTS broker_bindings (
     kek_version          INTEGER NOT NULL,
     created_at           INTEGER NOT NULL,
     last_used_at         INTEGER,
+    -- ADR-0002: per-binding opt-in for live order placement. Default 0 means
+    -- the binding is READ-ONLY even if env='live'. The flag is flipped via
+    -- POST /api/broker/bindings/{id}/live-orders, never by any LLM tool path.
+    live_orders_enabled  INTEGER NOT NULL DEFAULT 0
+                              CHECK (live_orders_enabled IN (0,1)),
     UNIQUE(user_id, broker_type, label)
 );
 

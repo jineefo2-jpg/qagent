@@ -65,7 +65,30 @@ def _open(path: Path) -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys=ON")
     with open(_SCHEMA_PATH, "r", encoding="utf-8") as f:
         conn.executescript(f.read())
+    _apply_migrations(conn)
     return conn
+
+
+def _apply_migrations(conn: sqlite3.Connection) -> None:
+    """
+    Forward-only schema migrations for existing databases. New columns
+    declared in _schema.sql don't land via CREATE TABLE IF NOT EXISTS,
+    so we ALTER TABLE ADD COLUMN here, idempotently.
+
+    Each migration MUST be:
+      - Idempotent (safe to run on a fresh DB AND an already-migrated DB)
+      - Forward-compatible (never drops or renames existing data)
+      - Backed by an ADR if it changes a safety-relevant column
+    """
+    cols = {
+        row[1] for row in conn.execute("PRAGMA table_info(broker_bindings)")
+    }
+    # ADR-0002: live_orders_enabled flag
+    if "live_orders_enabled" not in cols:
+        conn.execute(
+            "ALTER TABLE broker_bindings "
+            "ADD COLUMN live_orders_enabled INTEGER NOT NULL DEFAULT 0"
+        )
 
 
 def close_default() -> None:

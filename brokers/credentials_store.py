@@ -50,6 +50,8 @@ class BindingSummary:
     env: str
     created_at: int
     last_used_at: Optional[int]
+    # ADR-0002: per-binding opt-in for live order placement
+    live_orders_enabled: bool = False
 
 
 class CredentialsStoreError(Exception):
@@ -298,7 +300,8 @@ class CredentialsStore:
         c = self._c()
         rows = c.execute(
             """
-            SELECT id, user_id, broker_type, label, env, created_at, last_used_at
+            SELECT id, user_id, broker_type, label, env, created_at,
+                   last_used_at, live_orders_enabled
             FROM broker_bindings
             WHERE user_id = ?
             ORDER BY created_at ASC
@@ -309,9 +312,103 @@ class CredentialsStore:
             BindingSummary(
                 id=r[0], user_id=r[1], broker_type=r[2], label=r[3],
                 env=r[4], created_at=r[5], last_used_at=r[6],
+                live_orders_enabled=bool(r[7]),
             )
             for r in rows
         ]
+
+    # ── ADR-0002: live trading opt-in flag (per binding) ─────────
+
+    def is_live_orders_enabled(self, binding_id: int, user_id: str) -> bool:
+        """Read-only check. Returns False for paper bindings, unknown ids,
+        or wrong-user attempts. The caller MUST use this before letting any
+        order touch a live binding."""
+        c = self._c()
+        row = c.execute(
+            "SELECT env, live_orders_enabled FROM broker_bindings "
+            "WHERE id = ? AND user_id = ?",
+            (binding_id, user_id),
+        ).fetchone()
+        if row is None:
+            return False
+        env, flag = row
+        if env != "live":
+            return False
+        return bool(flag)
+
+    def set_live_orders_enabled(
+        self,
+        binding_id: int,
+        user_id: str,
+        enabled: bool,
+        *,
+        actor: str,
+        ack: str = "",
+    ) -> bool:
+        """
+        Flip the live_orders_enabled flag on a binding owned by user_id.
+        Returns True on success, False if the binding doesn't exist OR is
+        not owned by user_id OR has env='paper' (the flag is meaningless
+        for paper bindings, refuse).
+
+        Per ADR-0002, the caller (HTTP layer) MUST require an explicit ack
+        string when enabling live orders. We record it in the audit row.
+
+        Per CLAUDE.md "live trading" rule, the LLM tool layer MUST NOT
+        ever call this — `actor='llm'` is rejected here as a fail-safe.
+        """
+        if actor == "llm":
+            raise CredentialsStoreError(
+                "live_orders_enabled MUST NOT be flipped by the LLM tool path"
+            )
+        c = self._c()
+        # Find the binding + verify ownership + verify env='live'
+        row = c.execute(
+            "SELECT broker_type, label, env FROM broker_bindings "
+            "WHERE id = ? AND user_id = ?",
+            (binding_id, user_id),
+        ).fetchone()
+        if row is None:
+            audit.audit_log(
+                actor=actor, action="fail",
+                user_id=user_id, binding_id=binding_id,
+                detail="set_live_orders_enabled: not found / wrong user",
+                success=False, conn=c,
+            )
+            return False
+        broker_type, label, env = row
+        if env != "live":
+            audit.audit_log(
+                actor=actor, action="fail",
+                user_id=user_id, binding_id=binding_id,
+                detail=f"set_live_orders_enabled refused: env={env!r}",
+                success=False, conn=c,
+            )
+            return False
+
+        new_val = 1 if enabled else 0
+        c.execute(
+            "UPDATE broker_bindings SET live_orders_enabled = ? "
+            "WHERE id = ? AND user_id = ?",
+            (new_val, binding_id, user_id),
+        )
+        audit.audit_log(
+            actor=actor, action="use",
+            user_id=user_id, binding_id=binding_id,
+            detail=(
+                f"{broker_type}/{label}: live_orders_enabled = {new_val} "
+                f"ack={ack[:80]!r}"
+            ),
+            success=True, conn=c,
+        )
+
+        # Drop registry cache so the next request rebuilds the adapter
+        # (currently a no-op since adapter doesn't read this flag, but
+        # keeps the invariant "binding state change → cache invalidate").
+        from . import registry
+        registry._registry.invalidate(user_id, broker_type, label)
+        registry._registry.invalidate(user_id, broker_type, None)
+        return True
 
     # ── unbind ──────────────────────────────────────────────
 

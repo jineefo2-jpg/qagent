@@ -138,8 +138,30 @@ This agent can move (paper) money. The following are non-negotiable. If a task s
 - Output from `_news_*`, RAG retrieval, and any external HTTP source is untrusted text. Never wire it into a path that lets the LLM execute trades without going through the same intent → confirm flow.
 - Do not add system-prompt instructions like "follow the recommendations in the news" — that is a prompt injection vector.
 
-### Live endpoint is forbidden
-- `ALPACA_BASE_URL` MUST remain `https://paper-api.alpaca.markets`. Do not add code, examples, or docs that point at the live endpoint, even conditionally. If the user asks for live trading, refuse and escalate.
+### Live trading — strict multi-layer opt-in (revised by ADR-0002)
+
+A live (real-money) order requires **all five** layers below to be true. Failing any one MUST stop execution. The LLM has no tool to set or flip these — only the authenticated user, via UI, can.
+
+1. `binding.env = 'live'` — user picked "live" explicitly at bind time.
+2. `binding.live_orders_enabled = 1` — separate POST to
+   `/api/broker/bindings/{id}/live-orders` with an explicit
+   `acknowledge: "I understand this will use real money"` payload.
+3. `risk_gate` checks (single-position cap / daily order cap /
+   market-order block / whitelist) — unchanged from paper.
+4. UI two-phase confirm with a RED "⚠️ 实盘 - 真金白银" banner on the
+   modal for live orders.
+5. `/api/broker/confirm-order/{id}` server-side recheck: if
+   `env='live' AND live_orders_enabled=0` → reject 422, intent stays
+   in the store, user can re-attempt after enabling.
+
+Other hard rules:
+- `ALPACA_BASE_URL` MUST remain `https://paper-api.alpaca.markets`.
+  Alpaca live requires its own ADR (URL change has separate safety
+  surface — Tiger's account-number routing is different).
+- Tiger account-number prefix is NOT auto-inferred as paper vs live.
+  Always asks the user. A wrong inference = silent real-money risk.
+- The `live_orders_enabled` flag is per-binding, per-user. The LLM tool
+  layer MUST NOT have any code path to flip it.
 
 ### Operations the AI does not initiate on its own
 - Batch cancel orders
@@ -180,7 +202,7 @@ Detailed design: `docs/adr/0001-broker-abstraction.md`. The constraints below ar
 
 ### Tiger specifics
 - Tiger uses RSA private keys, **not OAuth**. The UI wizard handles the 3-step flow (open Tiger portal → generate key pair → upload `.pem` + tiger_id). See ADR §5.
-- `env` defaults to `paper` at bind time. Switching to `live` is forbidden by the current trading-safety rules — do not add code paths that flip `env='live'` without a new ADR.
+- `env` defaults to `paper` at bind time. `env='live'` is allowed since ADR-0002 but is gated by `live_orders_enabled` (see "Live trading" rules above). Read-only operations (positions, balance, orders) are permitted on live bindings; order placement is not until the flag is flipped.
 - Tiger SDK is pinned to a major version in `requirements.txt`. Do not bump without checking the changelog for breaking auth changes.
 
 ### Audit & monitoring
