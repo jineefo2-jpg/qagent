@@ -1313,7 +1313,7 @@ def api_create_binding(body: BrokerBindRequest,
     can find this binding.
     """
     from brokers.credentials_store import store, build_credentials, CredentialsStoreError
-    from brokers.registry import _build_adapter
+    from brokers.registry import _registry, _build_adapter
     from brokers.base import BrokerError, redact_credentials
 
     user_scope = _scope_id(user, x_device_id)
@@ -1330,24 +1330,20 @@ def api_create_binding(body: BrokerBindRequest,
     if body.env == "live":
         raise HTTPException(400, "live trading is currently disabled (see ADR-0001)")
 
-    # 2. Test BEFORE persisting (defensive — no half-bound state)
+    # 2. Cheap pre-flight: validate creds SHAPE only — no network call.
+    # The full SDK ping has moved to step 5 below, so we only ever create
+    # ONE Tiger adapter per binding (avoids the double-allocation of
+    # tigeropen's lru_cached RSA state that triggers a malloc abort on
+    # macOS Python 3.9).
     try:
-        test_adapter = _build_adapter(creds)
+        shape_check = _build_adapter(creds)
     except BrokerError as e:
         raise HTTPException(400, redact_credentials(str(e)))
-
-    if not test_adapter.is_configured():
+    if not shape_check.is_configured():
         raise HTTPException(400, "missing required credential fields")
-
-    try:
-        if not test_adapter.ping():
-            raise HTTPException(
-                422, f"{body.broker_type} ping returned False (credentials rejected)"
-            )
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(422, f"binding test failed: {redact_credentials(str(e))}")
+    # Drop the throwaway adapter right away — it never touched the network
+    # so it holds no C-level state worth keeping.
+    del shape_check
 
     # 3. Persist (under the same user_scope the broker tool path will use)
     try:
@@ -1362,6 +1358,33 @@ def api_create_binding(body: BrokerBindRequest,
     except CredentialsStoreError as e:
         # UNIQUE constraint / validation failures map to 409
         raise HTTPException(409, str(e))
+
+    # 4. Drop any stale cached adapter for this key so step 5 builds fresh.
+    _registry.invalidate(user_scope, body.broker_type, body.label)
+    _registry.invalidate(user_scope, body.broker_type, None)
+
+    # 5. Test the binding via the PRODUCTION resolve path. The adapter built
+    # here is cached in the registry and reused by every subsequent request
+    # — exactly one adapter per binding for its lifetime, so tigeropen's
+    # internal crypto cache never sees a double-construct/double-destruct.
+    try:
+        adapter = _registry.get(user_scope, body.broker_type, body.label)
+        if not adapter.ping():
+            raise HTTPException(
+                422, f"{body.broker_type} ping returned False (credentials rejected)"
+            )
+    except HTTPException:
+        # Rollback the persisted binding so the user can fix + retry without
+        # hitting a UNIQUE-label collision.
+        store.unbind(binding_id, user_scope, actor="user")
+        _registry.invalidate(user_scope, body.broker_type, body.label)
+        _registry.invalidate(user_scope, body.broker_type, None)
+        raise
+    except Exception as e:
+        store.unbind(binding_id, user_scope, actor="user")
+        _registry.invalidate(user_scope, body.broker_type, body.label)
+        _registry.invalidate(user_scope, body.broker_type, None)
+        raise HTTPException(422, f"binding test failed: {redact_credentials(str(e))}")
 
     return {
         "id": binding_id,
