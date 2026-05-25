@@ -1444,6 +1444,10 @@ def api_list_bindings(x_device_id: Optional[str] = Header(None),
             "env": r.env,
             "created_at": r.created_at,
             "last_used_at": r.last_used_at,
+            # ADR-0002: front-end uses this to render the "已启用 · 点击关闭"
+            # vs "只读 · 点击启用实盘" toggle. The field was added to
+            # BindingSummary in commit A but the serializer here lagged.
+            "live_orders_enabled": r.live_orders_enabled,
         }
         for r in rows
     ]
@@ -1734,7 +1738,7 @@ async def broker_stream(
 if __name__ == "__main__":
     import uvicorn
     _host = _os.getenv("HOST", "0.0.0.0")
-    _port = int(_os.getenv("PORT", "5000"))
+    _port = int(_os.getenv("PORT", "8001"))
     print("🚀 QuantAgent Web Server")
     print(f"   访问: http://localhost:{_port}")
     print(f"   API:  http://localhost:{_port}/docs")
