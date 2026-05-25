@@ -1178,13 +1178,13 @@
         <h2>📊 QuantAgent 量化分析助手</h2>
         <p>多因子打分 · 期权定价 · 风险评估 · 财经搜索</p>
         <div class="trade-hint" id="tradeHint">
-          <div class="badge-line">🔒 登录后可使用模拟盘交易美股</div>
+          <div class="badge-line">🔒 登录后可下单(支持老虎证券 / Alpaca 等)</div>
           <div>
-            支持 SPY / QQQ / AAPL / NVDA / TSLA 等主流标的，
-            <button class="login-link" onclick="showLoginModal()">用 Google 或 GitHub 登录</button>
-            即可开始。
+            支持美股 / 港股 / 期权,
+            <button class="login-link" onclick="showLoginModal()">用 Google / GitHub / 邮箱登录</button>
+            ,登录后再去 <a href="/brokers" style="color:var(--primary);">绑定券商</a>。
           </div>
-          <span class="small">⚠️ 当前为 Alpaca Paper Trading（模拟盘），使用虚拟资金，不涉及真金白银</span>
+          <span class="small">⚠️ 当前所有交易功能默认为模拟环境(paper),不涉及真金白银</span>
         </div>
       </div>
     </div>
@@ -2501,30 +2501,95 @@ function showEmptyState() {
 function tradeHintHTML() {
   return `
     <div class="trade-hint" id="tradeHint">
-      <div class="badge-line">🔒 登录后可使用模拟盘交易美股</div>
+      <div class="badge-line">🔒 登录后可下单(支持老虎证券 / Alpaca 等)</div>
       <div>
-        支持 SPY / QQQ / AAPL / NVDA / TSLA 等主流标的，
-        <button class="login-link" onclick="showLoginModal()">用 Google 或 GitHub 登录</button>
-        即可开始。
+        支持美股 / 港股 / 期权,
+        <button class="login-link" onclick="showLoginModal()">用 Google / GitHub / 邮箱登录</button>
+        ,登录后再去 <a href="/brokers" style="color:var(--primary);">绑定券商</a>。
       </div>
-      <span class="small">⚠️ 当前为 Alpaca Paper Trading（模拟盘），使用虚拟资金，不涉及真金白银</span>
+      <span class="small">⚠️ 当前所有交易功能默认为模拟环境(paper),不涉及真金白银</span>
     </div>`;
 }
 
-// 根据登录态动态切换提示语
-function syncTradeHint() {
+// 根据登录态 + 实际绑定的券商动态切换提示语
+async function syncTradeHint() {
   var el = document.getElementById('tradeHint');
   if (!el) return;
-  if (CURRENT_USER) {
-    el.classList.add('logged-in');
-    var name = CURRENT_USER.name || CURRENT_USER.email || '同学';
-    el.innerHTML =
-      '<div class="badge-line">✅ 已登录，可在对话中下单美股模拟盘</div>'
-      + '<div>试试问：「帮我买 5 股 AAPL，限价高 1%」或「查我现在的持仓」</div>'
-      + '<span class="small">⚠️ 当前为 Alpaca Paper Trading（模拟盘），不涉及真金白银</span>';
-  } else {
+  if (!CURRENT_USER) {
     el.classList.remove('logged-in');
+    return;
   }
+  el.classList.add('logged-in');
+
+  // 拉当前用户的绑定列表
+  var bindings = [];
+  try {
+    var r = await api('/api/broker/bindings');
+    if (r.ok) bindings = await r.json();
+  } catch (_) { /* 网络失败时降级为通用文案 */ }
+
+  el.innerHTML = _buildLoggedInHintHTML(bindings);
+}
+
+function _buildLoggedInHintHTML(bindings) {
+  // Mock 不算"真"券商,过滤掉
+  var nonMock = (bindings || []).filter(function (b) { return b.broker_type !== 'mock'; });
+
+  if (nonMock.length === 0) {
+    return ''
+      + '<div class="badge-line">⚠️ 已登录,但还没绑定任何券商</div>'
+      + '<div>下单 / 查持仓需要先绑定一个券商账户。'
+      + '<a href="/brokers" style="color:var(--primary);">前往绑定</a>(支持老虎证券 / Alpaca)。</div>'
+      + '<span class="small">在你完成绑定前,LLM 只能查行情 / 算因子,不能下单。</span>';
+  }
+
+  // 按 broker_type 聚合,统计 paper / live 数量
+  var brokers = {};
+  for (var i = 0; i < nonMock.length; i++) {
+    var b = nonMock[i];
+    if (!brokers[b.broker_type]) brokers[b.broker_type] = { paper: 0, live: 0, labels: [] };
+    brokers[b.broker_type][b.env === 'live' ? 'live' : 'paper']++;
+    brokers[b.broker_type].labels.push(b.label);
+  }
+
+  var displayNames = {
+    tiger:  '🐯 Tiger Brokers (老虎证券)',
+    alpaca: '📈 Alpaca',
+  };
+  var lines = [];
+  var hasLive = false;
+  for (var bt in brokers) {
+    var name = displayNames[bt] || bt;
+    var counts = brokers[bt];
+    var envText = [];
+    if (counts.paper > 0) envText.push(counts.paper + ' 个模拟');
+    if (counts.live > 0) { envText.push(counts.live + ' 个实盘'); hasLive = true; }
+    lines.push(name + ' · ' + envText.join(' + '));
+  }
+
+  // 根据绑定的券商类型决定示例
+  var examples = ['查我现在的持仓', '查我的订单'];
+  if ('tiger' in brokers) {
+    examples.push('帮我买 5 股 AAPL,限价高 1%');
+    examples.push('腾讯 00700 怎么样');
+  } else if ('alpaca' in brokers) {
+    examples.push('帮我买 5 股 AAPL,限价高 1%');
+    examples.push('查 TSLA 实时行情');
+  }
+  var examplesHtml = examples.slice(0, 3).map(function (e) {
+    return '「' + escapeHtmlSafe(e) + '」';
+  }).join(' · ');
+
+  var warning = hasLive
+    ? '⚠️ 你绑定了实盘账户,下单会消耗真金白银。每笔订单仍需 UI 二次确认。'
+    : '⚠️ 当前全部为模拟盘(paper),使用虚拟资金,不涉及真金白银';
+
+  return ''
+    + '<div class="badge-line">✅ 已登录,可在对话中下单</div>'
+    + '<div style="margin-top:4px;">绑定: ' + escapeHtmlSafe(lines.join('  ·  ')) + '</div>'
+    + '<div style="margin-top:4px;">试试问: ' + examplesHtml + '</div>'
+    + '<span class="small" style="' + (hasLive ? 'color:var(--warning);font-weight:600;' : '') + '">'
+    + warning + '</span>';
 }
 
 // ════════════════════════════════════════════════════════════
