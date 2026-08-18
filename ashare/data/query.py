@@ -361,3 +361,207 @@ def get_industry(as_of_date: DateLike,
     s = s.where(~s.isin(small), "__OTHER__")
     s.name = f"sw_{level}"
     return s
+
+
+# ══════════════ 行情（D8：对外只给后复权；原始价不出 query 层）══════════════
+_BAR_FIELDS = ("open", "high", "low", "close", "pre_close", "vol", "amount")
+_PRICE_FIELDS = ("open", "high", "low", "close", "pre_close")
+_DEFAULT_BAR_FIELDS = ("open", "high", "low", "close", "vol", "amount")
+
+
+def _empty_mi() -> pd.MultiIndex:
+    return pd.MultiIndex.from_arrays([[], []], names=["ts_code", "trade_date"])
+
+
+def _bars_raw(as_of: _dt.date, ts_codes: Sequence[str], start: _dt.date | None) -> pd.DataFrame:
+    """[start, as_of] 的 daily_bar 原始行（含 adj_factor / is_suspended）。优先命中 preload。"""
+    codes = list(ts_codes)
+    if not codes:
+        return pd.DataFrame(columns=["ts_code", "trade_date", *_BAR_FIELDS, "adj_factor", "is_suspended"])
+    cached = _PRELOAD.get("daily_bar")
+    if cached is not None:
+        lo = cached["trade_date"].min()
+        if start is not None and start >= lo and as_of <= cached["trade_date"].max():
+            m = cached["ts_code"].isin(codes) & (cached["trade_date"] <= as_of) & (cached["trade_date"] >= start)
+            return cached.loc[m, ["ts_code", "trade_date", *_BAR_FIELDS, "adj_factor", "is_suspended"]].copy()
+    sql = ("SELECT ts_code, trade_date, open, high, low, close, pre_close, vol, amount, adj_factor, is_suspended "
+           "FROM daily_bar WHERE ts_code IN (" + ",".join("?" * len(codes)) + ") AND trade_date <= ?")
+    params: list = [*codes, as_of]
+    if start is not None:
+        sql += " AND trade_date >= ?"
+        params.append(start)
+    sql += " ORDER BY ts_code, trade_date"
+    df = _conn().execute(sql, params).fetchdf()
+    df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.date
+    return df
+
+
+def _window_start(as_of: _dt.date, lookback: int | None, start: DateLike | None) -> _dt.date | None:
+    """lookback 按【交易日历条数】换算成起始日（不是记录数——D9 已保证两者相等，此处仍按日历算）。
+    与 start 都给时取交集（更晚者）。"""
+    s = _norm_date(start, name="start") if start is not None else None
+    if lookback is not None:
+        if lookback <= 0:
+            raise QueryError("lookback 必须为正整数")
+        days = [d for d in _open_days() if d <= as_of]
+        lb = days[-lookback] if len(days) >= lookback else days[0]
+        s = lb if s is None else max(s, lb)
+    return s
+
+
+def get_bars(as_of_date: DateLike,
+             ts_codes: Sequence[str],
+             *,
+             lookback: int | None = None,
+             start: DateLike | None = None,
+             fields: Sequence[str] = _DEFAULT_BAR_FIELDS,
+             adjust: str = "hfq") -> pd.DataFrame:
+    """长表，MultiIndex (ts_code, trade_date)，闭区间上界 = as_of_date。
+    adjust: 'hfq'（默认，价格列 × adj_factor）| 'none'（原始价，仅 ingest/validate 可用）。
+    ★ 永远额外返回 is_suspended 列。停牌日有行但 OHLC 为 NaN —— 填充与否由因子自己决定。
+    ★ 本函数【不返回】limit_up / limit_down：复权价与原始涨跌停价比较是 bug 温床，
+      涨跌停信息只能通过 get_tradable_mask 获取。"""
+    as_of = _norm_date(as_of_date)
+    _check_in_calendar(as_of)
+    bad = [f for f in fields if f not in _BAR_FIELDS]
+    if bad:
+        raise UnknownFieldError(f"get_bars 不支持字段 {bad}（涨跌停请用 get_tradable_mask）")
+    if adjust not in ("hfq", "none"):
+        raise QueryError(f"adjust 只能是 hfq/none，收到 {adjust!r}")
+    s = _window_start(as_of, lookback, start)
+    df = _bars_raw(as_of, ts_codes, s)
+    out_cols = [*fields, "is_suspended"]
+    if df.empty:
+        return pd.DataFrame(columns=out_cols, index=_empty_mi())
+    if adjust == "hfq":
+        for c in _PRICE_FIELDS:
+            df[c] = df[c] * df["adj_factor"]
+    sus = df["is_suspended"].astype(bool)
+    df.loc[sus, list(_PRICE_FIELDS)] = float("nan")          # 输出层：停牌日价格置 NaN
+    df["is_suspended"] = sus
+    return df.set_index(["ts_code", "trade_date"])[out_cols]
+
+
+def get_price_panel(as_of_date: DateLike,
+                    ts_codes: Sequence[str],
+                    field: str = "close",
+                    lookback: int = 250,
+                    adjust: str = "hfq") -> pd.DataFrame:
+    """宽表：index=trade_date，columns=ts_code。因子计算的主力入口。停牌日为 NaN，不做前向填充。"""
+    df = get_bars(as_of_date, ts_codes, lookback=lookback, fields=(field,), adjust=adjust)
+    if df.empty:
+        return pd.DataFrame(columns=list(ts_codes)).rename_axis("trade_date")
+    panel = df[field].unstack("ts_code")
+    return panel.reindex(columns=list(ts_codes))
+
+
+_DAILY_BASIC_FIELDS = ("turnover_rate", "turnover_rate_f", "volume_ratio", "pe", "pe_ttm", "pb", "ps", "ps_ttm",
+                       "dv_ratio", "dv_ttm", "total_share", "float_share", "free_share", "total_mv", "circ_mv")
+
+
+def get_daily_basic(as_of_date: DateLike,
+                    ts_codes: Sequence[str],
+                    fields: Sequence[str] = ("pe_ttm", "pb", "ps_ttm", "total_mv", "circ_mv", "turnover_rate_f"),
+                    lookback: int = 1) -> pd.DataFrame:
+    """lookback=1 → 单日，index=ts_code；lookback>1 → MultiIndex (ts_code, trade_date)。"""
+    as_of = _norm_date(as_of_date)
+    _check_in_calendar(as_of)
+    bad = [f for f in fields if f not in _DAILY_BASIC_FIELDS]
+    if bad:
+        raise UnknownFieldError(f"get_daily_basic 不支持字段 {bad}")
+    codes = list(ts_codes)
+    if not codes:
+        if lookback == 1:
+            return pd.DataFrame(columns=list(fields)).rename_axis("ts_code")
+        return pd.DataFrame(columns=list(fields), index=_empty_mi())
+    s = _window_start(as_of, lookback, None)
+    cols = ", ".join(fields)                                     # 字段已白名单校验
+    df = _conn().execute(
+        f"SELECT ts_code, trade_date, {cols} FROM daily_basic WHERE ts_code IN ("
+        + ",".join("?" * len(codes)) + ") AND trade_date BETWEEN ? AND ? ORDER BY ts_code, trade_date",
+        [*codes, s, as_of]).fetchdf()
+    df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.date
+    if lookback == 1:
+        return df.drop(columns=["trade_date"]).set_index("ts_code")[list(fields)]
+    return df.set_index(["ts_code", "trade_date"])[list(fields)]
+
+
+_INDEX_FIELDS = ("open", "high", "low", "close", "vol", "amount", "pe_ttm")
+
+
+def get_index_bars(as_of_date: DateLike,
+                   index_code: str,
+                   lookback: int = 250,
+                   fields: Sequence[str] = ("close", "pe_ttm")) -> pd.DataFrame:
+    """index=trade_date。用于 beta_250 中性化与 P3 宏观 ERP / trend_ma200。"""
+    as_of = _norm_date(as_of_date)
+    _check_in_calendar(as_of)
+    bad = [f for f in fields if f not in _INDEX_FIELDS]
+    if bad:
+        raise UnknownFieldError(f"get_index_bars 不支持字段 {bad}")
+    s = _window_start(as_of, lookback, None)
+    cols = ", ".join(fields)
+    df = _conn().execute(
+        f"SELECT trade_date, {cols} FROM index_daily WHERE ts_code = ? AND trade_date BETWEEN ? AND ? "
+        "ORDER BY trade_date", [index_code, s, as_of]).fetchdf()
+    df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.date
+    return df.set_index("trade_date")[list(fields)]
+
+
+# ══════════════ 执行时点专用（D6）—— 唯一首参不是 as_of_date 的函数 ══════════════
+_MASK_COLS = ["can_buy", "can_sell", "reason", "open_hfq", "close_hfq", "amount", "amplitude"]
+
+
+def get_tradable_mask(exec_date: DateLike,
+                      ts_codes: Sequence[str]) -> pd.DataFrame:
+    """★ 唯一合法的「首参非 as_of_date」函数。语义：回测时钟已推进到 exec_date（T+1），
+    此刻读 exec_date 的盘口是「当下」不是「未来」。调用方限定：只有 ashare/backtest/** 可以调。
+
+    index=ts_code；columns：can_buy / can_sell / reason / open_hfq / close_hfq / amount / amplitude。
+    判定（全部用【原始价】在函数内部完成，原始价与涨跌停价不外泄）：
+      停牌 / 无行情              → 两侧 False（suspended / no_quote）
+      limit_up IS NULL           → 两侧 False（limit_unknown）★ 保守：宁可不交易，不可假设可交易
+      open==limit_up 且 high==low → can_buy=False（limit_up_seal，一字涨停买不进）
+      open==limit_down 且 high==low → can_sell=False（limit_down_seal，一字跌停卖不出）
+      delist_date <= exec_date   → can_buy=False, can_sell=True（delisted，强制清仓路径）"""
+    d = _norm_date(exec_date, name="exec_date")
+    _check_in_calendar(d, name="exec_date")
+    if not is_trade_date(d):
+        raise AsOfDateError(f"exec_date={d} 不是交易日")
+    codes = list(ts_codes)
+    if not codes:
+        return pd.DataFrame(columns=_MASK_COLS).rename_axis("ts_code")
+    rows = _conn().execute(
+        "SELECT b.ts_code, b.open, b.high, b.low, b.close, b.pre_close, b.amount, b.adj_factor, "
+        "       b.limit_up, b.limit_down, b.is_suspended, s.delist_date "
+        "FROM daily_bar b LEFT JOIN stock_basic s ON s.ts_code = b.ts_code "
+        "WHERE b.trade_date = ? AND b.ts_code IN (" + ",".join("?" * len(codes)) + ")",
+        [d, *codes]).fetchall()
+    by_code = {r[0]: r for r in rows}
+    out = []
+    for code in codes:
+        r = by_code.get(code)
+        if r is None:
+            out.append((code, False, False, "no_quote", float("nan"), float("nan"), float("nan"), float("nan")))
+            continue
+        _, o, h, l, c, pc, amt, adj, up, dn, sus, delist = r
+        delist = None if delist is None else pd.Timestamp(delist).date()
+        adj = adj if adj is not None else float("nan")
+        o_h = (o * adj) if o is not None else float("nan")
+        c_h = (c * adj) if c is not None else float("nan")
+        amp = ((h - l) / pc) if (h is not None and l is not None and pc) else float("nan")
+        amt = amt if amt is not None else float("nan")
+
+        if delist is not None and delist <= d:
+            out.append((code, False, True, "delisted", o_h, c_h, amt, amp)); continue
+        if sus or o is None:
+            out.append((code, False, False, "suspended", o_h, c_h, amt, amp)); continue
+        if up is None or dn is None:
+            out.append((code, False, False, "limit_unknown", o_h, c_h, amt, amp)); continue
+        one_price = (h == l)
+        if one_price and abs(o - up) < 1e-9:
+            out.append((code, False, True, "limit_up_seal", o_h, c_h, amt, amp)); continue
+        if one_price and abs(o - dn) < 1e-9:
+            out.append((code, True, False, "limit_down_seal", o_h, c_h, amt, amp)); continue
+        out.append((code, True, True, "", o_h, c_h, amt, amp))
+    return pd.DataFrame(out, columns=["ts_code", *_MASK_COLS]).set_index("ts_code")
