@@ -14,7 +14,8 @@ except ImportError:                     # 可选依赖，遵循本仓库既有�
     _ts = None
 
 _DATE_COLS = ("trade_date", "ann_date", "end_date", "list_date", "delist_date",
-              "start_date", "f_ann_date", "cal_date", "pretrade_date", "date")
+              "start_date", "f_ann_date", "cal_date", "pretrade_date", "date",
+              "in_date", "out_date")
 # 注：cn_m 的 month 列是 YYYYMM，不在此列表，由 ingest 的宏观 normalize 单独处理
 
 
@@ -90,6 +91,25 @@ class TushareSource:
     def index_daily(self, ts_code: str, start=None, end=None) -> pd.DataFrame:
         return self._call("index_daily", ts_code=ts_code,
                           start_date=_fmt(start), end_date=_fmt(end))
+
+    def index_dailybasic(self, ts_code: str, start=None, end=None) -> pd.DataFrame:
+        """指数估值（pe_ttm 等），供 P3 的 ERP。"""
+        return self._call("index_dailybasic", ts_code=ts_code,
+                          start_date=_fmt(start), end_date=_fmt(end))
+
+    # ── 行业 ──
+    def sw_members(self) -> pd.DataFrame:
+        """申万成分历史 → 列 [ts_code, sw_l1, sw_l2, sw_l3, in_date, out_date]。
+        优先 index_member_all（一次全量，含 L1/L2/L3 与进出日期）；权限不足时把异常原样抛出，
+        由 ingest 决定是否降级——这里不吞。"""
+        df = self._call("index_member_all", is_new=None)
+        rename = {"con_code": "ts_code", "l1_name": "sw_l1", "l2_name": "sw_l2", "l3_name": "sw_l3"}
+        df = df.rename(columns={k: v for k, v in rename.items() if k in df.columns})
+        keep = ["ts_code", "sw_l1", "sw_l2", "sw_l3", "in_date", "out_date"]
+        for c in keep:
+            if c not in df.columns:
+                df[c] = None
+        return _to_date(df[keep])
 
     # ── 财报（PIT 的原料）──
     def fina_indicator(self, ts_code: str, start=None, end=None) -> pd.DataFrame:

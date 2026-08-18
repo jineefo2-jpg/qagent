@@ -19,6 +19,8 @@ CREATE TABLE IF NOT EXISTS stock_basic (
   is_hs        VARCHAR,
   _ingested_at TIMESTAMP DEFAULT current_timestamp
 );
+-- v2：Tushare 自带行业分类（申万成分无权限时 industry_member 的降级来源）
+ALTER TABLE stock_basic ADD COLUMN IF NOT EXISTS industry VARCHAR;
 
 -- ST 状态历史。数据来源：由 namechange 反推（Tushare 无直接接口）
 CREATE TABLE IF NOT EXISTS stock_status (
@@ -89,6 +91,16 @@ CREATE TABLE IF NOT EXISTS money_flow (
   hk_hold_ratio DOUBLE,
   _ingested_at TIMESTAMP DEFAULT current_timestamp,
   PRIMARY KEY (ts_code, trade_date)
+);
+
+-- 行业成分历史（PIT）：申万成分 in_date/out_date；无权限时由 stock_basic.industry 降级生成，
+-- 且 _meta.industry_source 必须写 'tushare_static' 显式记录降级
+CREATE TABLE IF NOT EXISTS industry_member (
+  ts_code  VARCHAR,
+  sw_l1    VARCHAR, sw_l2 VARCHAR, sw_l3 VARCHAR,
+  in_date  DATE,
+  out_date DATE,                   -- NULL = 至今
+  PRIMARY KEY (ts_code, in_date)
 );
 
 CREATE TABLE IF NOT EXISTS index_daily (

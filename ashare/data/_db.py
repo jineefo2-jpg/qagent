@@ -8,7 +8,7 @@ import pathlib
 
 import duckdb
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2       # v2: + industry_member
 _SCHEMA_SQL = pathlib.Path(__file__).with_name("schema.sql")
 
 DEFAULT_MARKET_PATH = "data/ashare_market.duckdb"
@@ -30,7 +30,13 @@ def connect_read(path: str) -> duckdb.DuckDBPyConnection:
 
 
 def init_schema(conn: duckdb.DuckDBPyConnection) -> None:
-    """建表。幂等（全部 CREATE TABLE IF NOT EXISTS）。"""
+    """建表。幂等（全部 CREATE TABLE IF NOT EXISTS，加表向前兼容）。
+    库里版本【高于】代码版本 → 拒绝：旧代码写新库会静默漏列/漏表。"""
+    have = {r[0] for r in conn.execute("SELECT table_name FROM information_schema.tables").fetchall()}
+    if "_meta" in have:
+        row = conn.execute("SELECT value FROM _meta WHERE key='schema_version'").fetchone()
+        if row and int(row[0]) > SCHEMA_VERSION:
+            raise RuntimeError(f"数据库 schema_version={row[0]} 高于代码 SCHEMA_VERSION={SCHEMA_VERSION}，请升级代码")
     conn.execute(_SCHEMA_SQL.read_text(encoding="utf-8"))
     conn.execute(
         "INSERT INTO _meta (key, value) VALUES ('schema_version', ?) "

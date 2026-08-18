@@ -138,10 +138,10 @@ def ingest_calendar(conn, src, start, end) -> int:
 
 def ingest_stock_basic(conn, src) -> int:
     df = src.stock_basic()
-    for c in ("sw_l1", "sw_l2", "sw_l3"):
+    for c in ("sw_l1", "sw_l2", "sw_l3", "industry"):
         if c not in df.columns:
             df[c] = None
-    cols = ["ts_code", "symbol", "name", "sw_l1", "sw_l2", "sw_l3",
+    cols = ["ts_code", "symbol", "name", "sw_l1", "sw_l2", "sw_l3", "industry",
             "market", "list_date", "delist_date", "is_hs"]
     n = _upsert(conn, "stock_basic", df[cols])
     set_job(conn, "stock_basic:all", "stock_basic", "all", "DONE", rows=n)
@@ -333,4 +333,171 @@ def ingest_daily_bar(conn, src, ts_code: str, start, end) -> int:
         return n
     except Exception as exc:                 # noqa: BLE001
         set_job(conn, job, "daily_bar", ts_code, "RETRY", error=str(exc)[:500])
+        raise
+
+
+# ══════════════ 财报 PIT（D3）══════════════
+_FIN_KEY = ["ts_code", "ann_date", "end_date", "report_type", "update_flag"]
+_FIN_JOIN = ["ts_code", "end_date", "report_type", "update_flag"]
+_INCOME_COLS = ["total_revenue", "revenue", "operate_profit", "total_profit",
+                "n_income", "n_income_attr_p", "basic_eps"]
+_BALANCE_COLS = ["total_assets", "total_liab", "total_hldr_eqy_exc_min_int"]
+_CASHFLOW_COLS = ["n_cashflow_act", "n_cashflow_inv_act", "n_cash_flows_fnc_act"]
+_FINA_COLS = ["roe", "roa", "grossprofit_margin", "netprofit_margin", "debt_to_assets",
+              "current_ratio", "or_yoy", "netprofit_yoy", "bps"]
+_FIN_VALUE_COLS = _INCOME_COLS + _BALANCE_COLS + _CASHFLOW_COLS + _FINA_COLS
+
+
+def _std_fin(df: pd.DataFrame | None, value_cols: list[str], src_name: str) -> pd.DataFrame:
+    """标准化到 _FIN_JOIN + ann_<src> + 值列。实际公告日 f_ann_date 优先于 ann_date（预约日）。"""
+    if df is None or len(df) == 0:
+        return pd.DataFrame(columns=_FIN_JOIN + [f"ann_{src_name}"] + value_cols)
+    d = df.copy()
+    ann = d["ann_date"] if "ann_date" in d.columns else pd.Series([None] * len(d), index=d.index)
+    if "f_ann_date" in d.columns:
+        ann = d["f_ann_date"].where(d["f_ann_date"].notna(), ann)
+    d[f"ann_{src_name}"] = [_as_date(x) for x in ann]
+    d["end_date"] = [_as_date(x) for x in d["end_date"]]
+    if "report_type" not in d.columns:
+        d["report_type"] = "1"
+    d["report_type"] = d["report_type"].fillna("1").astype(str)
+    if "update_flag" not in d.columns:
+        d["update_flag"] = 0
+    d["update_flag"] = pd.to_numeric(d["update_flag"], errors="coerce").fillna(0).astype(int)
+    for c in value_cols:
+        if c not in d.columns:
+            d[c] = None
+    return d[_FIN_JOIN + [f"ann_{src_name}"] + value_cols]
+
+
+def merge_financial_frames(income, balance, cashflow, fina) -> tuple[pd.DataFrame, int]:
+    """四张 Tushare 财报表 → financial_pit 行。返回 (frame, dropped_no_ann_date)。
+
+    - 以 (ts_code, end_date, report_type, update_flag) 外连接成一行（密集）
+    - ann_date = 各源公告日的【最大值】：财报要等三张表都披露才算可见（PIT 保守方向）
+    - 同一键若某源出现多次公告（更正公告），逐条保留 —— 由 query 层按 as_of 取最新一条 ≤ as_of
+    - ann_date 为空 → 丢弃并计数（无公告日 = 无法 PIT）
+    """
+    parts = [_std_fin(income, _INCOME_COLS, "inc"), _std_fin(balance, _BALANCE_COLS, "bal"),
+             _std_fin(cashflow, _CASHFLOW_COLS, "cf"), _std_fin(fina, _FINA_COLS, "fina")]
+    # 同源同键多条公告 → 保留为多行：先给每源加"公告序号"再合并
+    merged: pd.DataFrame | None = None
+    for p in parts:
+        if merged is None:
+            merged = p
+        else:
+            merged = merged.merge(p, on=_FIN_JOIN, how="outer")
+    assert merged is not None
+    ann_cols = [c for c in merged.columns if c.startswith("ann_")]
+    merged["ann_date"] = merged[ann_cols].apply(
+        lambda r: max((x for x in r if x is not None and not pd.isna(x)), default=None), axis=1)
+    dropped = int(merged["ann_date"].isna().sum())
+    merged = merged[merged["ann_date"].notna()].drop(columns=ann_cols)
+    out = merged[_FIN_KEY + _FIN_VALUE_COLS].reset_index(drop=True)
+    return out, dropped
+
+
+def ingest_financial(conn, src, ts_code: str, start, end) -> int:
+    start_d, end_d = _parse_date(start), _parse_date(end)
+    job = f"financial_pit:{ts_code}:{start_d.isoformat()}"
+    if job_state(conn, job) == "DONE":
+        return 0
+    set_job(conn, job, "financial_pit", ts_code, "RUNNING")
+    try:
+        frames = [getattr(src, api)(ts_code, start=start_d, end=end_d)
+                  for api in ("income", "balancesheet", "cashflow", "fina_indicator")]
+        out, dropped = merge_financial_frames(*frames)
+        n = _upsert(conn, "financial_pit", out)
+        set_job(conn, job, "financial_pit", ts_code, "DONE", rows=n,
+                error=f"dropped_no_ann_date={dropped}" if dropped else "")
+        return n
+    except Exception as exc:                 # noqa: BLE001
+        set_job(conn, job, "financial_pit", ts_code, "RETRY", error=str(exc)[:500])
+        raise
+
+
+# ══════════════ daily_basic / index_daily / 行业成分 ══════════════
+_DAILY_BASIC_COLS = ["ts_code", "trade_date", "turnover_rate", "turnover_rate_f", "volume_ratio",
+                     "pe", "pe_ttm", "pb", "ps", "ps_ttm", "dv_ratio", "dv_ttm",
+                     "total_share", "float_share", "free_share", "total_mv", "circ_mv"]
+
+
+def ingest_daily_basic(conn, src, trade_date) -> int:
+    d = _parse_date(trade_date)
+    job = f"daily_basic:{d.isoformat()}"
+    set_job(conn, job, "daily_basic", d.isoformat(), "RUNNING")
+    try:
+        df = src.daily_basic(trade_date=d)
+        for c in _DAILY_BASIC_COLS:
+            if c not in df.columns:
+                df[c] = None
+        n = _upsert(conn, "daily_basic", df[_DAILY_BASIC_COLS])
+        set_job(conn, job, "daily_basic", d.isoformat(), "DONE", rows=n)
+        return n
+    except Exception as exc:                 # noqa: BLE001
+        set_job(conn, job, "daily_basic", d.isoformat(), "RETRY", error=str(exc)[:500])
+        raise
+
+
+_INDEX_COLS = ["ts_code", "trade_date", "open", "high", "low", "close", "vol", "amount", "pe_ttm"]
+
+
+def ingest_index_daily(conn, src, index_code: str, start, end) -> int:
+    start_d, end_d = _parse_date(start), _parse_date(end)
+    job = f"index_daily:{index_code}:{start_d.isoformat()}"
+    set_job(conn, job, "index_daily", index_code, "RUNNING")
+    try:
+        df = src.index_daily(index_code, start=start_d, end=end_d)
+        try:
+            pe = src.index_dailybasic(index_code, start=start_d, end=end_d)
+        except Exception as exc:             # noqa: BLE001 — 估值是附加信息，无权限不阻断指数行情
+            if "权限" not in str(exc) and "积分" not in str(exc):
+                raise
+            pe = None
+        if pe is not None and len(pe):
+            df = df.merge(pe[["trade_date", "pe_ttm"]].drop_duplicates("trade_date", keep="last"),
+                          on="trade_date", how="left")
+        for c in _INDEX_COLS:
+            if c not in df.columns:
+                df[c] = None
+        n = _upsert(conn, "index_daily", df[_INDEX_COLS])
+        set_job(conn, job, "index_daily", index_code, "DONE", rows=n)
+        return n
+    except Exception as exc:                 # noqa: BLE001
+        set_job(conn, job, "index_daily", index_code, "RETRY", error=str(exc)[:500])
+        raise
+
+
+def _set_meta(conn, key: str, value: str) -> None:
+    conn.execute("INSERT INTO _meta (key, value) VALUES (?, ?) "
+                 "ON CONFLICT (key) DO UPDATE SET value = excluded.value", [key, value])
+
+
+def ingest_industry_member(conn, src) -> int:
+    """申万成分历史（PIT 行业）。无权限 → 用 stock_basic.industry 降级，并在 _meta 显式记录。
+    降级不静默：industry_source='tushare_static' 会被 query.get_industry 与健康页读到。"""
+    job = "industry_member:all"
+    set_job(conn, job, "industry_member", "all", "RUNNING")
+    try:
+        try:
+            df = src.sw_members()
+            source = "sw"
+        except Exception as exc:             # noqa: BLE001 — 只吃权限类
+            if "权限" not in str(exc) and "积分" not in str(exc):
+                raise
+            basic = conn.execute("SELECT ts_code, industry, list_date FROM stock_basic").fetchall()
+            df = pd.DataFrame(basic, columns=["ts_code", "sw_l1", "in_date"])
+            df["sw_l2"] = None
+            df["sw_l3"] = None
+            df["out_date"] = None
+            source = "tushare_static"
+        for c in ("in_date", "out_date"):
+            df[c] = [_as_date(x) for x in df[c]]
+        df = df.dropna(subset=["in_date"])
+        n = _upsert(conn, "industry_member", df[["ts_code", "sw_l1", "sw_l2", "sw_l3", "in_date", "out_date"]])
+        _set_meta(conn, "industry_source", source)
+        set_job(conn, job, "industry_member", "all", "DONE", rows=n)
+        return n
+    except Exception as exc:                 # noqa: BLE001
+        set_job(conn, job, "industry_member", "all", "RETRY", error=str(exc)[:500])
         raise
