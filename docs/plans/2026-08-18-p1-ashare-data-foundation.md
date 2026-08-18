@@ -1469,25 +1469,199 @@ git commit -m "feat(ashare): 日线入库 + 停牌日按交易日历补占位行
 
 ---
 
-### Task 7–14 概要（详细步骤在 Task 6 通过后展开）
+### Task 7–15（Task 6 通过后展开；写到接口 + 决策 + 验收断言粒度）
 
-> 前 6 个任务把「守门人 + 数据源 + 最危险的 D9」立住了。Task 7 起的任务结构同构
-> （写失败测试 → 确认失败 → 实现 → 确认通过 → 分层检查 → 提交），
-> 待 Task 6 验收通过后按同样粒度展开，避免现在写的细节被前 6 个任务的实际产出推翻。
-
-| Task | 内容 | 核心断言 |
-|---|---|---|
-| 7 | ingest `daily_basic` + `financial_pit` | 同 `end_date` 多次披露共存；`update_flag=1` 独立成行不覆盖 |
-| 8 | ingest `macro`(含 `publish_date`) + `money_flow`(仅 `hk_hold_ratio`) + `index_daily` | 社融/CPI 的 `publish_date` 晚于 `period`；`publish_date_source` 非空 |
-| 9 | `query.py` 骨架：连接、`snapshot_id()`、日历、`preload` | `snapshot_id` 随 `_ingested_at` 变化；只读连接拒写 |
-| 10 | `query.get_universe` + `explain_universe` | **规格 §11 断言**：`get_universe('2015-06-12')` 不含 `list_date>2014-10-05` 或 `delist_date<=2015-06-12` 的股票；剔除顺序为 1–5 硬性 → 池内算流动性分位 |
-| 11 | `get_bars` / `get_price_panel` / `get_tradable_mask` | `get_bars` 不返回 `limit_up/limit_down`；`lookback` 按交易日计数非记录数；`limit_unknown` → 两侧皆不可交易 |
-| 12 | `get_financial` / `get_financial_ttm` / `get_macro` | **规格 §11 断言**：`get_financial('600519.SH', as_of='2021-04-01')` 的 `end_date` 为 2020-12-31 且 `ann_date<=2021-04-01`；TTM 跨年重置 |
-| 13 | `validate.py` 六项校验 + BaoStock 双源交叉 | 行数完整性**误差为 0**；占位行 `vol=0 AND open=high=low=close`；200 只×100 日后复权收盘价偏差 <0.5% |
-| 14 | 全量回补执行 + P1 验收断言全绿 | `docs/specs/…design.md` §11 的 7 条 P1 断言全部可执行且通过 |
-| 15 | （U4）`rag/indexer.py` chunk 增加 `publish_date` 字段 | 新索引的 chunk metadata 含 `publish_date`；缺失时来源标 `unknown` 不猜测 |
+> 前 6 个任务的经验：计划里逐字写实现，评审照样能找出规则/类型 bug，等于双倍工作。
+> 从 Task 7 起，计划只锁三样东西：**接口签名、关键决策、验收断言**。实现按 TDD 现写现测。
+> 所有 query.py 签名以 `docs/architecture/ashare-platform-architecture.md` §4.1 为准，此处只列偏离与补充。
 
 ---
+
+### Task 7: ingest 财报 PIT + daily_basic + index_daily + 行业成分历史
+
+**Files:** Modify `ashare/data/ingest.py`, `ashare/data/schema.sql`(v2)；Create `tests/ashare/test_ingest_financial.py`
+
+**决策**
+- 财报 PIT 三张原始表 `income` / `balancesheet` / `cashflow` + `fina_indicator` 合并进 `financial_pit`，
+  以 `(ts_code, ann_date, end_date, report_type, update_flag)` 为键；`fina_indicator` 无 `report_type`/`update_flag`
+  时按 `('1', 0)` 归并到同一 (ts_code, ann_date, end_date)。**只要 `ann_date` 为空的行一律丢弃并计数**（D3：无公告日 = 无法 PIT）。
+- `f_ann_date`（实际公告日）存在时优先于 `ann_date`——Tushare 的 `ann_date` 有时是"预约披露日"。
+- 新表 `industry_member(ts_code, sw_l1, sw_l2, sw_l3, in_date, out_date)`：来源 `index_member`(申万成分历史)。
+  无权限时降级：用 `stock_basic.industry`（Tushare 自有分类）写成 `in_date=list_date, out_date=NULL`，
+  并在 `_meta` 写 `industry_source='tushare_static'`。**降级必须显式记录**，不得静默。
+- `SCHEMA_VERSION` → 2；`init_schema` 读到旧版本且缺表 → 直接 `CREATE TABLE IF NOT EXISTS`（加表向前兼容）；
+  读到**更高**版本 → raise（防旧代码写新库）。
+
+**接口**
+- `ingest_financial(conn, src, ts_code, start, end) -> int`
+- `ingest_daily_basic(conn, src, trade_date) -> int`（按日全市场，一次调用一天）
+- `ingest_index_daily(conn, src, index_code, start, end) -> int`
+- `ingest_industry_member(conn, src) -> int`
+- `merge_financial_frames(income, balance, cashflow, fina) -> pd.DataFrame`（纯函数，可测）
+
+**验收断言**
+- 同一 `(ts_code, end_date)` 两个不同 `ann_date` 的行共存；`update_flag=1` 独立成行不覆盖原始行
+- `ann_date` 为空的行不入库，返回值中 `dropped_no_ann_date` 计数可见
+- `f_ann_date` 存在时 `financial_pit.ann_date == f_ann_date`
+- daily_basic 单日全市场入库后 `count == len(src 返回)`，重跑幂等
+- 降级路径：`index_member` 抛权限错误 → `industry_member` 由 `stock_basic.industry` 生成且 `_meta.industry_source='tushare_static'`
+
+---
+
+### Task 8: ingest 宏观 PIT + 北向持股
+
+**Files:** Modify `ashare/data/ingest.py`, `ashare/data/sources/tushare.py`（补 cn_cpi/cn_ppi/cn_pmi/sf_month/hk_hold）；Create `tests/ashare/test_ingest_macro.py`
+
+**决策（D4 的具体化）**
+- 指标与来源：`m1_yoy`/`m2_yoy` ← `cn_m`；`cpi_yoy` ← `cn_cpi`；`ppi_yoy` ← `cn_ppi`；`pmi_mfg` ← `cn_pmi`；
+  `tsf_stock_yoy` ← `sf_month`；`shibor_3m` ← `shibor`；`cn10y` ← akshare `bond_zh_us_rate`（Tushare 无稳定接口，adapter 层可插拔）。
+- **历史 `publish_date` 只能按规则回填**，且规则取【保守晚值】——宁可晚几天可见，绝不提前：
+  M1/M2/社融 = 次月 15 日；CPI/PPI = 次月 10 日；PMI = 次月 1 日；shibor/cn10y = 当日。
+  `publish_date_source='rule'`。每日增量 ingest 时若拉到新 period，`publish_date=今天, source='observed'`。
+- `cn_m.month` 是 `YYYYMM`，在 normalize 里单独转 `period = 该月最后一天`。
+- `hk_hold` 按 `trade_date` 全市场拉取，`hk_hold_ratio = ratio` 列；2016-12-05 前无数据，**不补 0**。
+
+**接口**
+- `ingest_macro(conn, src, indicator, start, end) -> int`
+- `ingest_hk_hold(conn, src, trade_date) -> int`
+- `rule_publish_date(indicator, period) -> date`（纯函数，可测）
+
+**验收断言**
+- `rule_publish_date('m2_yoy', 2024-07-31) == 2024-08-15`；`('cpi_yoy', 2024-07-31) == 2024-08-10`；`('pmi_mfg', 2024-07-31) == 2024-08-01`
+- 所有 `macro_indicator` 行 `publish_date >= period`（不可能先公布再发生）
+- `publish_date_source` 非空
+- 同 `(indicator, period)` 先 rule 后 observed 两行共存（PIT：不覆盖）
+
+---
+
+### Task 9: query.py 骨架 — 连接 / snapshot_id / 日历 / preload
+
+**Files:** Create `ashare/data/query.py`；Create `tests/ashare/test_query_calendar.py`
+
+**决策**
+- 模块级单例只读连接（`_conn`），`open_db()` 幂等；文件 realpath 变化（影子替换）→ 自动重连。
+- `snapshot_id() = sha256(realpath basename + schema_version + Σ 各表 max(_ingested_at) + count)[:16]`。
+- `get_trade_dates(as_of_date, *, start=None, freq='D'|'W'|'M')`：`W` = 每周最后一个交易日（`weekly_dates` 唯一实现点，禁止别处自算）。
+- `next_trade_date` 日历未覆盖 → 返回 `None`（不抛）。
+- `preload(start, end, tables=(...))` 把区间物化进进程内 dict-of-DataFrame；`get_*` 优先命中缓存切片。本任务只做骨架，Task 11 接上。
+- 异常层级：`QueryError` ← `AsOfDateError` / `DataGapError` / `UnknownFieldError`。
+
+**验收断言**
+- 只读连接上 `_conn.execute("INSERT ...")` 抛 `duckdb.InvalidInputException`（D1）
+- `snapshot_id()` 在 ingest 一行后变化，在无写入时稳定
+- `get_trade_dates('2024-01-31', start='2024-01-01', freq='W')` == 每周最后交易日（用真实 2024 年 1 月日历硬编码断言）
+- 分层检查：`query.py` 所有公开函数首参 `as_of_date`（L2 自动覆盖）
+
+---
+
+### Task 10: query.get_universe / explain_universe / get_stock_basic / get_industry
+
+**Files:** Modify `ashare/data/query.py`；Create `tests/ashare/test_universe.py`
+
+**决策（架构文档 §4.1 定死的顺序）**
+1) 退市 2) 上市满 `min_list_days`(250 自然日) 3) `stock_status` 在 `as_of_date` 生效状态 ∉ {ST, *ST, DELIST_PERIOD}
+4) `daily_bar` 当日存在且 `is_suspended=FALSE` 5) markets 过滤 6) **在 1–5 剩余池内**按 20 日均成交额剔后 20%。
+- `get_industry`：成分 < 5 的行业归 `__OTHER__`（中性化秩亏保护，B7）；按 `industry_member.in_date <= as_of < out_date` 取 PIT 行业。
+- `explain_universe` 返回逐步布尔列 + `drop_reason`，验收断言直接跑它。
+
+**验收断言（规格 §11）**
+- `get_universe('2015-06-12')` 不含 `list_date > 2014-10-05` 或 `delist_date <= 2015-06-12` 的股票
+- ST 区间内的股票不在池内；区间外在池内（同一只股票、两个日期）
+- 流动性分位在硬性剔除之后算：构造 3 只股票，一只已退市但成交额最低，断言退市股不影响其余两只的分位
+- `explain_universe` 的 `included` 列与 `get_universe` 结果一致
+
+---
+
+### Task 11: query 行情 — get_bars / get_price_panel / get_daily_basic / get_index_bars / get_tradable_mask
+
+**Files:** Modify `ashare/data/query.py`；Create `tests/ashare/test_query_bars.py`, `tests/ashare/test_tradable_mask.py`
+
+**决策**
+- `get_bars` 默认 `adjust='hfq'`：价格列 × `adj_factor`；**不返回 `limit_up/limit_down`**；`lookback` 按**交易日历条数**计
+  （不是记录数——D9 已保证两者相等，此处再断言一次）。停牌日 OHLC 输出为 **NaN**（架构 §4.1：由因子自己决定是否填充），`is_suspended` 列恒返回。
+- `get_price_panel` 宽表 index=trade_date, columns=ts_code；停牌 NaN 不 ffill。
+- `get_tradable_mask(exec_date, ts_codes)`：**唯一首参非 as_of_date 的函数**；内部用原始价判定，只输出 `can_buy/can_sell/reason/open_hfq/close_hfq/amount/amplitude`；
+  `limit_up IS NULL`（`limit_source='unknown'`）→ 两侧皆 False，`reason='limit_unknown'`；停牌 → `suspended`；
+  `open==limit_up AND high==low` → `can_buy=False, reason='limit_up_seal'`；对称跌停；`delist_date <= exec_date` → `can_buy=False, can_sell=True, reason='delisted'`。
+- 空结果返回带正确列名的空 DataFrame（Q3）；`as_of_date` 越界抛 `AsOfDateError`（Q2）。
+
+**验收断言**
+- `get_bars(..., lookback=20)` 对一只中间停牌 5 天的股票返回 20 行（不是 25 行）且 5 行 `is_suspended=True` 且 OHLC NaN
+- `get_bars` 返回列不含 `limit_up`/`limit_down`
+- `get_tradable_mask`：一字涨停 `can_buy=False`；一字跌停 `can_sell=False`；停牌两侧 False；`limit_source='unknown'` 两侧 False；退市日 `can_sell=True, can_buy=False`
+- `get_bars(adjust='hfq').close == daily_bar.close * adj_factor`（数值断言）
+- `get_bars(as_of_date > 数据最大日期)` 抛 `AsOfDateError`
+
+---
+
+### Task 12: query 财报 / 宏观 / 资金流 — get_financial / get_financial_ttm / get_macro / get_money_flow
+
+**Files:** Modify `ashare/data/query.py`；Create `tests/ashare/test_query_pit.py`
+
+**决策**
+- `get_financial`：`WHERE ann_date <= as_of_date AND update_flag = 0`（默认 `include_restated=False`），按 `end_date` 分组取 `ann_date` 最大者；附加列 `ann_date, end_date, report_type, lag_days`。
+- `get_financial_ttm(as_of_date, ts_codes, field)`：**TTM 拼接在 query 层**（架构 §4.1 定死）。
+  流量科目：`最新累计 + 上年年报 − 上年同期累计`；存量科目：期初期末均值；按 field 白名单分派；不足 4 期或跨期缺失 → NaN，**不外推**。
+- `get_macro`：`WHERE publish_date <= as_of_date`，同 `(indicator, period)` 取 `publish_date` 最大者；附加 `<indicator>__publish_date` 列。
+- `get_money_flow`：`hk_hold_ratio` 2016-12-05 前返回 NaN，不填 0（B5）。
+
+**验收断言（规格 §11 + 算法说明书 §1）**
+- `get_financial('600519.SH', as_of='2021-04-01')` 的 `end_date == 2020-12-31` 且 `ann_date <= 2021-04-01`
+- 同一 `end_date` 先后两次披露：`as_of` 在两次之间取第一次值，之后取第二次值
+- `include_restated=False` 时 `update_flag=1` 的行不可见
+- TTM 跨年重置：构造 Q1/H1/Q3/FY 累计值，`get_financial_ttm` 在 Q1 后 = Q1 + FY − 上年 Q1
+- `get_macro('2024-08-01', ['m2_yoy'])` 拿不到 2024-07 的值（publish_date 08-15）；`'2024-08-15'` 拿得到（D4）
+
+---
+
+### Task 13: validate.py 六项校验 + BaoStock 双源交叉
+
+**Files:** Create `ashare/data/validate.py`, `ashare/data/sources/baostock.py`；Create `tests/ashare/test_validate.py`
+
+**决策（规格 §4.4）**
+- 六项：行数完整性（**误差为 0**）/ 占位行合规 / 复权因子跳变 [0.5, 2.0] / `financial_pit.ann_date` 缺失率 0 /
+  `macro.publish_date` 缺失率 0 / 涨跌停缺失率（`limit_source='unknown'` 占比报告，不阻断）。
+- 双源交叉：抽样 200 只 × 100 日，BaoStock 后复权收盘价 vs Tushare 偏差 < 0.5%；BaoStock 不可用时**标 SKIPPED 而非 PASS**。
+- 返回 `list[CheckResult(name, passed, detail, blocking)]`；任一 `blocking and not passed` → `run_all()` 抛 `ValidationError`。
+- 校验只读：`validate.py` 只用 `connect_read`。
+
+**验收断言**
+- 人为删掉一行 daily_bar → 行数完整性 FAIL 且 detail 指出 (ts_code, 缺失区间)
+- 占位行 `vol != 0` → FAIL
+- adj_factor 跳变 3.0 → 告警级（非阻断）
+- BaoStock 不可用 → 该项 `SKIPPED`，`run_all()` 不抛
+
+---
+
+### Task 14: 驱动 + 影子文件替换 + 全量回补 + P1 验收
+
+**Files:** Create `ashare/data/promote.py`, `ashare/data/__main__.py`（`python -m ashare.data.ingest --full|--daily`）；Create `tests/ashare/test_p1_acceptance.py`；Modify `docs/oos-runs.md`（新建）
+
+**决策**
+- 写者写 `data/ashare_staging/market.duckdb`，校验通过后 `CHECKPOINT` → `os.replace` 到 `data/ashare_market.duckdb`；旧文件 `os.link` 成 `.bak.<snapshot_id>` 零拷贝快照，保留 3 份。
+- `--daily`：`end` **clamp 到日历中最后一个 `<= today` 的交易日**（Task 6 Minor：否则当天被冻结成停牌占位）；`start = 上次 DONE 的最大 trade_date + 1`。
+- `--full`：按年分批、按表分组；每批结束写 `ingest_log`；中断可续。全量回补是**操作员手动触发**，需要 `TUSHARE_TOKEN`。
+- `test_p1_acceptance.py`：规格 §11 七条断言写成 pytest；若 `data/ashare_market.duckdb` 不存在则 `pytest.skip`（CI 无数据）。
+
+**验收断言**
+- 影子替换后 `query.snapshot_id()` 变化且旧连接自动重连
+- `--daily` 的 end 不超过最后已发布交易日
+- 规格 §11 P1 七条全部通过（对真实数据）
+
+---
+
+### Task 15: RAG chunk 增加 publish_date（U4）
+
+**Files:** Modify `rag/indexer.py`；Create `tests/ashare/test_rag_publish_date.py`
+
+**决策**
+- 从文件名解析 `YYYY-MM-DD` / `YYYYMMDD`；解析不到读同目录 `publish_dates.json` 覆盖；都没有 → `publish_date=None, publish_date_source='unknown'`，**不猜**。
+- 只写 metadata，**本期不做检索侧 `as_of_date` 过滤**（架构 A6）。
+
+**验收断言**
+- 文件名 `研报_茅台_2026-05-18.pdf` → chunk metadata `publish_date='2026-05-18'`
+- 无日期文件 → `publish_date=None, publish_date_source='unknown'`
+- 现有 `search_research_docs` 行为不变
 
 ## 自查
 
