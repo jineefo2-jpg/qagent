@@ -501,3 +501,121 @@ def ingest_industry_member(conn, src) -> int:
     except Exception as exc:                 # noqa: BLE001
         set_job(conn, job, "industry_member", "all", "RETRY", error=str(exc)[:500])
         raise
+
+
+# ══════════════ 宏观 PIT（D4）══════════════
+def month_end(yyyymm: str) -> _dt.date:
+    y, m = int(yyyymm[:4]), int(yyyymm[4:6])
+    nxt = _dt.date(y + (m == 12), 1 if m == 12 else m + 1, 1)
+    return nxt - _dt.timedelta(days=1)
+
+
+# 历史 publish_date 只能按规则回填，规则一律取【保守晚值】：宁可晚几天可见，绝不提前。
+#   (kind, day)：'next_month' = 次月第 day 日；'same' = 当日
+_PUBLISH_RULE: dict[str, tuple[str, int]] = {
+    "m1_yoy": ("next_month", 15), "m2_yoy": ("next_month", 15), "tsf_stock_yoy": ("next_month", 15),
+    "cpi_yoy": ("next_month", 10), "ppi_yoy": ("next_month", 10),
+    "pmi_mfg": ("next_month", 1),
+    "shibor_3m": ("same", 0), "cn10y": ("same", 0),
+}
+
+
+def rule_publish_date(indicator: str, period: _dt.date) -> _dt.date:
+    kind, day = _PUBLISH_RULE[indicator]          # 未知指标 → KeyError，不猜
+    if kind == "same":
+        return period
+    y, m = period.year + (period.month == 12), 1 if period.month == 12 else period.month + 1
+    return _dt.date(y, m, day)
+
+
+def _yyyymm(d: _dt.date) -> str:
+    return f"{d.year:04d}{d.month:02d}"
+
+
+def _months_back(d: _dt.date, n: int) -> _dt.date:
+    y, m = d.year, d.month - n
+    while m <= 0:
+        y, m = y - 1, m + 12
+    return _dt.date(y, m, 1)
+
+
+# indicator → (adapter 方法, 取值列, period 列, 是否月频)
+_MACRO_SPEC: dict[str, tuple[str, str, str, bool]] = {
+    "m1_yoy":    ("cn_m",    "m1_yoy",    "month", True),
+    "m2_yoy":    ("cn_m",    "m2_yoy",    "month", True),
+    "cpi_yoy":   ("cn_cpi",  "nt_yoy",    "month", True),
+    "ppi_yoy":   ("cn_ppi",  "ppi_yoy",   "month", True),
+    "pmi_mfg":   ("cn_pmi",  "pmi010000", "month", True),
+    "shibor_3m": ("shibor",  "3m",        "date",  False),
+    "cn10y":     ("cn10y",   "value",     "period", False),
+}
+
+
+def _fetch_macro_series(src, indicator: str, start_d: _dt.date, end_d: _dt.date) -> pd.DataFrame:
+    """→ DataFrame[period(date), value(float)]，已限定在 [start_d, end_d]。"""
+    if indicator == "tsf_stock_yoy":
+        # 社融存量同比：Tushare sf_month 只给存量 stk_endval，需回看 13 个月自算
+        raw = src.sf_month(_yyyymm(_months_back(start_d, 13)), _yyyymm(end_d))
+        s = raw.assign(period=[month_end(str(m)) for m in raw["month"]]).set_index("period")["stk_endval"]
+        s = pd.to_numeric(s, errors="coerce").sort_index()
+        prev = s.shift(12)
+        yoy = (s / prev - 1.0) * 100.0
+        out = pd.DataFrame({"period": yoy.index, "value": yoy.values}).dropna()
+    else:
+        method, vcol, pcol, monthly = _MACRO_SPEC[indicator]
+        if monthly:
+            raw = getattr(src, method)(_yyyymm(start_d), _yyyymm(end_d))
+            periods = [month_end(str(m)) for m in raw[pcol]]
+        else:
+            raw = getattr(src, method)(start=start_d, end=end_d)
+            periods = [_as_date(x) for x in raw[pcol]]
+        out = pd.DataFrame({"period": periods, "value": pd.to_numeric(raw[vcol], errors="coerce").values}).dropna()
+    return out[(out["period"] >= start_d) & (out["period"] <= end_d)].reset_index(drop=True)
+
+
+def ingest_macro(conn, src, indicator: str, start, end, *, observed_on: _dt.date | None = None) -> int:
+    """observed_on=None：历史回补，publish_date 按规则；
+    observed_on=今天：每日增量——只对"库里尚无 publish_date <= observed_on 的行"的 period
+    写一条 (observed_on, 'observed')；已可见的 period 不重复写。两类行并存，PIT 由 query 层按 as_of 取。"""
+    start_d, end_d = _parse_date(start), _parse_date(end)
+    job = f"macro_indicator:{indicator}:{start_d.isoformat()}" + (f":obs{observed_on.isoformat()}" if observed_on else "")
+    set_job(conn, job, "macro_indicator", indicator, "RUNNING")
+    try:
+        series = _fetch_macro_series(src, indicator, start_d, end_d)
+        if observed_on is None:
+            df = pd.DataFrame({
+                "indicator": indicator, "period": series["period"],
+                "publish_date": [rule_publish_date(indicator, p) for p in series["period"]],
+                "value": series["value"], "publish_date_source": "rule"})
+        else:
+            visible = {r[0] for r in conn.execute(
+                "SELECT DISTINCT period FROM macro_indicator WHERE indicator = ? AND publish_date <= ?",
+                [indicator, observed_on]).fetchall()}
+            new = series[~series["period"].isin(visible)]
+            df = pd.DataFrame({
+                "indicator": indicator, "period": new["period"], "publish_date": observed_on,
+                "value": new["value"], "publish_date_source": "observed"})
+        n = _upsert(conn, "macro_indicator", df)
+        set_job(conn, job, "macro_indicator", indicator, "DONE", rows=n)
+        return n
+    except Exception as exc:                 # noqa: BLE001
+        set_job(conn, job, "macro_indicator", indicator, "RETRY", error=str(exc)[:500])
+        raise
+
+
+def ingest_hk_hold(conn, src, trade_date) -> int:
+    """北向持股占比（沪深港通）。2016-12-05 前无数据，不补 0（B5 由 FactorSpec.available_from 处理）。"""
+    d = _parse_date(trade_date)
+    job = f"money_flow:{d.isoformat()}"
+    set_job(conn, job, "money_flow", d.isoformat(), "RUNNING")
+    try:
+        raw = src.hk_hold(trade_date=d)
+        df = pd.DataFrame({"ts_code": raw["ts_code"], "trade_date": d,
+                           "hk_hold_ratio": pd.to_numeric(raw["ratio"], errors="coerce")})
+        df = df.dropna(subset=["ts_code"]).drop_duplicates("ts_code", keep="last")
+        n = _upsert(conn, "money_flow", df)
+        set_job(conn, job, "money_flow", d.isoformat(), "DONE", rows=n)
+        return n
+    except Exception as exc:                 # noqa: BLE001
+        set_job(conn, job, "money_flow", d.isoformat(), "RETRY", error=str(exc)[:500])
+        raise

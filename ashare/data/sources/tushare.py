@@ -135,5 +135,36 @@ class TushareSource:
     def cn_m(self, start_m: str, end_m: str) -> pd.DataFrame:
         return self._call("cn_m", start_m=start_m, end_m=end_m)
 
+    def cn_cpi(self, start_m: str, end_m: str) -> pd.DataFrame:
+        return self._call("cn_cpi", start_m=start_m, end_m=end_m)
+
+    def cn_ppi(self, start_m: str, end_m: str) -> pd.DataFrame:
+        return self._call("cn_ppi", start_m=start_m, end_m=end_m)
+
+    def cn_pmi(self, start_m: str, end_m: str) -> pd.DataFrame:
+        return self._call("cn_pmi", start_m=start_m, end_m=end_m)
+
+    def sf_month(self, start_m: str, end_m: str) -> pd.DataFrame:
+        return self._call("sf_month", start_m=start_m, end_m=end_m)
+
     def shibor(self, start=None, end=None) -> pd.DataFrame:
         return self._call("shibor", start_date=_fmt(start), end_date=_fmt(end))
+
+    def cn10y(self, start=None, end=None) -> pd.DataFrame:
+        """中国 10 年期国债收益率 → [period, value]。Tushare 无稳定接口，走 akshare（可选依赖）。
+        不经令牌桶（不是 Tushare 配额）。"""
+        try:
+            import akshare as ak
+        except ImportError as exc:
+            raise ImportError("cn10y 需要 akshare：pip install akshare") from exc
+        s = start.strftime("%Y%m%d") if hasattr(start, "strftime") else (start or "20100101").replace("-", "")
+        df = ak.bond_zh_us_rate(start_date=s)
+        col = next((c for c in df.columns if "中国国债收益率10年" in str(c)), None)
+        if col is None:
+            raise KeyError(f"akshare bond_zh_us_rate 缺少 10 年期列，实际列: {list(df.columns)}")
+        out = pd.DataFrame({"period": pd.to_datetime(df["日期"]).dt.date,
+                            "value": pd.to_numeric(df[col], errors="coerce")}).dropna()
+        if end is not None:
+            e = end if hasattr(end, "year") else pd.Timestamp(str(end)).date()
+            out = out[out["period"] <= e]
+        return out.reset_index(drop=True)
