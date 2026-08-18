@@ -11,7 +11,11 @@ from __future__ import annotations
 import ast, pathlib, sys
 
 DUCKDB_ALLOWED_PREFIX = ("data/",)
-QUERY_FIRST_PARAM_WHITELIST = {"get_tradable_mask"}     # ★ 唯一豁免，见规格 D2
+# L2 白名单（显式列名，不用模式）：
+#   get_tradable_mask —— 唯一首参为 exec_date 的【取数】函数（规格 D2 唯一豁免）
+#   open_db / preload —— 架构文档 §4.1 的连接生命周期 / 缓存预热函数，不返回任何数据，
+#                       调用方拿数据仍必须经 get_*(as_of_date, ...)
+QUERY_FIRST_PARAM_WHITELIST = {"get_tradable_mask", "open_db", "preload"}
 READONLY_LAYERS = ("report/", "agent_tools.py")
 DML = ("INSERT ", "UPDATE ", "DELETE ", "CREATE ", "DROP ", "ALTER ", "REPLACE ")
 FACTOR_FILES = {"price.py", "fundamental.py", "flow.py", "risk.py"}

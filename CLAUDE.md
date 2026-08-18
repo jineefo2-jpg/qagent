@@ -239,7 +239,8 @@ Detailed design: `docs/adr/0001-broker-abstraction.md`. The constraints below ar
 
 1. `ashare/data/query.py` 是唯一数据出口。任何模块直接 `import duckdb` 都要过
    `scripts/check_ashare_layering.py`（AST 静态检查，由 pytest 调用）。
-   唯一豁免：`get_tradable_mask(exec_date, ...)`，白名单里显式列名。
+   取数函数唯一豁免：`get_tradable_mask(exec_date, ...)`；连接生命周期 `open_db` / `preload` 不返回数据，
+   同在白名单里显式列名（`scripts/check_ashare_layering.py` 的 `QUERY_FIRST_PARAM_WHITELIST`）。
 2. 任何回测/信号产物必须同时记录 `param_hash` 与 `data_snapshot_id`。
 3. `ashare/agent_tools.py` 的工具**永远不进 `TRADING_TOOLS`**。
    注意 `TRADING_TOOLS` 的语义是「需要用户身份」而非「危险」——`get_user_profile` 也在其中。
