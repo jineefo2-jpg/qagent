@@ -1,4 +1,3 @@
-# ashare/data/sources/tushare.py
 """Tushare Pro adapter。职责只有两件：限频 + 把 Tushare 的 YYYYMMDD 字符串日期
 规范成 datetime.date。不做任何业务转换 —— 那是 ingest.normalize 的事。"""
 from __future__ import annotations

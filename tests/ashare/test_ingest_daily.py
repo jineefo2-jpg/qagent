@@ -72,3 +72,59 @@ def test_row_count_equals_trading_days_in_listing_window():
     daily = _daily([(D(2024,1,2), 100.0)])
     out = normalize_daily_bar(daily, _adj([D(2024,1,2)]), None, CAL, BASIC, STATUS)
     assert len(out) == 5
+
+
+def test_adj_factor_is_carried_forward_never_backfilled():
+    """占位行的复权因子只前推。用不同因子值才能区分 ffill 与 bfill（全 1.0 分不出来）。"""
+    daily = _daily([(D(2024,1,2), 100.0), (D(2024,1,5), 105.0)])
+    adj = pd.DataFrame([{"ts_code": "600519.SH", "trade_date": D(2024,1,2), "adj_factor": 1.0},
+                        {"ts_code": "600519.SH", "trade_date": D(2024,1,5), "adj_factor": 1.2}])
+    out = normalize_daily_bar(daily, adj, None, CAL, BASIC, STATUS).set_index("trade_date")
+    assert out.loc[D(2024,1,3)].adj_factor == 1.0 and out.loc[D(2024,1,4)].adj_factor == 1.0
+    assert out.loc[D(2024,1,8)].adj_factor == 1.2
+
+
+def test_leading_suspension_uses_seed_from_previous_batch():
+    """分批拉取：批次首日停牌但上一批有前收 → 用种子前推，而不是写 NaN / 用未来值回填。"""
+    daily = _daily([(D(2024,1,5), 105.0)])
+    out = normalize_daily_bar(daily, _adj([D(2024,1,5)]), None, CAL, BASIC, STATUS,
+                              seed_close=99.0, seed_adj=0.9).set_index("trade_date")
+    for d in (D(2024,1,2), D(2024,1,3), D(2024,1,4)):
+        assert out.loc[d].close == 99.0 and out.loc[d].adj_factor == 0.9 and out.loc[d].is_suspended
+
+
+def test_leading_suspension_without_seed_is_nan_not_fabricated():
+    daily = _daily([(D(2024,1,5), 105.0)])
+    out = normalize_daily_bar(daily, _adj([D(2024,1,5)]), None, CAL, BASIC, STATUS).set_index("trade_date")
+    assert pd.isna(out.loc[D(2024,1,2)].close) and pd.isna(out.loc[D(2024,1,2)].adj_factor)
+    assert out.loc[D(2024,1,2)].limit_source == "unknown", "无前收算不出涨跌停 → unknown，不得给 NaN 冒充 rule"
+
+
+def test_consecutive_suspended_days_share_last_real_close():
+    daily = _daily([(D(2024,1,2), 100.0), (D(2024,1,8), 108.0)])
+    out = normalize_daily_bar(daily, _adj([D(2024,1,2), D(2024,1,8)]), None, CAL, BASIC, STATUS).set_index("trade_date")
+    assert out.loc[D(2024,1,3)].close == out.loc[D(2024,1,4)].close == out.loc[D(2024,1,5)].close == 100.0
+
+
+def test_api_nan_limit_is_treated_as_missing():
+    """API 返回 NaN 涨跌停不能当有效值：下游 close >= NaN 恒 False → 真涨停被判可交易。"""
+    daily = _daily([(D(2024,1,2), 100.0)])
+    lim = pd.DataFrame([{"ts_code": "600519.SH", "trade_date": D(2024,1,2),
+                         "up_limit": float("nan"), "down_limit": float("nan")}])
+    out = normalize_daily_bar(daily, _adj([D(2024,1,2)]), lim, [D(2024,1,2)], BASIC, STATUS)
+    r = out.iloc[0]
+    assert r.limit_source == "rule" and r.limit_up == 110.0
+
+
+def test_duplicate_source_rows_do_not_inflate_row_count():
+    """Tushare 偶发重复行；行数 == 交易日数是本函数存在的唯一理由，必须守住。"""
+    daily = pd.concat([_daily([(D(2024,1,2), 100.0)]), _daily([(D(2024,1,2), 100.5)])])
+    out = normalize_daily_bar(daily, _adj([D(2024,1,2)]), None, [D(2024,1,2), D(2024,1,3)], BASIC, STATUS)
+    assert len(out) == 2 and out.iloc[0].close == 100.5     # keep="last"
+
+
+def test_rows_stop_at_delist_date_inclusive():
+    basic = {"ts_code": "600519.SH", "list_date": D(2001,8,27), "delist_date": D(2024,1,4)}
+    daily = _daily([(D(2024,1,2), 100.0), (D(2024,1,3), 99.0), (D(2024,1,4), 98.0)])
+    out = normalize_daily_bar(daily, _adj([D(2024,1,2), D(2024,1,3), D(2024,1,4)]), None, CAL, basic, STATUS)
+    assert out.trade_date.max() == D(2024,1,4) and len(out) == 3

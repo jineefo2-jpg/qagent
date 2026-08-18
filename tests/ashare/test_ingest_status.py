@@ -55,3 +55,31 @@ def test_delist_period_from_name_suffix():
 def test_stock_with_no_namechange_gets_normal_row():
     out = derive_stock_status(_nc([]), _basic([("600519.SH", "贵州茅台", D(2001,8,27), None)]))
     assert len(out) == 1 and out.iloc[0].status == "NORMAL"
+
+
+def test_sh_delist_prefix_is_delist_period():
+    """上交所退市整理期用『退市』前缀（退市海润/退市长油），不是深交所的『退』后缀。
+    漏掉它们会让退市整理期股票直接进股票池。"""
+    nc = _nc([("600401.SH", "退市海润", D(2019,6,1), D(2019,7,1))])
+    out = derive_stock_status(nc, _basic([("600401.SH", "退市海润", D(2000,1,1), D(2019,7,2))]))
+    assert set(out.status) == {"DELIST_PERIOD"}
+
+
+def test_s_star_st_is_star_st():
+    """2006–2007 未股改 + *ST：『S*ST兰宝』既不是 NORMAL 也不是普通 ST。"""
+    nc = _nc([("000631.SZ", "S*ST兰宝", D(2006,5,1), D(2007,5,1))])
+    out = derive_stock_status(nc, _basic([("000631.SZ", "兰宝", D(2000,1,1), None)]))
+    assert set(out.status) == {"*ST"}
+
+
+def test_mixed_timestamp_and_date_inputs_do_not_crash():
+    """真实调用路径：basic 来自 DuckDB fetchdf()（pandas Timestamp），namechange 来自 adapter（date）。
+    两者混进 start_date 一列后 sort_values 曾抛 TypeError。"""
+    nc = _nc([("000001.SZ", "ST深发展", D(2012,1,1), D(2013,6,30))])
+    basic = pd.DataFrame([("000001.SZ", "平安银行", pd.Timestamp("2000-01-01"), pd.NaT),
+                          ("600519.SH", "贵州茅台", pd.Timestamp("2001-08-27"), pd.NaT)],
+                         columns=["ts_code", "name", "list_date", "delist_date"])
+    out = derive_stock_status(nc, basic)
+    assert len(out) == 2
+    assert all(isinstance(x, dt.date) for x in out.start_date), "输出必须统一为 datetime.date"
+    assert out[out.ts_code == "600519.SH"].iloc[0].end_date is None, "NaT 必须归一化为 None"

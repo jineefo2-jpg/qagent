@@ -1,4 +1,3 @@
-# scripts/check_ashare_layering.py
 """ashare/ 分层与签名静态检查（AST，不导入被检查模块）。
 
 四类规则：

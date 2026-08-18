@@ -1,4 +1,3 @@
-# ashare/data/_db.py
 """DuckDB 连接与 schema 管理。ingest 是唯一写者，query 只用 read_only 连接。
 
 ★ 同一进程内对同一文件不能同时持有 connect_write 与 connect_read

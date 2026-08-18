@@ -1,4 +1,3 @@
-# ashare/data/sources/_ratelimit.py
 """持久化令牌桶。Tushare 限频按账号算，跨进程共享 —— 状态必须落盘，
 否则分批 ingest 时第二个进程会把配额当全新的，直接撞限频。"""
 from __future__ import annotations
