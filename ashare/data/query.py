@@ -207,3 +207,157 @@ def preload(start: DateLike, end: DateLike,
 
 def clear_preload() -> None:
     _PRELOAD.clear()
+
+
+# ══════════════ 股票池与元数据（D5）══════════════
+_ST_STATES = ("ST", "*ST", "DELIST_PERIOD")
+
+
+def _stock_frame(as_of: _dt.date) -> pd.DataFrame:
+    """所有股票（含已退市）+ as_of 当日的状态 / 停牌 / 20 日均成交额。一次 SQL，后续在 pandas 里分步。"""
+    sql = """
+    WITH st AS (
+        SELECT ts_code, status FROM stock_status
+        WHERE start_date <= ? AND (end_date IS NULL OR ? <= end_date)
+    ),
+    bar AS (
+        SELECT ts_code, is_suspended FROM daily_bar WHERE trade_date = ?
+    ),
+    liq AS (
+        SELECT ts_code, avg(amount) AS adv20 FROM (
+            SELECT ts_code, amount,
+                   row_number() OVER (PARTITION BY ts_code ORDER BY trade_date DESC) AS rn
+            FROM daily_bar WHERE trade_date <= ?
+        ) WHERE rn <= 20 GROUP BY ts_code
+    )
+    SELECT b.ts_code, b.market, b.list_date, b.delist_date,
+           st.status, bar.is_suspended, liq.adv20
+    FROM stock_basic b
+    LEFT JOIN st  ON st.ts_code  = b.ts_code
+    LEFT JOIN bar ON bar.ts_code = b.ts_code
+    LEFT JOIN liq ON liq.ts_code = b.ts_code
+    ORDER BY b.ts_code
+    """
+    df = _conn().execute(sql, [as_of, as_of, as_of, as_of]).fetchdf()
+    for c in ("list_date", "delist_date"):
+        df[c] = [None if pd.isna(x) else pd.Timestamp(x).date() for x in df[c]]
+    return df.set_index("ts_code")
+
+
+def explain_universe(as_of_date: DateLike, *,
+                     min_list_days: int = 250,
+                     exclude_st: bool = True,
+                     exclude_suspended: bool = True,
+                     liquidity_drop_pct: float = 0.20,
+                     markets: Sequence[str] | None = None) -> pd.DataFrame:
+    """调试与验收用。index=ts_code；逐步布尔列 + included + drop_reason（首个未通过的步骤）。
+    ★ 剔除顺序固定：1 退市 → 2 上市满 min_list_days → 3 非 ST → 4 当日有行且非停牌
+      → 5 市场过滤 → 6 在 1–5 剩余池内算 20 日均成交额分位，剔后 liquidity_drop_pct（floor）。
+    先硬性剔除、后算流动性分位 —— 顺序颠倒会让退市股/次新股参与分位计算，结果不同。"""
+    as_of = _norm_date(as_of_date)
+    _check_in_calendar(as_of)
+    f = _stock_frame(as_of)
+    seasoned_before = as_of - _dt.timedelta(days=min_list_days)
+
+    out = pd.DataFrame(index=f.index)
+    out["step1_listed"] = [(ld is not None and ld <= as_of) and (dd is None or dd > as_of)
+                           for ld, dd in zip(f["list_date"], f["delist_date"])]
+    out["step2_seasoned"] = [(ld is not None and ld <= seasoned_before) for ld in f["list_date"]]
+    st_flag = f["status"].isin(_ST_STATES).fillna(False)
+    out["step3_not_st"] = (~st_flag) if exclude_st else True
+    has_bar = f["is_suspended"].notna()
+    susp = f["is_suspended"].fillna(True).astype(bool)
+    out["step4_tradable"] = (has_bar & ~susp) if exclude_suspended else has_bar
+    out["step5_market"] = f["market"].isin(list(markets)) if markets else True
+
+    hard = out[["step1_listed", "step2_seasoned", "step3_not_st", "step4_tradable", "step5_market"]].all(axis=1)
+    pool = f.loc[hard, "adv20"].fillna(0.0)
+    n_drop = int(len(pool) * liquidity_drop_pct)
+    dropped = set(pool.sort_values(kind="mergesort").index[:n_drop]) if n_drop > 0 else set()
+    out["step6_liquid"] = [(c in pool.index) and (c not in dropped) for c in out.index]
+
+    out["included"] = out[["step1_listed", "step2_seasoned", "step3_not_st",
+                           "step4_tradable", "step5_market", "step6_liquid"]].all(axis=1)
+    reasons = []
+    for c in out.index:
+        r = out.loc[c]
+        if not r.step1_listed:
+            dd = f.at[c, "delist_date"]
+            reasons.append("delisted" if (dd is not None and dd <= as_of) else "not_listed")
+        elif not r.step2_seasoned:
+            reasons.append("seasoning")
+        elif not r.step3_not_st:
+            reasons.append("st")
+        elif not r.step4_tradable:
+            flag = f.at[c, "is_suspended"]
+            reasons.append("no_bar" if pd.isna(flag) else ("suspended" if bool(flag) else "no_bar"))
+        elif not r.step5_market:
+            reasons.append("market")
+        elif not r.step6_liquid:
+            reasons.append("illiquid")
+        else:
+            reasons.append("")
+    out["drop_reason"] = reasons
+    return out
+
+
+def get_universe(as_of_date: DateLike, *,
+                 min_list_days: int = 250,
+                 exclude_st: bool = True,
+                 exclude_suspended: bool = True,
+                 liquidity_drop_pct: float = 0.20,
+                 markets: Sequence[str] | None = None) -> list[str]:
+    """as_of_date 当日可交易股票池（ts_code 升序）。规则与顺序见 explain_universe。"""
+    ex = explain_universe(as_of_date, min_list_days=min_list_days, exclude_st=exclude_st,
+                          exclude_suspended=exclude_suspended, liquidity_drop_pct=liquidity_drop_pct,
+                          markets=markets)
+    return sorted(ex.index[ex["included"]].tolist())
+
+
+_BASIC_COLS = ["symbol", "name", "sw_l1", "sw_l2", "sw_l3", "market", "list_date", "delist_date", "is_hs"]
+
+
+def get_stock_basic(as_of_date: DateLike,
+                    ts_codes: Sequence[str] | None = None) -> pd.DataFrame:
+    """index=ts_code。sw_* 取 as_of_date 时点的行业（industry_member PIT）；
+    name 为当前名称（历史名称仅用于推 ST 状态，已固化进 stock_status，不单独存）。"""
+    as_of = _norm_date(as_of_date)
+    _check_in_calendar(as_of)
+    sql = """
+    SELECT b.ts_code, b.symbol, b.name, m.sw_l1, m.sw_l2, m.sw_l3, b.market,
+           b.list_date, b.delist_date, b.is_hs
+    FROM stock_basic b
+    LEFT JOIN industry_member m
+      ON m.ts_code = b.ts_code AND m.in_date <= ? AND (m.out_date IS NULL OR ? <= m.out_date)
+    """
+    # 区间语义与 stock_status 一致：in_date / out_date 均【含当日】
+    params: list = [as_of, as_of]
+    if ts_codes is not None:
+        codes = list(ts_codes)
+        if not codes:
+            return pd.DataFrame(columns=_BASIC_COLS).rename_axis("ts_code")
+        sql += " WHERE b.ts_code IN (" + ",".join("?" * len(codes)) + ")"
+        params += codes
+    sql += " ORDER BY b.ts_code"
+    df = _conn().execute(sql, params).fetchdf()
+    for c in ("list_date", "delist_date"):
+        df[c] = [None if pd.isna(x) else pd.Timestamp(x).date() for x in df[c]]
+    df = df.drop_duplicates("ts_code", keep="last")     # 行业区间若重叠取最新一段
+    return df.set_index("ts_code")[_BASIC_COLS]
+
+
+def get_industry(as_of_date: DateLike,
+                 ts_codes: Sequence[str] | None = None,
+                 level: str = "l1",
+                 *, min_members: int = 5) -> pd.Series:
+    """index=ts_code → 申万行业。★ 成分数 < min_members 的行业统一归入 '__OTHER__'，
+    否则中性化 OLS 的行业 dummy 会奇异（架构 B7）。无行业记录的股票也归 '__OTHER__'。"""
+    if level not in ("l1", "l2", "l3"):
+        raise UnknownFieldError(f"level 只能是 l1/l2/l3，收到 {level!r}")
+    b = get_stock_basic(as_of_date, ts_codes)
+    s = b[f"sw_{level}"].fillna("__OTHER__").astype(str)
+    counts = s.value_counts()
+    small = set(counts[counts < min_members].index)
+    s = s.where(~s.isin(small), "__OTHER__")
+    s.name = f"sw_{level}"
+    return s

@@ -76,10 +76,12 @@ def market_db(tmp_path: pathlib.Path) -> str:
 
     # 日线：每股每交易日一行（D9）。A 在 01-15~01-17 停牌；价格线性上涨便于断言；C 退市后无行
     bars = []
-    for code, base, susp in (("A00001.SZ", 10.0, {dt.date(2024, 1, 15), dt.date(2024, 1, 16), dt.date(2024, 1, 17)}),
-                             ("B00002.SZ", 20.0, set()),
-                             ("C00003.SH", 5.0, set()),
-                             ("D00004.SZ", 30.0, set())):
+    # base_amt：A 最活跃、C 最不活跃（流动性剔除的靶子）
+    for code, base, susp, base_amt in (
+            ("A00001.SZ", 10.0, {dt.date(2024, 1, 15), dt.date(2024, 1, 16), dt.date(2024, 1, 17)}, 1e6),
+            ("B00002.SZ", 20.0, set(), 5e5),
+            ("C00003.SH", 5.0, set(), 1e4),
+            ("D00004.SZ", 30.0, set(), 2e5)):
         prev_close = None
         for i, d in enumerate(TRADING_DAYS):
             if code == "C00003.SH" and d > dt.date(2024, 1, 24):
@@ -93,7 +95,7 @@ def market_db(tmp_path: pathlib.Path) -> str:
                 continue
             pre = prev_close if prev_close is not None else px
             bars.append((code, d, px, px + 0.05, px - 0.05, px, pre,
-                         1000.0 + i, 1e5 * (1 + i / 10), 1.0 + i * 0.01,
+                         1000.0 + i, base_amt * (1 + i / 10), 1.0 + i * 0.01,
                          round(pre * 1.1, 2), round(pre * 0.9, 2), "rule", False))
             prev_close = px
     c.executemany(
