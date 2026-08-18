@@ -127,3 +127,123 @@ def ingest_stock_status(conn, src) -> int:
     n = _upsert(conn, "stock_status", status, ["ts_code", "start_date"])
     set_job(conn, "stock_status:all", "stock_status", "all", "DONE", rows=n)
     return n
+
+
+# ══════════════ 日线：按交易日历补齐停牌占位行（D9 / 架构师 B3）══════════════
+from .limits import compute_limits
+
+_DAILY_BAR_COLS = ["ts_code", "trade_date", "open", "high", "low", "close", "pre_close",
+                   "vol", "amount", "adj_factor", "limit_up", "limit_down",
+                   "limit_source", "is_suspended"]
+
+
+def _status_at(status_rows: list[dict], d: _dt.date) -> str:
+    for r in status_rows:
+        start = r["start_date"]
+        end = r.get("end_date")
+        if start is not None and start <= d and (end is None or d <= end):
+            return r["status"]
+    return "NORMAL"
+
+
+def normalize_daily_bar(daily: pd.DataFrame,
+                        adj: pd.DataFrame,
+                        limit: pd.DataFrame | None,
+                        calendar_dates: list[_dt.date],
+                        basic_row: dict,
+                        status_rows: list[dict]) -> pd.DataFrame:
+    """把 Tushare 三张表合成 daily_bar，并【按交易日历补齐停牌占位行】（D9 / 架构师 B3）。
+
+    ★ 这是全套设计里最隐蔽的一个坑：Tushare `daily` 在停牌日不返回该股的行。
+      不补行的话，get_bars(lookback=20) 拿到的是「最近 20 条记录」而不是
+      「最近 20 个交易日」—— 一只停牌 5 天的股票，它的 reversal_20 实际覆盖
+      25 个交易日。横截面因子被静默污染，且完全不报错。
+    """
+    ts_code = basic_row["ts_code"]
+    list_date = basic_row.get("list_date")
+    delist_date = basic_row.get("delist_date")
+
+    # 1. 只保留在市区间内的交易日
+    dates = [d for d in sorted(calendar_dates)
+             if (list_date is None or d >= list_date)
+             and (delist_date is None or d <= delist_date)]
+    if not dates:
+        return pd.DataFrame(columns=_DAILY_BAR_COLS)
+
+    # 2. 以完整交易日历为骨架左连接
+    frame = pd.DataFrame({"trade_date": dates})
+    d = daily.copy() if daily is not None and len(daily) else pd.DataFrame(
+        columns=["trade_date", "open", "high", "low", "close", "pre_close", "vol", "amount"])
+    frame = frame.merge(d.drop(columns=["ts_code"], errors="ignore"), on="trade_date", how="left")
+
+    a = adj.copy() if adj is not None and len(adj) else pd.DataFrame(
+        columns=["trade_date", "adj_factor"])
+    frame = frame.merge(a.drop(columns=["ts_code"], errors="ignore"), on="trade_date", how="left")
+
+    frame = frame.sort_values("trade_date").reset_index(drop=True)
+
+    # 3. 标记停牌（daily 无行 = 停牌）并填占位值
+    frame["is_suspended"] = frame["close"].isna()
+    frame["adj_factor"] = frame["adj_factor"].ffill().bfill()
+
+    prev_close = None
+    for i in frame.index:
+        if frame.at[i, "is_suspended"]:
+            fill = prev_close
+            for c in ("open", "high", "low", "close", "pre_close"):
+                frame.at[i, c] = fill
+            frame.at[i, "vol"] = 0.0
+            frame.at[i, "amount"] = 0.0
+        prev_close = frame.at[i, "close"]
+
+    # 4. 涨跌停：API 优先，缺失走规则兜底（B2）
+    lim_map: dict[_dt.date, tuple[float, float]] = {}
+    if limit is not None and len(limit):
+        for _, r in limit.iterrows():
+            lim_map[r["trade_date"]] = (r.get("up_limit"), r.get("down_limit"))
+
+    ups, downs, srcs = [], [], []
+    for _, r in frame.iterrows():
+        td = r["trade_date"]
+        if td in lim_map and lim_map[td][0] is not None:
+            ups.append(lim_map[td][0]); downs.append(lim_map[td][1]); srcs.append("api")
+            continue
+        u, dn, src = compute_limits(ts_code, td, r.get("pre_close"),
+                                    list_date, _status_at(status_rows, td))
+        ups.append(u); downs.append(dn); srcs.append(src)
+
+    frame["ts_code"] = ts_code
+    frame["limit_up"], frame["limit_down"], frame["limit_source"] = ups, downs, srcs
+    return frame[_DAILY_BAR_COLS]
+
+
+def ingest_daily_bar(conn, src, ts_code: str, start, end) -> int:
+    job = f"daily_bar:{ts_code}:{start}"
+    if job_state(conn, job) == "DONE":
+        return 0
+    set_job(conn, job, "daily_bar", ts_code, "RUNNING")
+    try:
+        daily = src.daily(ts_code=ts_code, start=start, end=end)
+        adj = src.adj_factor(ts_code=ts_code, start=start, end=end)
+        try:
+            limit = src.stk_limit(ts_code=ts_code, start=start, end=end)
+        except Exception:
+            limit = None                     # 无权限 → 走规则兜底，不是错误
+
+        cal = [r[0] for r in conn.execute(
+            "SELECT trade_date FROM calendar WHERE is_open AND trade_date BETWEEN ? AND ? "
+            "ORDER BY trade_date", [start, end]).fetchall()]
+        basic = conn.execute(
+            "SELECT ts_code, list_date, delist_date FROM stock_basic WHERE ts_code = ?",
+            [ts_code]).fetchdf().to_dict("records")[0]
+        status = conn.execute(
+            "SELECT start_date, end_date, status FROM stock_status WHERE ts_code = ? "
+            "ORDER BY start_date", [ts_code]).fetchdf().to_dict("records")
+
+        out = normalize_daily_bar(daily, adj, limit, cal, basic, status)
+        n = _upsert(conn, "daily_bar", out, ["ts_code", "trade_date"])
+        set_job(conn, job, "daily_bar", ts_code, "DONE", rows=n)
+        return n
+    except Exception as exc:                 # noqa: BLE001
+        set_job(conn, job, "daily_bar", ts_code, "RETRY", error=str(exc)[:500])
+        raise

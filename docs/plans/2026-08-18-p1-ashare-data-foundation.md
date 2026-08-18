@@ -1292,7 +1292,9 @@ def test_no_rows_outside_listing_window():
     out = normalize_daily_bar(_daily([(D(2024,1,5), 105.0)]), _adj([D(2024,1,5)]),
                               None, CAL, basic, STATUS)
     assert out.trade_date.min() >= D(2024,1,4)
-    assert len(out) == 2                       # 1/4 占位 + 1/5 实际
+    assert len(out) == 3                       # 1/4 占位 + 1/5 实际 + 1/8 占位（1/2、1/3 在上市前，不得出现）
+    assert list(out.is_suspended) == [True, False, True]
+    assert pd.isna(out.iloc[0].close), "上市首日即停牌且无前收 → OHLC 为 NaN，不得编造价格"
 
 def test_limit_falls_back_to_rule_when_api_missing():
     daily = _daily([(D(2024,1,2), 100.0)])
