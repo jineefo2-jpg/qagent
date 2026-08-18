@@ -38,3 +38,9 @@ itsdangerous>=2.1.0
 
 # 凭证加密存储（broker 多租户绑定，X3 起）
 cryptography>=42.0.0
+
+# A 股数据底座（P1）
+# duckdb 大版本锁定：文件格式跨大版本不保证兼容，Parquet 冷备是逃生通道
+duckdb>=1.0.0,<2.0.0
+tushare>=1.4.0
+baostock>=0.8.8
