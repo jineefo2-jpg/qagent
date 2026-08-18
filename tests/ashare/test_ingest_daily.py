@@ -74,8 +74,8 @@ def test_row_count_equals_trading_days_in_listing_window():
     assert len(out) == 5
 
 
-def test_adj_factor_is_carried_forward_never_backfilled():
-    """占位行的复权因子只前推。用不同因子值才能区分 ffill 与 bfill（全 1.0 分不出来）。"""
+def test_adj_factor_is_carried_forward():
+    """占位行的复权因子前推（用不同因子值才看得出方向）；『不 bfill』由 test_leading_suspension_without_seed_is_nan_not_fabricated 钉住。"""
     daily = _daily([(D(2024,1,2), 100.0), (D(2024,1,5), 105.0)])
     adj = pd.DataFrame([{"ts_code": "600519.SH", "trade_date": D(2024,1,2), "adj_factor": 1.0},
                         {"ts_code": "600519.SH", "trade_date": D(2024,1,5), "adj_factor": 1.2}])
@@ -128,3 +128,11 @@ def test_rows_stop_at_delist_date_inclusive():
     daily = _daily([(D(2024,1,2), 100.0), (D(2024,1,3), 99.0), (D(2024,1,4), 98.0)])
     out = normalize_daily_bar(daily, _adj([D(2024,1,2), D(2024,1,3), D(2024,1,4)]), None, CAL, basic, STATUS)
     assert out.trade_date.max() == D(2024,1,4) and len(out) == 3
+
+
+def test_parse_date_rejects_numeric():
+    from ashare.data.ingest import _parse_date
+    import pytest as _pt
+    with _pt.raises(TypeError):
+        _parse_date(20240102)
+    assert _parse_date("20240102") == _parse_date("2024-01-02") == D(2024,1,2)

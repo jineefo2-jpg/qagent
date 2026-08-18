@@ -184,7 +184,7 @@ def test_ingest_industry_member_pit_rows(conn):
 def test_ingest_industry_member_degrades_explicitly_without_permission(conn):
     """无申万成分权限 → 用 stock_basic.industry 降级，且必须显式记录，不得静默。"""
     src = FakeSrc()
-    src.perm_error = RuntimeError("抱歉，您没有访问该接口的权限")
+    src.perm_error = RuntimeError("抱歉，您没有访问该接口的权限，权限的具体详情访问：https://tushare.pro/document/1?doc_id=108。")
     ingest.ingest_stock_basic(conn, src)
     n = ingest.ingest_industry_member(conn, src)
     assert n == 2
@@ -195,7 +195,7 @@ def test_ingest_industry_member_degrades_explicitly_without_permission(conn):
 
 def test_ingest_industry_member_transient_error_propagates(conn):
     src = FakeSrc()
-    src.perm_error = RuntimeError("每分钟最多访问该接口")
+    src.perm_error = RuntimeError("抱歉，您每分钟最多访问该接口500次，权限的具体详情访问：https://tushare.pro/document/1?doc_id=108。")
     ingest.ingest_stock_basic(conn, src)
     with pytest.raises(RuntimeError, match="每分钟"):
         ingest.ingest_industry_member(conn, src)

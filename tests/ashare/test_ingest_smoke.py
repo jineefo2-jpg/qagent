@@ -159,7 +159,7 @@ def test_ingest_daily_bar_second_batch_seeds_from_first(conn):
 
 def test_stk_limit_permission_error_falls_back_to_rule_and_is_remembered(conn):
     src = FakeSource()
-    src.stk_limit_error = RuntimeError("抱歉，您没有访问该接口的权限，权限的具体详情访问：https://tushare.pro/document/1?doc_id=108")
+    src.stk_limit_error = RuntimeError("抱歉，您没有访问该接口的权限，权限的具体详情访问：https://tushare.pro/document/1?doc_id=108。")
     _prime(conn, src)
     ingest.ingest_daily_bar(conn, src, "600519.SH", "20240102", "20240105")
     r = conn.execute("SELECT limit_up, limit_source FROM daily_bar "
@@ -171,9 +171,19 @@ def test_stk_limit_permission_error_falls_back_to_rule_and_is_remembered(conn):
 def test_stk_limit_transient_error_is_not_swallowed(conn):
     """限频 / 网络错误必须抛出进 RETRY，不能被当成"无权限"静默降级。"""
     src = FakeSource()
-    src.stk_limit_error = RuntimeError("抱歉，您每分钟最多访问该接口500次")
+    src.stk_limit_error = RuntimeError("抱歉，您每分钟最多访问该接口500次，权限的具体详情访问：https://tushare.pro/document/1?doc_id=108。")
     _prime(conn, src)
     with pytest.raises(RuntimeError, match="每分钟"):
         ingest.ingest_daily_bar(conn, src, "600519.SH", "20240102", "20240105")
     assert ingest.job_state(conn, "daily_bar:600519.SH:2024-01-02") == "RETRY"
     assert conn.execute("SELECT count(*) FROM daily_bar").fetchone()[0] == 0
+
+
+def test_daily_quota_error_is_transient_not_denied(conn):
+    """日配额用尽的文案也带"权限的具体详情访问…"，但它是临时的 → RETRY，不得永久降级。"""
+    src = FakeSource()
+    src.stk_limit_error = RuntimeError("抱歉，您每天最多访问该接口20000次，权限的具体详情访问：https://tushare.pro/document/1?doc_id=108。")
+    _prime(conn, src)
+    with pytest.raises(RuntimeError, match="每天"):
+        ingest.ingest_daily_bar(conn, src, "600519.SH", "20240102", "20240105")
+    assert getattr(src, "_stk_limit_denied", False) is False

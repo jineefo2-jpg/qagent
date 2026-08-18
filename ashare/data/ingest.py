@@ -178,6 +178,16 @@ def _none_if_nan(x):
     return None if x is None or pd.isna(x) else x
 
 
+def _is_permission_denied(exc: BaseException) -> bool:
+    """Tushare 三类错误文案（尾巴都带"权限的具体详情访问：…"，不能只看'权限'两个字）：
+      无权限：  抱歉，您没有访问该接口的权限，权限的具体详情访问：…      → 永久，可降级
+      分钟限频：抱歉，您每分钟最多访问该接口500次，权限的具体详情访问：… → 临时，必须 RETRY
+      日配额：  抱歉，您每天最多访问该接口N次，权限的具体详情访问：…     → 临时，必须 RETRY
+    只有同时含"没有"+"权限"，或明确"积分不足"，才算无权限。"""
+    msg = str(exc)
+    return ("没有" in msg and "权限" in msg) or "积分不足" in msg
+
+
 def normalize_daily_bar(daily: pd.DataFrame,
                         adj: pd.DataFrame,
                         limit: pd.DataFrame | None,
@@ -218,11 +228,13 @@ def normalize_daily_bar(daily: pd.DataFrame,
     d = daily.copy() if daily is not None and len(daily) else pd.DataFrame(
         columns=["trade_date", "open", "high", "low", "close", "pre_close", "vol", "amount"])
     d = d.drop(columns=["ts_code"], errors="ignore").drop_duplicates("trade_date", keep="last")
+    d["trade_date"] = [_as_date(x) for x in d["trade_date"]]
     frame = frame.merge(d, on="trade_date", how="left")
 
     a = adj.copy() if adj is not None and len(adj) else pd.DataFrame(
         columns=["trade_date", "adj_factor"])
     a = a.drop(columns=["ts_code"], errors="ignore").drop_duplicates("trade_date", keep="last")
+    a["trade_date"] = [_as_date(x) for x in a["trade_date"]]
     frame = frame.merge(a, on="trade_date", how="left")
 
     frame = frame.sort_values("trade_date").reset_index(drop=True)
@@ -275,24 +287,27 @@ def _fetch_limit(src, ts_code: str, start, end) -> pd.DataFrame | None:
         return None
     try:
         return src.stk_limit(ts_code=ts_code, start=start, end=end)
-    except Exception as exc:                 # noqa: BLE001 — 只吃权限类，其余重新抛
-        msg = str(exc)
-        if "权限" in msg or "积分" in msg:
+    except Exception as exc:                 # noqa: BLE001 — 只吃无权限，限频/配额/网络重新抛
+        if _is_permission_denied(exc):
             src._stk_limit_denied = True
             return None
         raise
 
 
 def _seed_before(conn, ts_code: str, start) -> tuple[float | None, float | None]:
-    """本批次之前最后一个非停牌交易日的 (close, adj_factor)，供跨批次前推。"""
-    row = conn.execute(
-        "SELECT close, adj_factor FROM daily_bar WHERE ts_code = ? AND trade_date < ? "
-        "AND NOT is_suspended ORDER BY trade_date DESC LIMIT 1", [ts_code, start]).fetchone()
-    return (row[0], row[1]) if row else (None, None)
+    """跨批次前推的种子：close 取上一批最后一个非停牌日；adj_factor 取最后一个非空值
+    （停牌期间也可能除权，两者不一定在同一天）。"""
+    c = conn.execute("SELECT close FROM daily_bar WHERE ts_code = ? AND trade_date < ? "
+                     "AND NOT is_suspended ORDER BY trade_date DESC LIMIT 1", [ts_code, start]).fetchone()
+    a = conn.execute("SELECT adj_factor FROM daily_bar WHERE ts_code = ? AND trade_date < ? "
+                     "AND adj_factor IS NOT NULL ORDER BY trade_date DESC LIMIT 1", [ts_code, start]).fetchone()
+    return (c[0] if c else None, a[0] if a else None)
 
 
 def _parse_date(x) -> _dt.date:
     """'YYYYMMDD' / 'YYYY-MM-DD' / date / Timestamp → datetime.date。SQL 参数必须是真日期，不能是字符串。"""
+    if isinstance(x, (int, float)) and not isinstance(x, bool):
+        raise TypeError(f"日期不接受数值 {x!r}（pd.Timestamp 会当作纳秒 → 1970-01-01 静默错），请传 'YYYYMMDD' 或 date")
     if isinstance(x, str):
         return _dt.datetime.strptime(x.replace("-", ""), "%Y%m%d").date()
     d = _as_date(x)
@@ -451,7 +466,7 @@ def ingest_index_daily(conn, src, index_code: str, start, end) -> int:
         try:
             pe = src.index_dailybasic(index_code, start=start_d, end=end_d)
         except Exception as exc:             # noqa: BLE001 — 估值是附加信息，无权限不阻断指数行情
-            if "权限" not in str(exc) and "积分" not in str(exc):
+            if not _is_permission_denied(exc):
                 raise
             pe = None
         if pe is not None and len(pe):
@@ -482,8 +497,8 @@ def ingest_industry_member(conn, src) -> int:
         try:
             df = src.sw_members()
             source = "sw"
-        except Exception as exc:             # noqa: BLE001 — 只吃权限类
-            if "权限" not in str(exc) and "积分" not in str(exc):
+        except Exception as exc:             # noqa: BLE001 — 只吃无权限
+            if not _is_permission_denied(exc):
                 raise
             basic = conn.execute("SELECT ts_code, industry, list_date FROM stock_basic").fetchall()
             df = pd.DataFrame(basic, columns=["ts_code", "sw_l1", "in_date"])
