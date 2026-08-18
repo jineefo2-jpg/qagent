@@ -395,7 +395,6 @@ def merge_financial_frames(income, balance, cashflow, fina) -> tuple[pd.DataFram
     """
     parts = [_std_fin(income, _INCOME_COLS, "inc"), _std_fin(balance, _BALANCE_COLS, "bal"),
              _std_fin(cashflow, _CASHFLOW_COLS, "cf"), _std_fin(fina, _FINA_COLS, "fina")]
-    # 同源同键多条公告 → 保留为多行：先给每源加"公告序号"再合并
     merged: pd.DataFrame | None = None
     for p in parts:
         if merged is None:
@@ -406,8 +405,14 @@ def merge_financial_frames(income, balance, cashflow, fina) -> tuple[pd.DataFram
     ann_cols = [c for c in merged.columns if c.startswith("ann_")]
     merged["ann_date"] = merged[ann_cols].apply(
         lambda r: max((x for x in r if x is not None and not pd.isna(x)), default=None), axis=1)
-    dropped = int(merged["ann_date"].isna().sum())
-    merged = merged[merged["ann_date"].notna()].drop(columns=ann_cols)
+    # 无公告日 / 无报告期 → 无法 PIT，丢弃并计数（end_date 为空进库会撞 PK NOT NULL 卡死在 RETRY）
+    bad = merged["ann_date"].isna() | merged["end_date"].isna()
+    dropped = int(bad.sum())
+    merged = merged[~bad]
+    # ★ 同源同键多次公告（更正公告）在外连接里会成笛卡尔积：inc(3/30,4/15) × bal(3/30,4/15) → 4 行，
+    #   其中 3 行同 PK(ann=4/15)，含"旧利润表 + 新资产负债表"的拼凑行；INSERT OR REPLACE 首行胜出会静默留错行。
+    #   按各源公告日排序后对 PK 取最后一行 = 每个源在 ann_date 时点的最新版本 → 正确的稠密 PIT 行。
+    merged = merged.sort_values(ann_cols).drop_duplicates(_FIN_KEY, keep="last").drop(columns=ann_cols)
     out = merged[_FIN_KEY + _FIN_VALUE_COLS].reset_index(drop=True)
     return out, dropped
 
@@ -501,6 +506,8 @@ def ingest_industry_member(conn, src) -> int:
             if not _is_permission_denied(exc):
                 raise
             basic = conn.execute("SELECT ts_code, industry, list_date FROM stock_basic").fetchall()
+            if not basic:
+                raise RuntimeError("stock_basic 为空，无法降级生成行业成分：先跑 ingest_stock_basic")
             df = pd.DataFrame(basic, columns=["ts_code", "sw_l1", "in_date"])
             df["sw_l2"] = None
             df["sw_l3"] = None
@@ -509,6 +516,8 @@ def ingest_industry_member(conn, src) -> int:
         for c in ("in_date", "out_date"):
             df[c] = [_as_date(x) for x in df[c]]
         df = df.dropna(subset=["in_date"])
+        # 全量刷新表：先清再写，防止 static 降级行与后续 sw 行按不同 in_date 混在一张表里
+        conn.execute("DELETE FROM industry_member")
         n = _upsert(conn, "industry_member", df[["ts_code", "sw_l1", "sw_l2", "sw_l3", "in_date", "out_date"]])
         _set_meta(conn, "industry_source", source)
         set_job(conn, job, "industry_member", "all", "DONE", rows=n)

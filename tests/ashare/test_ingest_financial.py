@@ -85,6 +85,27 @@ def test_same_period_two_announcements_both_kept():
     assert len(out) == 2 and sorted(out.ann_date) == [D(2021,3,30), D(2021,4,15)]
 
 
+def test_multi_announcement_across_sources_does_not_cross_product():
+    """inc 与 bal 各有两次公告 → 不是 2×2=4 行；每个 ann_date 一行，且每源取该时点的最新版本。"""
+    out, _ = ingest.merge_financial_frames(
+        _inc([("600519.SH", "20210330", "20210330", "20201231", "1", 0, 1000.0, 400.0, 30.0),
+              ("600519.SH", "20210415", "20210415", "20201231", "1", 0, 1001.0, 400.0, 30.0)]),
+        _bal([("600519.SH", "20210330", "20210330", "20201231", "1", 0, 5000.0, 4000.0),
+              ("600519.SH", "20210415", "20210415", "20201231", "1", 0, 5001.0, 4000.0)]),
+        _cf([]), _fina([]))
+    assert len(out) == 2
+    r = out.set_index("ann_date")
+    assert (r.loc[D(2021,3,30), "revenue"], r.loc[D(2021,3,30), "total_assets"]) == (1000.0, 5000.0)
+    assert (r.loc[D(2021,4,15), "revenue"], r.loc[D(2021,4,15), "total_assets"]) == (1001.0, 5001.0)
+
+
+def test_rows_without_end_date_are_dropped_and_counted():
+    out, dropped = ingest.merge_financial_frames(
+        _inc([("600519.SH", "20210330", "20210330", None, "1", 0, 1.0, 1.0, 1.0)]),
+        _bal([]), _cf([]), _fina([]))
+    assert dropped == 1 and len(out) == 0
+
+
 # ══════════════ 入库（真实 DuckDB）══════════════
 class FakeSrc:
     perm_error: Exception | None = None
@@ -155,6 +176,8 @@ def test_ingest_financial_end_to_end(conn):
     assert rows[0] == (D(2021,3,30), 0, 1000.0, 5000.0, 0.28)
     assert rows[1][:3] == (D(2022,3,30), 1, 1010.0) and rows[1][3] is None      # 重述行只有利润表字段
     assert ingest.job_state(conn, "financial_pit:600519.SH:2020-01-01") == "DONE"
+    err = conn.execute("SELECT last_error FROM ingest_log WHERE job_id='financial_pit:600519.SH:2020-01-01'").fetchone()[0]
+    assert err == ""                                 # 无丢弃行时不写 dropped 备注
 
 
 def test_ingest_daily_basic_is_per_day_and_idempotent(conn):
@@ -191,6 +214,26 @@ def test_ingest_industry_member_degrades_explicitly_without_permission(conn):
     rows = conn.execute("SELECT ts_code, sw_l1, in_date, out_date FROM industry_member ORDER BY ts_code").fetchall()
     assert rows == [("000001.SZ", "银行", D(1991,4,3), None), ("600519.SH", "白酒", D(2001,8,27), None)]
     assert conn.execute("SELECT value FROM _meta WHERE key='industry_source'").fetchone()[0] == "tushare_static"
+
+
+def test_ingest_industry_member_requires_stock_basic(conn):
+    src = FakeSrc()
+    src.perm_error = RuntimeError("抱歉，您没有访问该接口的权限，权限的具体详情访问：https://tushare.pro/document/1?doc_id=108。")
+    with pytest.raises(RuntimeError, match="stock_basic"):
+        ingest.ingest_industry_member(conn, src)
+
+
+def test_ingest_industry_member_is_full_refresh(conn):
+    """先降级（static）再拿到 sw 权限重跑 → 表里只剩 sw 行，不混。"""
+    src = FakeSrc()
+    ingest.ingest_stock_basic(conn, src)
+    src.perm_error = RuntimeError("抱歉，您没有访问该接口的权限，权限的具体详情访问：https://tushare.pro/document/1?doc_id=108。")
+    ingest.ingest_industry_member(conn, src)
+    src.perm_error = None
+    ingest.ingest_industry_member(conn, src)
+    rows = conn.execute("SELECT count(*), max(sw_l2 IS NOT NULL) FROM industry_member").fetchone()
+    assert rows == (2, True)
+    assert conn.execute("SELECT value FROM _meta WHERE key='industry_source'").fetchone()[0] == "sw"
 
 
 def test_ingest_industry_member_transient_error_propagates(conn):
