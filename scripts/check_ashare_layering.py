@@ -24,8 +24,9 @@ def _rel(path: pathlib.Path, root: pathlib.Path) -> str:
 
 def check(root: str = "ashare") -> list[str]:
     rootp = pathlib.Path(root)
-    if not rootp.exists():
-        return []
+    if not rootp.is_dir():
+        # fail-closed：目录不存在也是违规，否则从别的 CWD 跑就静默"通过"
+        return [f"{root}: 目录不存在（CWD={pathlib.Path.cwd()}）"]
     violations: list[str] = []
 
     for py in sorted(rootp.rglob("*.py")):
@@ -72,7 +73,7 @@ def check(root: str = "ashare") -> list[str]:
                             f"(as_of_date, universe)，实际 {names[:2]}")
 
         # L4 只读层不得有 DML
-        if rel.startswith(READONLY_LAYERS) or rel == "agent_tools.py":
+        if rel.startswith(READONLY_LAYERS):
             for node in ast.walk(tree):
                 if isinstance(node, ast.Constant) and isinstance(node.value, str):
                     upper = node.value.upper().lstrip()

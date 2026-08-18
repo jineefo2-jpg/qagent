@@ -631,7 +631,7 @@ git commit -m "feat(ashare): 分层与签名静态检查（D1/D2 的可执行守
   - `.daily(ts_code=None, trade_date=None, start=None, end=None) -> pd.DataFrame`
   - `.adj_factor(...)`, `.stk_limit(...)`, `.daily_basic(...)`, `.fina_indicator(...)`,
     `.income(...)`, `.balancesheet(...)`, `.cashflow(...)`, `.hk_hold(...)`,
-    `.index_daily(...)`, `.macro(indicator, start, end)`
+    `.index_daily(...)`, `.cn_m(start_m, end_m)`, `.shibor(start, end)`（宏观逐接口暴露，不做统一 `.macro()`）
   - `ashare.data.sources._ratelimit.TokenBucket(calls_per_min: int, state_path: str)`，方法 `.acquire() -> None`
 
 - [ ] **Step 1: 写令牌桶失败测试**

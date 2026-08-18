@@ -12,15 +12,26 @@ class TokenBucket:
         self.state_path = pathlib.Path(state_path)
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
 
-    def _load(self) -> tuple[float, float]:
+    def _read_raw(self) -> dict:
         try:
-            d = json.loads(self.state_path.read_text())
+            return json.loads(self.state_path.read_text())
+        except Exception:                          # 首次运行 / 文件损坏
+            return {}
+
+    def _load(self) -> tuple[float, float]:
+        d = self._read_raw()
+        try:
             return float(d["tokens"]), float(d["updated_at"])
-        except Exception:                          # 首次运行 / 文件损坏 → 满桶
+        except (KeyError, TypeError, ValueError):  # 尚无桶状态 → 满桶
             return self.capacity, time.time()
 
     def _save(self, tokens: float, now: float) -> None:
-        self.state_path.write_text(json.dumps({"tokens": tokens, "updated_at": now}))
+        # ★ 合并写：这个文件同时是 Task 0 的探测结果 / calls_per_min 配置。
+        #   整文件覆写会让 calls_per_min 在第一次 acquire 后消失、限频静默回退默认值。
+        # ponytail: 顺序批次可用；并发 ingest 需 flock + tmp+os.replace
+        d = self._read_raw()
+        d.update({"tokens": tokens, "updated_at": now})
+        self.state_path.write_text(json.dumps(d, ensure_ascii=False))
 
     def acquire(self) -> None:
         """阻塞直到拿到一个 token。"""

@@ -41,6 +41,7 @@ def test_read_only_connection_rejects_write(tmp_db):
     """D1 的最硬一层：只读连接上任何 DML 都必须抛异常。"""
     w = _db.connect_write(tmp_db); _db.init_schema(w); w.close()
     r = _db.connect_read(tmp_db)
-    with pytest.raises(Exception):
+    # 精确到 DuckDB 的只读异常：缺表 / SQL 笔误也会抛 Exception，那不算证明了 D1
+    with pytest.raises(duckdb.InvalidInputException, match="read-only"):
         r.execute("INSERT INTO calendar (trade_date, is_open) VALUES ('2024-01-02', TRUE)")
     r.close()

@@ -28,4 +28,16 @@ def test_bucket_state_persists_across_instances(tmp_path):
     t0 = time.time()
     b2.acquire()
     assert time.time() - t0 >= 0.9, "新实例必须读到已消耗的配额"
-    assert json.loads(open(p).read())["tokens"] >= 0
+    assert json.loads(open(p).read())["tokens"] < 1.0, "耗尽状态必须真的落盘"
+
+
+def test_save_preserves_other_keys_in_state_file(tmp_path):
+    """rate_state.json 同时承载 Task 0 的探测结果与 calls_per_min；
+    令牌桶只能合并写自己的两个键，不得覆写整文件。"""
+    p = tmp_path / "s.json"
+    p.write_text(json.dumps({"calls_per_min": 50, "probed_at": "x", "results": [1]}))
+    b = TokenBucket(calls_per_min=50, state_path=str(p))
+    b.acquire()
+    d = json.loads(p.read_text())
+    assert d["calls_per_min"] == 50 and d["probed_at"] == "x" and d["results"] == [1]
+    assert "tokens" in d and "updated_at" in d

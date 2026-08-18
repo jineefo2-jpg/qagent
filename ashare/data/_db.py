@@ -1,5 +1,9 @@
 # ashare/data/_db.py
-"""DuckDB 连接与 schema 管理。ingest 是唯一写者，query 只用 read_only 连接。"""
+"""DuckDB 连接与 schema 管理。ingest 是唯一写者，query 只用 read_only 连接。
+
+★ 同一进程内对同一文件不能同时持有 connect_write 与 connect_read
+  （DuckDB: "Can't open a connection to same database file with a different configuration"）。
+  写者与读者必须先后而非并存 —— 架构文档 §10.2 的影子文件 + 原子替换正是为此。"""
 from __future__ import annotations
 import pathlib
 

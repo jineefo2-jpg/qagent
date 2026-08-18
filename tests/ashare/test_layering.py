@@ -1,12 +1,20 @@
 from __future__ import annotations
 import pathlib, sys, textwrap
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "scripts"))
+REPO = pathlib.Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO / "scripts"))
 import check_ashare_layering as chk
 
 
 def test_real_codebase_passes():
-    """真实 ashare/ 必须零违规。这是每个任务的收尾闸门。"""
-    assert chk.check("ashare") == []
+    """真实 ashare/ 必须零违规。这是每个任务的收尾闸门。
+    用绝对路径：相对路径会让"从别的 CWD 启动 pytest"变成静默通过。"""
+    assert chk.check(str(REPO / "ashare")) == []
+
+
+def test_missing_root_is_a_violation(tmp_path):
+    """闸门必须 fail-closed：目录不存在 ≠ 干净。"""
+    v = chk.check(str(tmp_path / "nope"))
+    assert v and "目录不存在" in v[0]
 
 
 def _write(tmp_path, rel, src):

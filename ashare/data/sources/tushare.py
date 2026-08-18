@@ -15,7 +15,8 @@ except ImportError:                     # 可选依赖，遵循本仓库既有�
     _ts = None
 
 _DATE_COLS = ("trade_date", "ann_date", "end_date", "list_date", "delist_date",
-              "start_date", "f_ann_date", "cal_date")
+              "start_date", "f_ann_date", "cal_date", "pretrade_date", "date")
+# 注：cn_m 的 month 列是 YYYYMM，不在此列表，由 ingest 的宏观 normalize 单独处理
 
 
 def _to_date(df: pd.DataFrame) -> pd.DataFrame:
