@@ -526,10 +526,13 @@ def month_end(yyyymm: str) -> _dt.date:
 
 
 # 历史 publish_date 只能按规则回填，规则一律取【保守晚值】：宁可晚几天可见，绝不提前。
+# 日期取的是历史上的【最坏延迟】而不是常态：金融数据/社融常态 10–15 日，但春节月曾拖到 2 月 20 日
+# （2020-01 数据）；CPI/PPI 常态 9–10 日，春节月曾到 2 月 16 日（2022-01）、国庆月到 10 月 13–15 日。
+# PMI 由统计局在当月最后一天发布，次月 1 日已严格晚于实际。
 #   (kind, day)：'next_month' = 次月第 day 日；'same' = 当日
 _PUBLISH_RULE: dict[str, tuple[str, int]] = {
-    "m1_yoy": ("next_month", 15), "m2_yoy": ("next_month", 15), "tsf_stock_yoy": ("next_month", 15),
-    "cpi_yoy": ("next_month", 10), "ppi_yoy": ("next_month", 10),
+    "m1_yoy": ("next_month", 20), "m2_yoy": ("next_month", 20), "tsf_stock_yoy": ("next_month", 20),
+    "cpi_yoy": ("next_month", 16), "ppi_yoy": ("next_month", 16),
     "pmi_mfg": ("next_month", 1),
     "shibor_3m": ("same", 0), "cn10y": ("same", 0),
 }
@@ -571,10 +574,13 @@ def _fetch_macro_series(src, indicator: str, start_d: _dt.date, end_d: _dt.date)
     if indicator == "tsf_stock_yoy":
         # 社融存量同比：Tushare sf_month 只给存量 stk_endval，需回看 13 个月自算
         raw = src.sf_month(_yyyymm(_months_back(start_d, 13)), _yyyymm(end_d))
+        raw = raw.drop_duplicates("month", keep="last")
         s = raw.assign(period=[month_end(str(m)) for m in raw["month"]]).set_index("period")["stk_endval"]
         s = pd.to_numeric(s, errors="coerce").sort_index()
-        prev = s.shift(12)
-        yoy = (s / prev - 1.0) * 100.0
+        # ★ 按【日历】取 12 个月前，不能用 shift(12)（位置偏移）：源里缺一个月就整体错位、静默错数
+        prev_idx = [month_end(_yyyymm(_months_back(p, 12))) for p in s.index]
+        prev = s.reindex(prev_idx).to_numpy()
+        yoy = pd.Series((s.to_numpy() / prev - 1.0) * 100.0, index=s.index)
         out = pd.DataFrame({"period": yoy.index, "value": yoy.values}).dropna()
     else:
         method, vcol, pcol, monthly = _MACRO_SPEC[indicator]
@@ -625,6 +631,7 @@ def ingest_hk_hold(conn, src, trade_date) -> int:
     set_job(conn, job, "money_flow", d.isoformat(), "RUNNING")
     try:
         raw = src.hk_hold(trade_date=d)
+        raw = raw[raw["ts_code"].astype(str).str.endswith((".SH", ".SZ"))]     # 剔除 HK 端（南向）行
         df = pd.DataFrame({"ts_code": raw["ts_code"], "trade_date": d,
                            "hk_hold_ratio": pd.to_numeric(raw["ratio"], errors="coerce")})
         df = df.dropna(subset=["ts_code"]).drop_duplicates("ts_code", keep="last")

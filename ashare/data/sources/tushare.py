@@ -157,14 +157,12 @@ class TushareSource:
             import akshare as ak
         except ImportError as exc:
             raise ImportError("cn10y 需要 akshare：pip install akshare") from exc
-        s = start.strftime("%Y%m%d") if hasattr(start, "strftime") else (start or "20100101").replace("-", "")
-        df = ak.bond_zh_us_rate(start_date=s)
-        col = next((c for c in df.columns if "中国国债收益率10年" in str(c)), None)
-        if col is None:
-            raise KeyError(f"akshare bond_zh_us_rate 缺少 10 年期列，实际列: {list(df.columns)}")
+        df = ak.bond_zh_us_rate(start_date=_fmt(start) or "20100101")
+        col = "中国国债收益率10年"            # 精确匹配：还有一列 "中国国债收益率10年-2年"（利差），子串匹配会撞
+        if col not in df.columns:
+            raise KeyError(f"akshare bond_zh_us_rate 缺少列 {col!r}，实际列: {list(df.columns)}")
         out = pd.DataFrame({"period": pd.to_datetime(df["日期"]).dt.date,
                             "value": pd.to_numeric(df[col], errors="coerce")}).dropna()
         if end is not None:
-            e = end if hasattr(end, "year") else pd.Timestamp(str(end)).date()
-            out = out[out["period"] <= e]
+            out = out[out["period"] <= pd.Timestamp(_fmt(end)).date()]
         return out.reset_index(drop=True)

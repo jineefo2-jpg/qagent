@@ -22,18 +22,18 @@ def test_month_end():
 def test_rule_publish_dates_are_conservative_late():
     """历史 publish_date 只能按规则回填，规则一律取保守晚值：宁可晚几天可见，绝不提前（D4）。"""
     p = D(2024,7,31)
-    assert rule_publish_date("m2_yoy", p) == D(2024,8,15)
-    assert rule_publish_date("m1_yoy", p) == D(2024,8,15)
-    assert rule_publish_date("tsf_stock_yoy", p) == D(2024,8,15)
-    assert rule_publish_date("cpi_yoy", p) == D(2024,8,10)
-    assert rule_publish_date("ppi_yoy", p) == D(2024,8,10)
+    assert rule_publish_date("m2_yoy", p) == D(2024,8,20)          # 春节月曾拖到 2 月 20 日
+    assert rule_publish_date("m1_yoy", p) == D(2024,8,20)
+    assert rule_publish_date("tsf_stock_yoy", p) == D(2024,8,20)
+    assert rule_publish_date("cpi_yoy", p) == D(2024,8,16)         # 2022-01 CPI 于 2 月 16 日发布
+    assert rule_publish_date("ppi_yoy", p) == D(2024,8,16)
     assert rule_publish_date("pmi_mfg", p) == D(2024,8,1)
     assert rule_publish_date("shibor_3m", D(2024,7,15)) == D(2024,7,15)
     assert rule_publish_date("cn10y", D(2024,7,15)) == D(2024,7,15)
 
 
 def test_rule_publish_date_december_rolls_year():
-    assert rule_publish_date("m2_yoy", D(2023,12,31)) == D(2024,1,15)
+    assert rule_publish_date("m2_yoy", D(2023,12,31)) == D(2024,1,20)
     assert rule_publish_date("pmi_mfg", D(2023,12,31)) == D(2024,1,1)
 
 
@@ -53,18 +53,24 @@ class FakeSrc:
     def cn_pmi(self, start_m, end_m):
         return pd.DataFrame({"month": ["202407"], "pmi010000": [49.4]})
     def sf_month(self, start_m, end_m):
-        # 13 个月存量：2023-07 → 2024-07，用于算 yoy
+        # 13 个月存量：2023-07 → 2024-07，用于算 yoy；sf_gap=True 时抽掉 2023-09（模拟源缺月）
         months = [f"2023{m:02d}" for m in range(7, 13)] + [f"2024{m:02d}" for m in range(1, 8)]
         stk = [365.0 + i for i in range(13)]        # 2023-07=365, 2024-07=377
-        return pd.DataFrame({"month": months, "stk_endval": stk})
+        df = pd.DataFrame({"month": months, "stk_endval": stk})
+        return df[df["month"] != "202309"] if self.sf_gap else df
     def shibor(self, start=None, end=None):
         return _to_date(pd.DataFrame({"date": ["20240715", "20240716"], "3m": [1.85, 1.86]}))
     def cn10y(self, start=None, end=None):
         return pd.DataFrame({"period": [D(2024,7,15)], "value": [2.26]})
+    sf_gap: bool = False
+
     def hk_hold(self, trade_date):
-        return _to_date(pd.DataFrame({"code": ["600519", "000001"], "trade_date": ["20240102"] * 2,
-                                      "ts_code": ["600519.SH", "000001.SZ"], "name": ["贵州茅台", "平安银行"],
-                                      "vol": [1e6, 2e6], "ratio": [7.12, 8.5], "exchange": ["SH", "SZ"]}))
+        # 含一行 HK 端（南向）记录，必须被过滤
+        return _to_date(pd.DataFrame({"code": ["600519", "000001", "00700"], "trade_date": ["20240102"] * 3,
+                                      "ts_code": ["600519.SH", "000001.SZ", "00700.HK"],
+                                      "name": ["贵州茅台", "平安银行", "腾讯控股"],
+                                      "vol": [1e6, 2e6, 3e6], "ratio": [7.12, 8.5, 1.1],
+                                      "exchange": ["SH", "SZ", "HK"]}))
 
 
 @pytest.fixture
@@ -80,7 +86,7 @@ def test_ingest_m2_writes_pit_rows(conn):
     assert n == 2
     rows = conn.execute("SELECT period, publish_date, value, publish_date_source FROM macro_indicator "
                         "WHERE indicator='m2_yoy' ORDER BY period").fetchall()
-    assert rows == [(D(2024,6,30), D(2024,7,15), 6.2, "rule"), (D(2024,7,31), D(2024,8,15), 6.3, "rule")]
+    assert rows == [(D(2024,6,30), D(2024,7,20), 6.2, "rule"), (D(2024,7,31), D(2024,8,20), 6.3, "rule")]
 
 
 def test_every_macro_row_publishes_no_earlier_than_period(conn):
@@ -119,10 +125,10 @@ def test_observed_publish_date_coexists_with_rule(conn):
     ingest.ingest_macro(conn, FakeSrc(), "m2_yoy", "20240601", "20240731")
     n = ingest.ingest_macro(conn, FakeSrc(), "m2_yoy", "20240601", "20240731",
                             observed_on=D(2024,8,12))
-    assert n == 1                                    # 2024-06 的 rule 行 07-15 已 <= 08-12 → 跳过；2024-07 的 rule 是 08-15 → 写 observed
+    assert n == 1                                    # 2024-06 的 rule 行 07-20 已 <= 08-12 → 跳过；2024-07 的 rule 是 08-20 → 写 observed
     rows = conn.execute("SELECT period, publish_date, publish_date_source FROM macro_indicator "
                         "WHERE indicator='m2_yoy' AND period = DATE '2024-07-31' ORDER BY publish_date").fetchall()
-    assert rows == [(D(2024,7,31), D(2024,8,12), "observed"), (D(2024,7,31), D(2024,8,15), "rule")]
+    assert rows == [(D(2024,7,31), D(2024,8,12), "observed"), (D(2024,7,31), D(2024,8,20), "rule")]
 
 
 def test_ingest_hk_hold(conn):
@@ -131,3 +137,19 @@ def test_ingest_hk_hold(conn):
     r = conn.execute("SELECT hk_hold_ratio FROM money_flow WHERE ts_code='600519.SH'").fetchone()
     assert r == (7.12,)
     assert ingest.job_state(conn, "money_flow:2024-01-02") == "DONE"
+
+
+def test_tsf_yoy_uses_calendar_alignment_not_positional_shift(conn):
+    """源里缺一个月时，位置 shift(12) 会整体错位并静默写错数；日历对齐下 2024-07 仍对（377/365），
+    而缺月对应的 2024-09 无 12 个月前值 → 不写。"""
+    src = FakeSrc(); src.sf_gap = True
+    ingest.ingest_macro(conn, src, "tsf_stock_yoy", "20240701", "20240731")
+    r = conn.execute("SELECT value FROM macro_indicator WHERE indicator='tsf_stock_yoy' "
+                     "AND period = DATE '2024-07-31'").fetchone()
+    assert abs(r[0] - (377.0 / 365.0 - 1) * 100) < 1e-9
+
+
+def test_hk_hold_filters_out_hk_side_rows(conn):
+    ingest.ingest_hk_hold(conn, FakeSrc(), "20240102")
+    codes = {r[0] for r in conn.execute("SELECT ts_code FROM money_flow").fetchall()}
+    assert codes == {"600519.SH", "000001.SZ"}

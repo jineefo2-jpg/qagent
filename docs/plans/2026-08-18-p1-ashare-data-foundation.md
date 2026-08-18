@@ -1516,7 +1516,8 @@ git commit -m "feat(ashare): 日线入库 + 停牌日按交易日历补占位行
 - 指标与来源：`m1_yoy`/`m2_yoy` ← `cn_m`；`cpi_yoy` ← `cn_cpi`；`ppi_yoy` ← `cn_ppi`；`pmi_mfg` ← `cn_pmi`；
   `tsf_stock_yoy` ← `sf_month`；`shibor_3m` ← `shibor`；`cn10y` ← akshare `bond_zh_us_rate`（Tushare 无稳定接口，adapter 层可插拔）。
 - **历史 `publish_date` 只能按规则回填**，且规则取【保守晚值】——宁可晚几天可见，绝不提前：
-  M1/M2/社融 = 次月 15 日；CPI/PPI = 次月 10 日；PMI = 次月 1 日；shibor/cn10y = 当日。
+  M1/M2/社融 = 次月 20 日；CPI/PPI = 次月 16 日；PMI = 次月 1 日；shibor/cn10y = 当日
+  （取历史【最坏延迟】：春节月金融数据曾拖到 2 月 20 日、CPI 到 2 月 16 日；评审后由 15/10 上调）。
   `publish_date_source='rule'`。每日增量 ingest 时若拉到新 period，`publish_date=今天, source='observed'`。
 - `cn_m.month` 是 `YYYYMM`，在 normalize 里单独转 `period = 该月最后一天`。
 - `hk_hold` 按 `trade_date` 全市场拉取，`hk_hold_ratio = ratio` 列；2016-12-05 前无数据，**不补 0**。
@@ -1527,7 +1528,7 @@ git commit -m "feat(ashare): 日线入库 + 停牌日按交易日历补占位行
 - `rule_publish_date(indicator, period) -> date`（纯函数，可测）
 
 **验收断言**
-- `rule_publish_date('m2_yoy', 2024-07-31) == 2024-08-15`；`('cpi_yoy', 2024-07-31) == 2024-08-10`；`('pmi_mfg', 2024-07-31) == 2024-08-01`
+- `rule_publish_date('m2_yoy', 2024-07-31) == 2024-08-20`；`('cpi_yoy', 2024-07-31) == 2024-08-16`；`('pmi_mfg', 2024-07-31) == 2024-08-01`
 - 所有 `macro_indicator` 行 `publish_date >= period`（不可能先公布再发生）
 - `publish_date_source` 非空
 - 同 `(indicator, period)` 先 rule 后 observed 两行共存（PIT：不覆盖）
