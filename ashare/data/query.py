@@ -565,3 +565,187 @@ def get_tradable_mask(exec_date: DateLike,
             out.append((code, True, False, "limit_down_seal", o_h, c_h, amt, amp)); continue
         out.append((code, True, True, "", o_h, c_h, amt, amp))
     return pd.DataFrame(out, columns=["ts_code", *_MASK_COLS]).set_index("ts_code")
+
+
+# ══════════════ 财报 PIT（D3）══════════════
+_FIN_FIELDS = ("total_revenue", "revenue", "operate_profit", "total_profit", "n_income", "n_income_attr_p",
+               "basic_eps", "total_assets", "total_liab", "total_hldr_eqy_exc_min_int",
+               "n_cashflow_act", "n_cashflow_inv_act", "n_cash_flows_fnc_act",
+               "roe", "roa", "grossprofit_margin", "netprofit_margin", "debt_to_assets", "current_ratio",
+               "or_yoy", "netprofit_yoy", "bps")
+_FIN_META = ["ann_date", "end_date", "report_type", "lag_days"]
+
+
+def _fin_visible(as_of: _dt.date, codes: list[str], fields: Sequence[str], *,
+                 include_restated: bool, report_type: str) -> pd.DataFrame:
+    """PIT 可见的最新披露：WHERE ann_date <= as_of，同 (ts_code, end_date) 取 ann_date 最大者。
+    返回列：ts_code, end_date, ann_date, report_type, <fields>。"""
+    cols = ", ".join(fields)
+    flag_sql = "" if include_restated else " AND update_flag = 0"
+    sql = f"""
+    SELECT ts_code, end_date, ann_date, report_type, {cols} FROM (
+        SELECT *, row_number() OVER (PARTITION BY ts_code, end_date
+                                     ORDER BY ann_date DESC, update_flag DESC) AS rn
+        FROM financial_pit
+        WHERE ann_date <= ? AND report_type = ? {flag_sql}
+          AND ts_code IN ({",".join("?" * len(codes))})
+    ) WHERE rn = 1
+    ORDER BY ts_code, end_date DESC
+    """
+    df = _conn().execute(sql, [as_of, report_type, *codes]).fetchdf()
+    for c in ("end_date", "ann_date"):
+        df[c] = pd.to_datetime(df[c]).dt.date
+    return df
+
+
+def get_financial(as_of_date: DateLike,
+                  ts_codes: Sequence[str],
+                  fields: Sequence[str],
+                  *,
+                  n_periods: int = 1,
+                  include_restated: bool = False,
+                  report_type: str = "1") -> pd.DataFrame:
+    """PIT 取数：WHERE ann_date <= as_of_date，按 end_date 分组取 ann_date 最大者。
+    n_periods=1 → index=ts_code；>1 → MultiIndex (ts_code, end_date) 按 end_date 倒序 n 期。
+    include_restated=False（默认）→ 只取 update_flag=0 的原始披露值。
+      True 仅供研究「重述影响」，任何进入回测的因子都必须用 False。
+    额外返回列：ann_date、end_date、report_type、lag_days(= as_of - ann_date)。
+    注：不做交易日历范围检查 —— 财报的覆盖范围是公告日，PIT 过滤自然处理越界（早于最早公告 → 空）。"""
+    as_of = _norm_date(as_of_date)
+    bad = [f for f in fields if f not in _FIN_FIELDS]
+    if bad:
+        raise UnknownFieldError(f"get_financial 不支持字段 {bad}")
+    if n_periods < 1:
+        raise QueryError("n_periods 必须 >= 1")
+    codes = list(ts_codes)
+    out_cols = [*fields, *_FIN_META]
+    if not codes:
+        idx = pd.Index([], name="ts_code") if n_periods == 1 else pd.MultiIndex.from_arrays([[], []], names=["ts_code", "end_date"])
+        return pd.DataFrame(columns=out_cols, index=idx)
+    df = _fin_visible(as_of, codes, fields, include_restated=include_restated, report_type=report_type)
+    if df.empty:
+        idx = pd.Index([], name="ts_code") if n_periods == 1 else pd.MultiIndex.from_arrays([[], []], names=["ts_code", "end_date"])
+        return pd.DataFrame(columns=out_cols, index=idx)
+    df = df.groupby("ts_code", sort=True).head(n_periods)
+    df["lag_days"] = [(as_of - a).days for a in df["ann_date"]]
+    if n_periods == 1:
+        return df.set_index("ts_code")[out_cols]
+    return df.set_index(["ts_code", "end_date"])[[c for c in out_cols if c != "end_date"]].assign(
+        end_date=lambda x: x.index.get_level_values("end_date"))[out_cols]
+
+
+_TTM_FLOW = ("total_revenue", "revenue", "operate_profit", "total_profit", "n_income", "n_income_attr_p",
+             "n_cashflow_act", "n_cashflow_inv_act", "n_cash_flows_fnc_act")
+_TTM_STOCK = ("total_assets", "total_liab", "total_hldr_eqy_exc_min_int")
+
+
+def _year_ago(d: _dt.date) -> _dt.date:
+    try:
+        return d.replace(year=d.year - 1)
+    except ValueError:                                  # 2 月 29 日
+        return d.replace(year=d.year - 1, day=28)
+
+
+def get_financial_ttm(as_of_date: DateLike,
+                      ts_codes: Sequence[str],
+                      field: str) -> pd.Series:
+    """★ TTM 拼接在 query 层（架构 §4.1 定死）—— A 股财报是【累计口径】。
+    流量科目：TTM = 最新累计 + 上年年报 − 上年同期累计（最新为年报时即年报值）；
+    存量科目：期初期末均值 =（最新 + 上年同期）/ 2；
+    比率科目（roe 等）不支持 TTM → UnknownFieldError。
+    任一所需期次不可见（PIT）→ NaN，不外推。返回 index=ts_codes 顺序的 Series。"""
+    as_of = _norm_date(as_of_date)
+    if field in _TTM_FLOW:
+        kind = "flow"
+    elif field in _TTM_STOCK:
+        kind = "stock"
+    else:
+        raise UnknownFieldError(f"{field!r} 不支持 TTM（流量: {_TTM_FLOW}；存量: {_TTM_STOCK}）")
+    codes = list(ts_codes)
+    out = pd.Series([float("nan")] * len(codes), index=pd.Index(codes, name="ts_code"), name=f"{field}_ttm", dtype=float)
+    if not codes:
+        return out
+    vis = _fin_visible(as_of, codes, [field], include_restated=False, report_type="1")
+    if vis.empty:
+        return out
+    for code, g in vis.groupby("ts_code"):
+        by_end = dict(zip(g["end_date"], g[field]))
+        latest_end = max(by_end)
+        latest = by_end[latest_end]
+        prev_same = by_end.get(_year_ago(latest_end))
+        if kind == "stock":
+            out[code] = (latest + prev_same) / 2.0 if (latest is not None and prev_same is not None) else float("nan")
+            continue
+        if latest_end.month == 12 and latest_end.day == 31:
+            out[code] = latest if latest is not None else float("nan")
+            continue
+        prev_fy = by_end.get(_dt.date(latest_end.year - 1, 12, 31))
+        if latest is None or prev_fy is None or prev_same is None:
+            out[code] = float("nan")
+        else:
+            out[code] = latest + prev_fy - prev_same
+    return out
+
+
+# ══════════════ 宏观 PIT（D4）与资金流 ══════════════
+def get_macro(as_of_date: DateLike,
+              indicators: Sequence[str],
+              lookback_periods: int = 60) -> pd.DataFrame:
+    """WHERE publish_date <= as_of_date；同 (indicator, period) 取 publish_date 最大者。
+    index=period，columns=indicator，附加列 <indicator>__publish_date 便于审计。"""
+    as_of = _norm_date(as_of_date)
+    inds = list(indicators)
+    cols: list[str] = []
+    for i in inds:
+        cols += [i, f"{i}__publish_date"]
+    if not inds:
+        return pd.DataFrame(columns=cols).rename_axis("period")
+    df = _conn().execute(f"""
+        SELECT indicator, period, publish_date, value FROM (
+            SELECT *, row_number() OVER (PARTITION BY indicator, period ORDER BY publish_date DESC) AS rn
+            FROM macro_indicator
+            WHERE publish_date <= ? AND indicator IN ({",".join("?" * len(inds))})
+        ) WHERE rn = 1 ORDER BY indicator, period
+        """, [as_of, *inds]).fetchdf()
+    if df.empty:
+        return pd.DataFrame(columns=cols).rename_axis("period")
+    df["period"] = pd.to_datetime(df["period"]).dt.date
+    df["publish_date"] = pd.to_datetime(df["publish_date"]).dt.date
+    val = df.pivot(index="period", columns="indicator", values="value")
+    pub = df.pivot(index="period", columns="indicator", values="publish_date")
+    out = pd.DataFrame(index=val.index)
+    for i in inds:
+        out[i] = val[i] if i in val.columns else float("nan")
+        out[f"{i}__publish_date"] = pub[i] if i in pub.columns else None
+    out = out.sort_index().tail(lookback_periods)
+    out.index.name = "period"
+    return out[cols]
+
+
+_MONEY_FLOW_FIELDS = ("hk_hold_ratio",)
+
+
+def get_money_flow(as_of_date: DateLike,
+                   ts_codes: Sequence[str],
+                   fields: Sequence[str] = ("hk_hold_ratio",),
+                   lookback: int = 20) -> pd.DataFrame:
+    """MultiIndex (ts_code, trade_date)，按交易日历补齐 lookback 个交易日。
+    ★ hk_hold_ratio 仅 2016-12 起有数据；早于该日 / 缺失日返回 NaN，不填 0（B5）——
+      调用方（north_hold_chg_20 因子）靠 FactorSpec.available_from 声明。"""
+    as_of = _norm_date(as_of_date)
+    _check_in_calendar(as_of)
+    bad = [f for f in fields if f not in _MONEY_FLOW_FIELDS]
+    if bad:
+        raise UnknownFieldError(f"get_money_flow 不支持字段 {bad}")
+    codes = list(ts_codes)
+    days = [d for d in _open_days() if d <= as_of][-lookback:]
+    idx = pd.MultiIndex.from_product([codes, days], names=["ts_code", "trade_date"])
+    if not codes or not days:
+        return pd.DataFrame(columns=list(fields), index=_empty_mi())
+    cols = ", ".join(fields)
+    df = _conn().execute(
+        f"SELECT ts_code, trade_date, {cols} FROM money_flow WHERE ts_code IN ("
+        + ",".join("?" * len(codes)) + ") AND trade_date BETWEEN ? AND ?",
+        [*codes, days[0], as_of]).fetchdf()
+    df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.date
+    return df.set_index(["ts_code", "trade_date"]).reindex(idx)[list(fields)]
