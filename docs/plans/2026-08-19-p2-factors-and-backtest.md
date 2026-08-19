@@ -1,0 +1,563 @@
+# P2 · 因子库 + 回测引擎 实施计划
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** 建成一个可复现、防前视/幸存者偏差的**周频横截面回测引擎**与 16 个因子的因子库，且用已知 A 股异象反测引擎正确性。
+
+**Architecture:** 因子是纯函数 `f(as_of_date, universe) -> Series`，只经 `ashare.data.query` 取数（P1 已建，L1–L6 静态守卫）。处理链固定为 MAD 去极值 → 行业+市值 WLS 中性化 → zscore → 填 0。回测按周调仓：T 日收盘算信号、T+1 开盘价成交、涨跌停/停牌不可交易。因子值预落库到 `data/ashare_derived.duckdb`，否则五闸（200 次 shuffle × 参数网格）跑不动。
+
+**Tech Stack:** Python 3.9.6、DuckDB、pandas、numpy、statsmodels（仅 Newey-West）、pytest
+
+## Global Constraints
+
+- Python **3.9.6**。`ashare/**` 每个文件首行 `from __future__ import annotations`。
+- 铁律 D1–D9 见 `CLAUDE.md`「A 股数据与回测铁律」，全部适用。P2 新增三条硬约束：
+  - **因子只能经 `ashare.data.query` 的公开函数取数**。L5 禁 `adjust="none"`（后复权是唯一真值），
+    L6 禁从 `ashare.data.*` 导入下划线私有名（`_PRELOAD` 里是含 `limit_up` 与未掩码停牌行的原始数据）。
+  - **行业中性化前必须查 `_meta.industry_source`**：不是 `'sw'` 说明行业是「今天的值回填到上市日」，
+    做行业中性化就是前视污染，必须拒绝（P1 的 `--allow-static-industry` 只放行建库，不放行中性化）。
+  - **回测入口必须 `query.snapshot_id(pin=True)`**：钉住后 promote 换库会抛而不是静默重连，
+    否则一次运行横跨两个数据库却只记录一个 `data_snapshot_id`（D7 失效）。
+- 因子函数签名固定 `f(as_of_date, universe, *, <keyword-only>)`，由 `check_ashare_layering.py` L3 强制。
+- 新增依赖：`statsmodels>=0.14`（只用 `cov_type='HAC'` 算 Newey-West 标准误），走仓库既有的
+  `try: import X except ImportError` 可选依赖模式。
+- 提交信息格式：`feat(ashare): ...` / `test(ashare): ...` / `fix(ashare): ...`
+- 分支：`feat/ashare-p2-factors-backtest`，基线 = 当前 `main`。
+
+## 前置状态（P1 已交付，不要重做）
+
+`ashare/data/query.py` 的公开取数函数（首参一律 `as_of_date`，唯一豁免 `get_tradable_mask(exec_date, ...)`）：
+
+| 函数 | 返回 |
+|---|---|
+| `get_universe(as_of_date, *, min_list_days=250, exclude_st=True, exclude_suspended=True, liquidity_drop_pct=0.20, markets=None)` | `list[str]` 升序 |
+| `get_trade_dates(as_of_date, *, start=None, freq='D'\|'W'\|'M')` | `list[date]`；**`'W'` 是 weekly_dates 唯一实现点** |
+| `get_price_panel(as_of_date, ts_codes, field='close', lookback=250, adjust='hfq')` | 宽表 index=trade_date, columns=ts_code，停牌为 NaN 不 ffill |
+| `get_bars(as_of_date, ts_codes, *, lookback=None, start=None, fields=(...), adjust='hfq')` | 长表 MultiIndex (ts_code, trade_date)，恒带 `is_suspended`，**不返回 limit_up/limit_down** |
+| `get_daily_basic(as_of_date, ts_codes, fields=(...), lookback=1)` | lookback=1 → index=ts_code |
+| `get_financial(as_of_date, ts_codes, fields, *, n_periods=1, include_restated=False, report_type='1')` | PIT；附 `ann_date/end_date/report_type/lag_days` |
+| `get_financial_ttm(as_of_date, ts_codes, field)` | Series；流量科目走累计口径拼接，存量科目期初期末均值，缺期 NaN |
+| `get_industry(as_of_date, ts_codes=None, level='l1', *, min_members=5)` | Series；成分 < 5 的行业并入 `__OTHER__` |
+| `get_macro(as_of_date, indicators, lookback_periods=60)` | index=period；附 `<ind>__publish_date` |
+| `get_money_flow(as_of_date, ts_codes, fields=('hk_hold_ratio',), lookback=20)` | MultiIndex；2016-12 前 NaN 不填 0 |
+| `get_index_bars(as_of_date, index_code, lookback=250, fields=('close','pe_ttm'))` | index=trade_date |
+| `get_tradable_mask(exec_date, ts_codes)` | index=ts_code；`can_buy/can_sell/reason/open_hfq/close_hfq/amount/amplitude` |
+| `snapshot_id(*, pin=False)` / `preload(start, end, tables)` / `clear_preload()` | — |
+
+---
+
+## 文件结构
+
+```
+ashare/
+├── factors/
+│   ├── __init__.py
+│   ├── base.py          @factor 装饰器 + FactorSpec + FACTOR_REGISTRY + compute_factor/panel/combine
+│   ├── pipeline.py      winsorize_mad / neutralize(WLS) / zscore / process —— 顺序固定不可调换
+│   ├── store.py         factor_value 预落库（唯一写 derived 库的因子模块）
+│   ├── price.py         6 个量价因子
+│   ├── fundamental.py   8 个基本面因子
+│   ├── flow.py          1 个资金因子
+│   └── risk.py          3 个风险因子（中性化用，不作 alpha）
+├── backtest/
+│   ├── __init__.py
+│   ├── types.py         CostConfig / PortfolioConstraints / BacktestConfig / BacktestResult
+│   ├── portfolio.py     build_targets —— top_n / 权重 / 三条约束 / 换手裁剪
+│   ├── execution.py     simulate —— 掩码 + 开盘价 + 不可交易时的权重再分配
+│   ├── cost.py          charge —— 佣金/印花税/过户费/冲击成本
+│   ├── metrics.py       compute —— 净值/相对/因子/交易/归因
+│   ├── engine.py        run_backtest（≤ 400 行，只做编排）
+│   ├── store.py         BacktestResult 持久化 + docs/oos-runs.md 自动追加
+│   └── guards.py        防自欺五闸
+└── data/_derived.py     derived 库连接与 schema（factor_value / backtest_run）
+
+tests/ashare/
+├── test_factor_base.py      注册表 / param_hash / available_from / min_coverage 重归一
+├── test_factor_pipeline.py  MAD / WLS 中性化 / zscore / 秩亏降级 / 行业来源拒绝
+├── test_factors_price.py    6 个量价因子的数值断言（构造已知序列）
+├── test_factors_fundamental.py  8 个基本面因子（PIT + 累计口径）
+├── test_factor_store.py     落库/读取/快照失效
+├── test_portfolio.py        约束满足 + 换手裁剪
+├── test_execution.py        D6 三情形 + 权重再分配 + 退市清仓
+├── test_cost_metrics.py     成本公式 + 指标定义 + Newey-West
+├── test_engine.py           时序语义（T 收盘算/T+1 开盘成交）+ 快照钉住
+├── test_guards.py           五闸（shuffle 只在同日横截面内打乱）
+└── test_p2_acceptance.py    §5.6 已知异象反测（真库，无库 skip）
+```
+
+---
+
+## 未决项裁决（开工前定死，不再讨论）
+
+| # | 裁决 | 理由 |
+|---|---|---|
+| U1 | 组合构建先做**等权 top-N + 行业上限裁剪**，不上 LP | 780 次求解 × 数千变量 + 一个求解器依赖。先证明等权不够用（规格 §6.2） |
+| U2 | 因子合成默认**等权**，不做 IC 加权 | `Σ_IC⁻¹ 求逆放大噪声，M=16/T=780 样本外劣于等权（算法说明书 §6） |
+| U3 | 宏观择时层**本期不做**（属 P3），`BacktestConfig.macro_timing` 默认 `False`，仓位恒为 `position_cap` | P2 的任务是验证引擎与因子，不是验证择时 |
+| U4 | 因子值落库到 `data/ashare_derived.duckdb`，与 market 库分文件 | market 库由 promote 原子替换，derived 跟着换会丢因子；且 derived 只有 P2 写 |
+| U5 | 五闸的闸 2（walk-forward）与闸 5（参数高原）**本期实现但不作为交付门槛** | 规格 §12.4 允许压缩；未跑的闸必须写进 `docs/oos-runs.md`，否则自欺 |
+| U6 | 样本外区间**本期一次都不跑** | D7：样本外只跑一次。P2 只验证引擎正确性（2010–2019 样本内），跑样本外是 P3 的事 |
+
+---
+
+### Task 1: derived 库 schema + 连接
+
+**Files:** Create `ashare/data/_derived.py`, `ashare/data/derived_schema.sql`; Create `tests/ashare/test_derived_schema.py`; Modify `.gitignore`
+
+**Interfaces**
+- Produces：`_derived.connect_write(path=None)` / `connect_read(path=None)` / `init_schema(conn)` / `DEFAULT_DERIVED_PATH`
+
+**决策**
+- 两张表：
+  ```sql
+  factor_value(factor_name, param_hash, trade_date, ts_code,
+               raw_value DOUBLE, processed_value DOUBLE, snapshot_id VARCHAR,
+               PRIMARY KEY (factor_name, param_hash, trade_date, ts_code))
+  backtest_run(run_id VARCHAR PRIMARY KEY, param_hash, data_snapshot_id, engine_version,
+               started_at TIMESTAMP, elapsed_sec DOUBLE, config_json VARCHAR,
+               metrics_json VARCHAR, is_oos BOOLEAN)
+  ```
+- `snapshot_id` 变化 → 该快照下的因子值视为失效，**加新行不删旧行**（同一 param_hash 可有多个 snapshot 的值）。
+- 与 market 库分文件：market 由 promote 原子替换，derived 不能跟着被换掉。
+
+**验收断言**
+- 建表幂等；`factor_value` 主键不含 snapshot_id（同因子同参同日同股在不同快照下**覆盖**，靠 `snapshot_id` 列记录来源）
+- 只读连接上 DML 抛 `duckdb.InvalidInputException`
+- `.gitignore` 覆盖 `data/ashare_derived.duckdb*`
+
+---
+
+### Task 2: @factor 装饰器 + FactorSpec + 注册表
+
+**Files:** Create `ashare/factors/__init__.py`, `ashare/factors/base.py`; Create `tests/ashare/test_factor_base.py`
+
+**Interfaces**
+- Produces：
+  ```python
+  @dataclass(frozen=True)
+  class FactorSpec:
+      name: str; fn: Callable; direction: int; category: str; lookback_days: int
+      neutralize: bool = True; available_from: date | None = None
+      min_coverage: float = 0.60; default_params: Mapping[str, Any] = {}
+      def param_hash(self, **override) -> str    # sha256(name + canonical_json(default|override))[:12]
+  FACTOR_REGISTRY: dict[str, FactorSpec]
+  def factor(*, name, direction, category, lookback_days, neutralize=True,
+             available_from=None, min_coverage=0.60, **default_params) -> Callable
+  def get_factor(name) -> FactorSpec
+  def list_factors(category=None) -> list[FactorSpec]
+  ```
+
+**决策**
+- 用装饰器不用抽象基类（架构 §4.2）：D2 要的签名字面量就是 `f(as_of_date, universe)`，类方法多出 `self` 会让静态检查要特判；16 个因子没有一个需要继承共享状态。
+- 重名注册直接 `raise`，不允许静默覆盖。
+- `param_hash` 用 canonical JSON（`sort_keys=True, separators=(',',':')`，date 转 isoformat），保证同参数不同书写顺序哈希相同。
+
+**验收断言**
+- `@factor(name='x', ...)` 后 `get_factor('x').fn is 原函数`；重名 raise
+- `spec.param_hash()` 与 `spec.param_hash(window=20)`（等于默认值）相同；`param_hash(window=10)` 不同
+- `param_hash` 对 dict 键序不敏感
+- `list_factors('price')` 只返回 price 类
+- 装饰器不改变函数本身的可调用性（`fn(as_of, universe)` 仍能直接调）
+
+---
+
+### Task 3: 处理链 —— MAD 去极值 / WLS 中性化 / zscore
+
+**Files:** Create `ashare/factors/pipeline.py`; Create `tests/ashare/test_factor_pipeline.py`
+
+**Interfaces**
+- Consumes：`query.get_daily_basic`（`total_mv`）、`query.get_industry`
+- Produces：
+  ```python
+  def winsorize_mad(s: pd.Series, n: float = 3.0) -> pd.Series
+  def neutralize(s, as_of_date, universe, *, by=("log_mv", "industry")) -> tuple[pd.Series, list[str]]
+  def zscore(s: pd.Series) -> pd.Series
+  def process(s, as_of_date, universe, *, spec: FactorSpec) -> tuple[pd.Series, list[str]]
+  ```
+  （中性化与 process 返回 `(series, warnings)`：秩亏 / 样本不足 / 行业来源不可用都要能上浮到 `BacktestResult.warnings`）
+
+**决策（算法说明书 §3，顺序不可调换）**
+1. MAD：`m ± 3 × 1.4826 × MAD` 截断。**不用 3σ** —— A 股横截面尾部太厚，均值与标准差本身已被极值污染。
+2. 中性化：对 `[log_mv, 行业 dummy]` 做**横截面 WLS**，权重 `sqrt(总市值)`，取残差。
+   - **必须 WLS 不能 OLS**：5,400 只里小盘占绝大多数，OLS 回归线被小盘主导，大盘股残差系统性偏移（Barra 标准处理）。
+   - 行业 dummy 去掉一列避免与截距完全共线。
+   - **行业中性化前查 `_meta.industry_source`**：不是 `'sw'` 抛 `RuntimeError`（行业是今天的值回填到上市日 → 前视）。
+   - 有效样本 < 30 或设计矩阵秩亏 → **返回原 Series 并记 warning**，不静默返回 NaN。
+3. zscore：`(x - mean) / std`。
+4. `fillna(0)` —— **在 zscore 之后**，中性化后 0 = 行业内平均水平。
+
+**验收断言**
+- 构造含 1 个极端值的序列，MAD 截断后该值等于上界；同数据下 3σ 截不干净（对比断言，钉住"为什么不用 3σ"）
+- 中性化后残差与 `log_mv` 的相关系数 ≈ 0（|r| < 1e-10）；各行业残差均值 ≈ 0
+- **WLS ≠ OLS 的钉子**：构造 90% 小盘 + 10% 大盘、因子值与市值线性相关的数据，断言 WLS 残差里大盘组均值接近 0 而 OLS 残差里显著偏移
+- `industry_source='tushare_static'` → `neutralize(by=(...,'industry'))` 抛 `RuntimeError`；`by=('log_mv',)` 仍可用
+- 样本 < 30 → 返回原值 + warning 非空
+- `process` 的四步顺序：注入一个中间断言（zscore 前不得有 fillna(0)）—— 用带 NaN 的输入，断言 NaN 在中性化阶段仍是 NaN
+
+---
+
+### Task 4: 量价因子（6 个）
+
+**Files:** Create `ashare/factors/price.py`; Create `tests/ashare/test_factors_price.py`
+
+**Interfaces**
+- Consumes：`query.get_price_panel`、`query.get_bars`、`query.get_daily_basic`
+- Produces（全部 `f(as_of_date, universe, *, window=...) -> pd.Series`，index=ts_code）：
+
+| 因子 | 公式（算法说明书 §2.1） | direction | lookback_days |
+|---|---|---|---|
+| `reversal_20` | `-(p_t / p_{t-20} - 1)` | +1 | 30 |
+| `momentum_120_20` | `p_{t-20} / p_{t-120} - 1`（区间是 [t-120, t-20]，**不是两段收益相减**） | +1 | 130 |
+| `volatility_60` | 60 日对数收益标准差 | −1 | 70 |
+| `turnover_20` | 20 日平均换手率（`turnover_rate_f`） | −1 | 30 |
+| `amihud_20` | `1e9/20 × Σ |r_s| / amount_s` | +1 | 30 |
+| `max_ret_20` | 20 日内单日最大涨幅 | −1 | 30 |
+
+**决策**
+- 一律用后复权价（`get_price_panel` 默认 `adjust='hfq'`）；停牌日为 NaN。
+- **收益率计算前必须 ffill 价格面板**（停牌日 NaN 会让 `pct_change` 产生 NaN 传染），但 ffill 只在因子内部做、
+  且 `min_periods` 保证窗口内非空天数 ≥ 窗口的 60%，否则该股该日置 NaN。
+- 对数收益 `ln(p_t/p_{t-1})` 用于波动率/Amihud；简单收益用于反转/动量/max_ret（与文献口径一致）。
+
+**验收断言**
+- 每个因子用**构造的已知序列**做数值断言（如线性上涨 1%/日 20 天 → `reversal_20 = -(1.01^20 - 1)`）
+- `momentum_120_20` 的区间断言：只有 [t-120, t-20] 的价格影响结果，t-19..t 的价格改变不改变因子值
+- 停牌股：窗口内非空天数不足 60% → NaN，不是用少量样本硬算
+- 所有因子函数前两个位置参数是 `(as_of_date, universe)`（L3 静态检查覆盖，此处再断言一次签名）
+- 返回 Series 的 index ⊆ universe
+
+---
+
+### Task 5: 基本面因子（8 个）
+
+**Files:** Create `ashare/factors/fundamental.py`; Create `tests/ashare/test_factors_fundamental.py`
+
+**Interfaces**
+- Consumes：`query.get_financial`、`query.get_financial_ttm`、`query.get_daily_basic`
+- Produces：
+
+| 因子 | 公式 | direction |
+|---|---|---|
+| `ep_ttm` | `TTM(归母净利) / 总市值` | +1 |
+| `bp` | `归母净资产 / 总市值` | +1 |
+| `sp_ttm` | `TTM(营收) / 总市值` | +1 |
+| `roe_ttm` | `TTM(归母净利) / 期初期末平均净资产` | +1 |
+| `gross_margin` | 毛利率 | +1 |
+| `accrual` | `(TTM(净利) − TTM(经营现金流)) / 总资产` | −1 |
+| `np_yoy` | `NI^Q_e / NI^Q_{e-4} − 1` | +1 |
+| `sue` | `(NI^Q_e − NI^Q_{e-4}) / σ(过去 8 期同比增速)` | +1 |
+
+**决策（算法说明书 §1.2 / §2.2）**
+- **一律走 `get_financial_ttm`**，不在因子层自己拼 TTM —— A 股财报是累计口径，拼接逻辑放因子层会被 4 个因子各抄一遍。
+- **分子取 PIT 财报、分母取 as_of 当日市值**，两者时点必须一致。
+- `np_yoy` 分母 ≤ 0 → NaN（A 股大量扭亏样本会产生 ±∞）。
+- `sue` 需至少 12 期单季数据，不足 NaN。
+- 单季值 = 累计值差分，**跨年重置**（Q1 单季 = Q1 累计）—— 这层在 query 的 TTM 里已实现，因子层用
+  `get_financial(n_periods=N)` 拿多期累计值时必须自己差分，同样跨年重置。
+
+**验收断言**
+- 用真实茅台的 PIT 断言（`as_of='2021-04-01'` → 用 2020 年报）
+- 跨年重置：构造 Q1/H1/Q3/FY 累计值，断言 `np_yoy` 在 Q1 后用的是单季而非累计
+- 分母为负 → NaN（不是 ±∞）
+- `ep_ttm` 与 `1/pe_ttm`（`get_daily_basic`）在同一日的相关性 > 0.95（交叉校验两条取数路径）
+- 期数不足 → NaN，不外推
+
+---
+
+### Task 6: 资金 + 风险因子
+
+**Files:** Create `ashare/factors/flow.py`, `ashare/factors/risk.py`; Modify `tests/ashare/test_factors_price.py`（追加）
+
+**Interfaces**
+- Produces：
+  - flow：`north_hold_chg_20`（北向持股比例 20 日变化，direction=+1，`available_from=date(2016,12,5)`）
+  - risk（`neutralize=False`，**不作 alpha**）：`log_mv`（ln 总市值）、`industry`（申万一级，返回 category Series）、`beta_250`（对中证全指 250 日 beta）
+
+**决策**
+- `north_hold_chg_20` 的 `available_from=2016-12-05`：早于该日 `compute_factor` 直接返回全 NaN Series，
+  **不填 0** —— 填 0 会让 2010–2016 的合成分数被静默降权（分母算了它、分子恒 0）。
+- `industry` 不是数值因子，只供 `pipeline.neutralize` 用；不进 `combine`。
+- `beta_250` 用 `get_index_bars('000985.CSI')`；窗口内非空 < 150 日 → NaN。
+- 规格 A1 已砍 `margin_chg_20`（服务于一个规格自标"待检验"的因子），**本期不做**。
+
+**验收断言**
+- `compute_factor('north_hold_chg_20', '2015-06-12', u)` 返回全 NaN 且不抛
+- `log_mv` / `beta_250` 的 `spec.neutralize is False`
+- `beta_250`：构造与指数完全同步的股票 → beta ≈ 1；2 倍波动 → beta ≈ 2
+
+---
+
+### Task 7: compute_factor / compute_panel / combine
+
+**Files:** Modify `ashare/factors/base.py`; Modify `tests/ashare/test_factor_base.py`
+
+**Interfaces**
+- Produces：
+  ```python
+  def compute_factor(name, as_of_date, universe, *, processed=True, **param_override) -> pd.Series
+  def compute_panel(names, as_of_date, universe, *, processed=True) -> pd.DataFrame
+  def combine(weights: Mapping[str, float], as_of_date, universe) -> pd.Series
+  ```
+
+**决策**
+- `compute_factor`：`available_from` 之前直接返回全 NaN（不调 fn，省一次取数）；`processed=True` 走 `pipeline.process`。
+- `combine`：`Σ wᵢ × directionᵢ × processedᵢ`。
+  **★ 覆盖率不足（非空占比 < `min_coverage`）或 `available_from` 未到的因子，从当日分母中【剔除】并按剩余因子重新归一**，
+  而不是当 0 参与 —— 当 0 参与等于静默降权，会让 2017 年前的合成分数悄悄变味（架构 B5）。
+- 全部因子都不可用 → 返回全 NaN Series 并记 warning，不抛（回测该日跳过调仓）。
+
+**验收断言**
+- 2015 年（北向不可得）合成分数 == 只用其余因子等权的分数（**不是** 15/16 缩放）
+- 某因子覆盖率 50% < min_coverage 0.6 → 从分母剔除
+- `direction=-1` 的因子在合成里符号翻转
+- `compute_panel` 的列顺序 == 传入的 names 顺序
+- 权重非等值时按权重加权（`{a:2, b:1}` → a 的贡献是 b 的两倍）
+
+---
+
+### Task 8: 因子落库 store
+
+**Files:** Create `ashare/factors/store.py`; Create `tests/ashare/test_factor_store.py`
+
+**Interfaces**
+- Consumes：`_derived.connect_write/read`、`compute_factor`、`query.snapshot_id`
+- Produces：
+  ```python
+  def build(names, dates, *, overwrite=False, progress=None) -> dict   # {name: rows_written}
+  def read(names, date, universe, processed=True) -> pd.DataFrame       # index=ts_code, columns=names
+  def coverage_report(names) -> pd.DataFrame                            # 每因子的日期区间与覆盖率
+  ```
+
+**决策**
+- 缓存 key 必须含 `param_hash` **和** `snapshot_id`：否则会用旧数据算出的因子跑新回测（架构 B4）。
+- `build` 幂等：同 `(factor_name, param_hash, trade_date, ts_code)` 覆盖写；`overwrite=False` 时跳过
+  已有且 `snapshot_id` 相同的 (因子, 日期)。
+- `read` 命中不到就**返回空**，不静默现算 —— 现算与落库的口径分歧是最难查的一类 bug；由调用方决定要不要 `build`。
+- store 是**唯一写 derived 库**的因子模块。
+
+**验收断言**
+- `build` 两次 → 行数不翻倍；第二次返回 0（跳过）
+- `snapshot_id` 变化后再 `build` → 该日该因子的行被覆盖且 `snapshot_id` 列更新
+- `read` 未命中返回空 DataFrame（带正确列名），不现算
+- `coverage_report` 给出每因子的 `first_date/last_date/n_dates/mean_coverage`
+
+---
+
+### Task 9: 回测数据结构
+
+**Files:** Create `ashare/backtest/__init__.py`, `ashare/backtest/types.py`; Create `tests/ashare/test_backtest_types.py`
+
+**Interfaces**
+- Produces：`CostConfig` / `PortfolioConstraints` / `BacktestConfig`（含 `param_hash()`）/ `BacktestResult`（含 `summary()`）
+  —— 字段完全按架构 §4.3，此处不重复。
+
+**决策**
+- `BacktestConfig.param_hash()` **只包含影响结果的字段**：`compute_diagnostics` 不进 hash（只影响算不算诊断），
+  `shuffle_seed` **进** hash（它改变结果）。
+- `factors` 用有序 tuple `((name, weight), ...)` 以便 hash 稳定。
+- `macro_timing` 默认 **False**（U3：宏观层属 P3）。
+- `BacktestResult.summary()` 必须 < 3 KB（供 REST / Agent 工具返回）。
+
+**验收断言**
+- 同参数不同书写顺序 → 同 `param_hash`
+- 改 `compute_diagnostics` → hash 不变；改 `shuffle_seed` → hash 变
+- 改 `cost.multiplier`（闸 4）→ hash 变
+- `summary()` 序列化后 < 3072 字节
+
+---
+
+### Task 10: 组合构建 portfolio.build_targets
+
+**Files:** Create `ashare/backtest/portfolio.py`; Create `tests/ashare/test_portfolio.py`
+
+**Interfaces**
+- Produces：`build_targets(scores: pd.Series, target_position: float, prev_weights: pd.Series, industry: pd.Series, constraints: PortfolioConstraints) -> pd.Series`
+
+**决策（规格 §6.2，U1：先等权不上 LP）**
+```
+1. 按 scores 降序取前 top_n
+2. 初始权重 = target_position / top_n
+3. 行业上限：Σw > max_industry 的行业，按 scores 删该行业末位，用池中下一名替补；最多 10 轮，超出则放宽 N 并记 warning
+4. 单股上限 max_single 截断，截下来的额度按剩余股票的 scores 比例再分配
+5. 换手上限：若 ||w − w_prev||₁ > max_turnover，按 |Δw| 降序只执行前若干笔直到累计达上限，其余保持 w_prev
+```
+
+**验收断言**
+- 约束全部满足：`Σw == target_position`（1e-9 容差）、`max(w) ≤ max_single`、每行业 `Σw ≤ max_industry`、`||w−w_prev||₁ ≤ max_turnover`
+- 行业上限触发时，被删的是该行业 scores 最低的股票
+- 换手裁剪触发时，执行的是 `|Δw|` 最大的那几笔（优先做最重要的调整）
+- `prev_weights` 为空（首期）→ 换手约束不阻碍建仓
+- scores 全 NaN → 返回空 Series（该日不调仓），不抛
+
+---
+
+### Task 11: 成交模拟 execution.simulate（D6 落地处）
+
+**Files:** Create `ashare/backtest/execution.py`; Create `tests/ashare/test_execution.py`
+
+**Interfaces**
+- Consumes：`query.get_tradable_mask(exec_date, ts_codes)`
+- Produces：`simulate(exec_date, targets: pd.Series, prev_holdings: pd.Series, equity: float, cost: CostConfig) -> tuple[pd.DataFrame, pd.Series, pd.DataFrame]`
+  返回 `(trades, holdings, blocked)`
+
+**决策（规格 D6 / 算法说明书 §5.2–5.3）**
+- 成交价 = `mask.open_hfq`（T+1 开盘价）。**禁止用 T 日收盘价**。
+- 不可交易集合 `F`：`can_buy=False` 且需买入、`can_sell=False` 且需卖出、`reason='suspended'|'limit_unknown'|'no_quote'`。
+- **权重再分配**：锁定权重 `L = Σ_{i∈F} w_prev,i`；可交易部分按目标权重相对比例分配剩余额度 `(target_position − L)`；
+  若 `L > target_position` 则可交易部分清零，**不强行卖出锁定仓位**。
+- **不归一化到 1** —— 组合允许持现金，`Σw = target_position ≤ 1`。
+- 退市（`reason='delisted'`）→ 按 `mask.close_hfq × 0.5` 清仓（规格 B8：退市整理期连续跌停、几乎无流动性，
+  按收盘价成交是系统性乐观偏差），并记 warning。
+- `blocked` 是 D6 的证据链：`exec_date, ts_code, intended_side, intended_weight, reason`。
+
+**验收断言**
+- 一字涨停：`can_buy=False` → 目标里的买入被拦，`blocked` 有该行，权重保持 `prev`
+- 一字跌停：`can_sell=False` → 卖出被拦
+- 停牌 / `limit_unknown`：两侧都拦
+- 权重再分配：3 只股票 1 只锁定，断言可交易的 2 只按相对比例吃掉剩余额度，且 `Σw == target_position`
+- `L > target_position` → 可交易部分为 0，锁定仓位不动
+- 退市清仓价 == `close_hfq × 0.5` 且 warning 非空
+- **成交价断言**：`trades.price_hfq == mask.open_hfq`，且不等于当日 `close_hfq`（钉住"不是收盘价成交"）
+
+---
+
+### Task 12: 成本 cost.charge + 指标 metrics.compute
+
+**Files:** Create `ashare/backtest/cost.py`, `ashare/backtest/metrics.py`; Create `tests/ashare/test_cost_metrics.py`; Modify `requirements.txt`（+statsmodels）
+
+**Interfaces**
+- Produces：
+  ```python
+  def charge(trade_rows: pd.DataFrame, cost_cfg: CostConfig) -> pd.DataFrame   # +commission/stamp_duty/transfer_fee/impact/total_cost
+  def compute(equity, trades, positions, benchmark_series, *, full: bool) -> dict
+  def ic_series(factor_panel, forward_returns) -> pd.DataFrame                  # IC / RankIC per date
+  def icir(ic: pd.Series) -> dict                                              # mean / std / icir / t_newey_west / p
+  def layered_returns(scores, forward_returns, n_layers=10) -> pd.DataFrame
+  ```
+
+**决策（算法说明书 §5.4 / §4 / §9）**
+- 成本：佣金双边 2.5bp；印花税**仅卖出** 5bp；过户费 0.1bp；
+  冲击 `min(0.5 × 委托额/ADV20 × 当日振幅, 30bp)`。一个往返 ≈ 0.3%。
+- **换手计算必须扣持仓自然漂移**：`Δw = w_t − w_{t-1} × (1 + r_{t-1})`。不扣会系统性高估换手 15%–30%。
+- **IC 主用 RankIC**（Pearson 对涨停连板极敏感）。
+- **ICIR 的 t 检验必须用 Newey-West 调整标准误**（滞后阶数 `floor(4(T/100)^(2/9))`）——
+  IC 序列有自相关，朴素标准误把 t 值高估 30%–50%，是把噪声因子判成有效因子的头号原因。
+- 分层单调性用组序号与组年化收益的 Spearman 秩相关 `ρ_mono`。
+- 多空组合仅为因子评估口径，**不是策略**（A 股融券成本与券源不支持系统性做空）。
+
+**验收断言**
+- 买入 100 万：佣金 250 元、无印花税；卖出 100 万：佣金 250 + 印花税 5000 + 过户费 10
+- 冲击成本封顶 30bp
+- 换手漂移：持仓不动但股价涨 10% → 换手为 0（不是 10%）
+- **Newey-West 钉子**：构造强自相关的 IC 序列，断言 NW 的 t 值显著小于朴素 t 值
+- Sharpe / Calmar / 最大回撤 / IR 用手算值断言
+- 完全单调的分层 → `ρ_mono == 1.0`
+
+---
+
+### Task 13: 引擎 engine.run_backtest
+
+**Files:** Create `ashare/backtest/engine.py`, `ashare/backtest/store.py`; Create `tests/ashare/test_engine.py`
+
+**Interfaces**
+- Consumes：`factors.store.read` / `factors.combine`、`portfolio.build_targets`、`execution.simulate`、`cost.charge`、`metrics.compute`、`query.get_trade_dates(freq='W')` / `get_universe` / `snapshot_id(pin=True)` / `preload`
+- Produces：`run_backtest(config, *, on_progress=None) -> BacktestResult`；`store.save(result, run_id)` / `load(run_id)` / `append_oos_run(result)`
+
+**决策（规格 §5.3 / D7）**
+- `engine.py` **≤ 400 行且只做编排**，实体逻辑在 portfolio/execution/cost/metrics（架构 A5：硬凑"核心 400 行"
+  却把逻辑挪走是文字游戏；这里的口径是可检查的）。
+- 主循环：
+  ```
+  snapshot = query.snapshot_id(pin=True)          # ★ 钉住，中途 promote 会抛而不是静默换库
+  query.preload(start, end, ("daily_bar", "daily_basic"))
+  for t in query.get_trade_dates(end, start=start, freq='W'):
+      universe = query.get_universe(t)
+      scores   = factors.combine(weights, t, universe)      # 优先 store.read
+      exec_date = query.next_trade_date(t)
+      if exec_date is None: break                            # 日历末端
+      targets  = portfolio.build_targets(scores, position, prev_w, industry, constraints)
+      trades, holdings, blocked = execution.simulate(exec_date, targets, prev_holdings, equity, cost)
+      equity  *= (1 + Σ w·r − cost)
+  assert query.snapshot_id() == snapshot                     # 结束再核一次
+  ```
+- `run_id = f"{param_hash}_{data_snapshot_id}_{started_at:%Y%m%dT%H%M%S}"`。
+- **`append_oos_run` 自动写 `docs/oos-runs.md`**（U6 决策：人工记录必然漏记，漏记即 D7 失效）；
+  只在 `config.end > 2019-12-31`（即触及样本外）时追加，并把未跑的闸列进备注。
+
+**验收断言**
+- **时序语义钉子**：构造两只股票，其中一只在 T+1 开盘暴涨。断言组合收益用的是 T+1 开盘价成交，
+  且把该股 T 日收盘价改掉**不影响**成交价（证明不是收盘价成交）
+- 回测途中 `os.replace` 换库 → 抛 `QueryError`（快照钉住）
+- 首尾 `snapshot_id` 一致才产出 result
+- `engine.py` 行数 ≤ 400（源码级断言）
+- 日历末端 `next_trade_date` 返回 None → 正常结束不抛
+- `run_id` 含 param_hash 与 snapshot_id；`save`/`load` 往返一致
+
+---
+
+### Task 14: 防自欺五闸 guards
+
+**Files:** Create `ashare/backtest/guards.py`; Create `tests/ashare/test_guards.py`
+
+**Interfaces**
+- Produces：
+  ```python
+  @dataclass class GateResult: name: str; passed: bool; detail: dict; note: str
+  def gate1_out_of_sample(cfg) -> GateResult          # 样本外 Sharpe ≥ 样本内 × 0.6
+  def gate2_walk_forward(cfg, train_years=5, test_years=1) -> GateResult
+  def gate3_shuffle(cfg, n=200, seed=0) -> GateResult
+  def gate4_cost_stress(cfg, multiplier=2.0) -> GateResult
+  def gate5_param_plateau(cfg, grid) -> GateResult
+  def run_all_gates(cfg, *, gates=None) -> dict[str, GateResult]
+  ```
+
+**决策（算法说明书 §8）**
+- **闸 3 内部强制 `compute_diagnostics=False`**：否则 200 次 × 60s = 3.3 小时，这个闸就没人跑（架构 A3）。
+- **闸 3 的置换必须在同一天的横截面内**，绝不可跨时间打乱 —— 跨时间置换会破坏市场整体涨跌的时序结构，
+  对照组分布失真、检验结论无效。`p = (1 + #{b: SR_b ≥ SR_real}) / (n+1)`，通过标准 `p < 0.05`。
+- 闸 5 `PeakRatio = SR(θ*) / mean(SR(邻域))`，通过标准 `< 1.3`（比值越高越说明最优点是尖峰）。
+- `run_all_gates` 返回全部结果，**不因某闸失败提前退出** —— 操作员要一次看到全貌。
+- **未跑的闸必须出现在 `GateResult(passed=False, note='未运行')`**，不能悄悄不返回（U5）。
+
+**验收断言**
+- 闸 3：用一个**真随机分数**的假回测函数，断言 p 值分布接近均匀（不是恒 < 0.05）；
+  用一个与未来收益完全相关的分数，断言 p < 0.05
+- 闸 3 的置换确实只在同日内：注入一个记录被置换索引的 spy，断言每次置换的 `trade_date` 集合不变
+- 闸 3 强制关诊断：断言传入的 config 的 `compute_diagnostics is False`
+- 闸 4：成本 multiplier 确实是 2.0 传下去
+- 闸 5：给一个尖峰形状的 SR(θ) → `PeakRatio > 1.3` 判不通过；平缓高原 → 通过
+- `run_all_gates(gates=['gate1'])` → 其余闸返回 `passed=False, note='未运行'`
+
+---
+
+### Task 15: 引擎正确性反测（§5.6，P2 硬性验收）
+
+**Files:** Create `tests/ashare/test_p2_acceptance.py`; Modify `docs/oos-runs.md`（说明本期未跑样本外）
+
+**决策**
+- **验收窗口锁定 2010-01-01 – 2019-12-31**（规格 §5.6）。2020 年后注册制、量化拥挤、小盘因子衰减，
+  这些异象确有真实弱化；把窗口开到今天等于要求工程师"调数据直到跑出结果"——把防自欺的检验变成自欺的来源。
+- 库不存在（未回补）→ 整文件 skip，与 P1 验收同一模式。
+
+**验收断言（跑不出来 = 数据或引擎有 bug，不是"市场变了"）**
+- `reversal_20` 10 分层：单调**递增**，`ρ_mono > 0.7`，多空年化 > 10%
+- `turnover_20` 10 分层：单调**递减**，`ρ_mono < −0.7`
+- `log_mv` 10 分层（2010–2016 子区间）：小市值显著占优
+- 全市场 2010–2019 周频回测（因子已落库 + `compute_diagnostics=True`）单次运行 **< 60 秒**
+- `BacktestResult` 同时带 `param_hash` 与 `data_snapshot_id`
+- 涨停买不进 / 跌停卖不出 / 停牌不可交易在真实数据上各能找到 ≥ 1 个 `blocked` 样本
+
+---
+
+## 自查
+
+**规格覆盖**：规格 §5.1 因子清单 → Task 4/5/6；§5.2 处理链 → Task 3；§5.3 引擎语义 → Task 11/13；
+§5.4 评估指标 → Task 12；§5.5 五闸 → Task 14；§5.6 反测 → Task 15；架构 §4.2 → Task 2/3/7/8；
+§4.3 → Task 9–13；算法说明书 §1–§9 逐节有对应任务。
+
+**已知缺口（有意不做，非遗漏）**：宏观择时层（P3，U3）；LP 组合优化（U1，先证明等权不够用）；
+IC 加权合成（U2）；`margin_chg_20`（规格 A1 已砍）；样本外运行（U6，D7 只跑一次，属 P3）。
+
+**类型一致性**：`FactorSpec`（Task 2）被 Task 3 的 `process(spec=)`、Task 7 的 `compute_factor`、
+Task 8 的 `build` 复用；`CostConfig`（Task 9）被 Task 11 `simulate(cost=)`、Task 12 `charge(cost_cfg=)` 复用；
+`neutralize` / `process` 统一返回 `(series, warnings)`；`GateResult` 只在 Task 14 定义。
