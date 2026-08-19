@@ -41,3 +41,37 @@ def test_save_preserves_other_keys_in_state_file(tmp_path):
     d = json.loads(p.read_text())
     assert d["calls_per_min"] == 50 and d["probed_at"] == "x" and d["results"] == [1]
     assert "tokens" in d and "updated_at" in d
+
+
+def test_tushare_call_retries_on_rate_limit_and_raises_on_permission(tmp_path, monkeypatch):
+    """_call：分钟限频文案 → 等待重试；无权限 → 立刻抛；网络错误 → 退避重试后成功。"""
+    from ashare.data.sources import tushare as ts_mod
+    import pandas as pd
+    if ts_mod._ts is None:
+        import pytest as _pt; _pt.skip("tushare 未安装")
+    monkeypatch.setattr(ts_mod.time, "sleep", lambda s: None)                 # 不真等
+    monkeypatch.setenv("TUSHARE_TOKEN", "dummy")
+    monkeypatch.setattr(ts_mod._ts, "pro_api", lambda tok: object())
+    src = ts_mod.TushareSource(state_path=str(tmp_path / "rs.json"))
+
+    class Pro:
+        def __init__(self, fails): self.fails = list(fails); self.calls = 0
+        def daily(self, **kw):
+            self.calls += 1
+            if self.fails:
+                raise RuntimeError(self.fails.pop(0))
+            return pd.DataFrame({"trade_date": ["20240102"], "close": [1.0]})
+
+    src._pro = Pro(["抱歉，您每分钟最多访问该接口500次，权限的具体详情访问：x", "connection reset"])
+    out = src.daily(ts_code="600519.SH")
+    assert len(out) == 1 and src._pro.calls == 3
+
+    src._pro = Pro(["抱歉，您没有访问该接口的权限，权限的具体详情访问：x"])
+    import pytest as _pt
+    with _pt.raises(RuntimeError, match="没有访问该接口的权限"):
+        src.daily(ts_code="600519.SH")
+    assert src._pro.calls == 1                                                # 不重试
+
+    src._pro = Pro(["e1", "e2", "e3", "e4"])                                   # 超过 MAX_RETRIES → 抛最后一个
+    with _pt.raises(RuntimeError, match="e4"):
+        src.daily(ts_code="600519.SH")

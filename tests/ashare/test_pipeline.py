@@ -201,3 +201,33 @@ def test_run_daily_noop_when_up_to_date(tmp_path):
     promote.promote(str(staging), str(market))
     s = pipeline.run_daily(str(market), str(tmp_path / "s2.duckdb"), src, today=D(2024, 1, 5), indices=())
     assert s["daily_bar"] == 0 and s["skipped"] is True
+
+
+def test_run_full_refuses_drifting_end_on_resume(tmp_path):
+    """多晚分批续跑：第二晚 --end 漂移 → 已 DONE 的股票被跳过、尾部缺行。必须拒绝并提示用首晚的 end。"""
+    staging = tmp_path / "staging.duckdb"
+    src = FakeSrc()
+    pipeline.run_full(str(staging), src, start=D(2024, 1, 2), end=D(2024, 1, 5), indices=())
+    with pytest.raises(RuntimeError, match="2024-01-05"):
+        pipeline.run_full(str(staging), src, start=D(2024, 1, 2), end=D(2024, 1, 8), indices=())
+    # 同一个 end 续跑：全部 DONE → 0 新增，正常返回
+    s = pipeline.run_full(str(staging), src, start=D(2024, 1, 2), end=D(2024, 1, 5), indices=())
+    assert s["daily_bar"] == 0 and s["validation"] == "passed"
+
+
+def test_single_batch_for_normal_span():
+    """≤ 20 年整段一批（Tushare 单次 ≤ 6000 行）；> 20 年才按年切。"""
+    calls = []
+    class Src(FakeSrc):
+        def daily(self, ts_code=None, trade_date=None, start=None, end=None):
+            calls.append((ts_code, start, end)); return super().daily(ts_code, trade_date, start, end)
+    # 2 只股票 × 1 批；每只经 ingest_daily_bar 的 daily() + adj_factor()（后者内部也调 daily）= 4 次
+    from ashare.data import _db as __db, ingest as _ing
+    c = __db.connect_write(":memory:"); __db.init_schema(c)
+    src = Src()
+    _ing.ingest_calendar(c, src, D(2023, 12, 1), D(2024, 3, 1))
+    pipeline._ingest_range(c, src, D(2024, 1, 2), D(2024, 1, 5), indices=(), fin_start=D(2023, 1, 1),
+                           macro_start=D(2023, 1, 1), observed_on=None, progress=None)
+    c.close()
+    assert len(calls) == 4                                   # 按年切会变成 4 × 批数
+    assert all(st == D(2024, 1, 2) and en == D(2024, 1, 5) for _, st, en in calls)

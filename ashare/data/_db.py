@@ -25,7 +25,7 @@ def connect_read(path: str) -> duckdb.DuckDBPyConnection:
     """只读连接。D1 的最硬一层 —— DuckDB 在 read_only 连接上执行任何 DML 直接抛异常，
     不依赖任何人的自觉。query.py 只能用这个。"""
     if not pathlib.Path(path).exists():
-        raise FileNotFoundError(f"数据库不存在: {path}（先跑 python -m ashare.data.ingest）")
+        raise FileNotFoundError(f"数据库不存在: {path}（先跑 python -m ashare.data.pipeline full）")
     return duckdb.connect(path, read_only=True)
 
 

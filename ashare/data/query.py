@@ -65,7 +65,7 @@ def open_db(market_path: str | None = None, derived_path: str | None = None) -> 
     global _conn_obj, _conn_ident, _conn_realpath, _market_path, _CAL, _OPEN_DAYS
     path = market_path or _market_path or os.environ.get("ASHARE_MARKET_DB") or _db.DEFAULT_MARKET_PATH
     if not pathlib.Path(path).exists():
-        raise QueryError(f"market 库不存在: {path}（先跑 python -m ashare.data.ingest）")
+        raise QueryError(f"market 库不存在: {path}（先跑 python -m ashare.data.pipeline full）")
     ident = _file_ident(path)
     if _conn_obj is not None and _conn_ident == ident:
         return
@@ -108,12 +108,13 @@ def snapshot_id() -> str:
     for t in _SNAPSHOT_TABLES:
         r = c.execute(f"SELECT max(_ingested_at), count(*) FROM {t}").fetchone()   # 表名为本模块字面量
         parts.append(f"{t}:{r[0]}:{r[1]}")
-    # 无 _ingested_at 的三张表也要进指纹：ST 区间 / 行业成分 / 日历变了同样改变回测结果（D7）
-    for t, key in (("stock_status", "start_date"), ("industry_member", "in_date"), ("calendar", "trade_date")):
-        r = c.execute(f"SELECT count(*), max({key}), min({key}) FROM {t}").fetchone()
-        parts.append(f"{t}:{r[0]}:{r[1]}:{r[2]}")
-    r = c.execute("SELECT count(*), max(end_date) FROM stock_status WHERE status <> 'NORMAL'").fetchone()
-    parts.append(f"st:{r[0]}:{r[1]}")
+    # 无 _ingested_at 的三张小表用【内容哈希】：count/min/max 抓不到原地修改（改一个 is_open / 改一个行业名），
+    # 而那同样改变回测结果（D7）。bit_xor(hash(...)) 与行序无关且不溢出。
+    for t, cols in (("stock_status", "ts_code, start_date, end_date, status"),
+                    ("industry_member", "ts_code, sw_l1, sw_l2, sw_l3, in_date, out_date"),
+                    ("calendar", "trade_date, is_open")):
+        r = c.execute(f"SELECT count(*), bit_xor(hash({cols})) FROM {t}").fetchone()
+        parts.append(f"{t}:{r[0]}:{r[1]}")
     return hashlib.sha256("|".join(parts).encode()).hexdigest()[:16]
 
 
@@ -577,9 +578,9 @@ def get_tradable_mask(exec_date: DateLike,
         for code, delist, last_px in _conn().execute(
                 "SELECT s.ts_code, s.delist_date, "
                 "  (SELECT close * adj_factor FROM daily_bar b WHERE b.ts_code = s.ts_code AND NOT b.is_suspended "
-                "   ORDER BY b.trade_date DESC LIMIT 1) "
+                "   AND b.trade_date <= ? ORDER BY b.trade_date DESC LIMIT 1) "
                 "FROM stock_basic s WHERE s.ts_code IN (" + ",".join("?" * len(missing)) + ") "
-                "AND s.delist_date IS NOT NULL AND s.delist_date <= ?", [*missing, d]).fetchall():
+                "AND s.delist_date IS NOT NULL AND s.delist_date <= ?", [d, *missing, d]).fetchall():
             delisted_late[code] = last_px if last_px is not None else float("nan")
     out = []
     for code in codes:

@@ -83,9 +83,12 @@ def _ingest_range(conn, src, start: _dt.date, end: _dt.date, *, indices: Sequenc
     summary["industry_member"] = ingest.ingest_industry_member(conn, src)
 
     codes = _listed_between(conn, start, end)
+    # Tushare daily/adj_factor 单次可返 ≤ 6000 行（≈ 24 年日线），整段一批即可；按年分批会把调用量放大 16 倍
+    # （5,500 股 × 16 年 × 3 接口 ≈ 26 万次 vs 1.6 万次）。只有跨度 > 20 年才按年切。
+    batches = [(start, end)] if (end - start).days <= 365 * 20 else yearly_batches(start, end)
     n_bar = n_fin = 0
     for i, code in enumerate(codes):
-        for bs, be in yearly_batches(start, end):
+        for bs, be in batches:
             n_bar += ingest.ingest_daily_bar(conn, src, code, bs, be)
         n_fin += ingest.ingest_financial(conn, src, code, fin_start, end)
         if (i + 1) % 100 == 0:
@@ -120,6 +123,14 @@ def run_full(staging_path: str, src, *, start: _dt.date, end: _dt.date,
     conn = _db.connect_write(staging_path)
     try:
         _db.init_schema(conn)
+        # ★ 多晚分批续跑时 end 必须锁定：job key 含 start 不含 end，若第二晚 --end 漂移（默认 today），
+        #   第一晚已 DONE 的股票会被跳过、尾部缺行，row_completeness 必挂且无法自愈。首次运行把 end 记进 _meta。
+        prev = conn.execute("SELECT value FROM _meta WHERE key='full_end'").fetchone()
+        if prev and prev[0] != end.isoformat():
+            raise RuntimeError(f"staging 里已有一次 end={prev[0]} 的全量回补；续跑请传 --end {prev[0]}，"
+                               f"或删除 staging 重来（本次 end={end.isoformat()}）")
+        conn.execute("INSERT INTO _meta (key, value) VALUES ('full_end', ?) "
+                     "ON CONFLICT (key) DO UPDATE SET value = excluded.value", [end.isoformat()])
         # 日历多拉 90 天到未来：next_trade_date / 周期末判定需要看到下一个交易日
         ingest.ingest_calendar(conn, src, _years_back(start, 1), end + _dt.timedelta(days=90))
         summary = _ingest_range(conn, src, start, end, indices=indices,

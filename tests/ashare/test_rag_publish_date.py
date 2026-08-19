@@ -57,3 +57,8 @@ def test_build_chunks_carries_publish_date(monkeypatch, tmp_path):
         assert meta["source"] == "研报_茅台_2026-05-18.pdf"                 # 既有键不变
     chunks2 = indexer.build_chunks(tmp_path / "无日期.pdf")
     assert all(m["publish_date"] == "" and m["publish_date_source"] == "unknown" for _, _, m in chunks2)
+
+
+def test_multiple_dates_take_the_latest(tmp_path):
+    """`600519_2023-12-31_年报_发布2024-03-28.pdf`：报告期 + 发布日 → 取发布日（最大）。取最早会让年报提前三个月可见。"""
+    assert resolve_publish_date(tmp_path / "600519_2023-12-31_年报_发布2024-03-28.pdf") == ("2024-03-28", "filename")

@@ -1,7 +1,7 @@
 """Tushare Pro adapter。职责只有两件：限频 + 把 Tushare 的 YYYYMMDD 字符串日期
 规范成 datetime.date。不做任何业务转换 —— 那是 ingest.normalize 的事。"""
 from __future__ import annotations
-import json, os, pathlib
+import json, os, pathlib, time
 from typing import Any
 
 import pandas as pd
@@ -49,10 +49,25 @@ class TushareSource:
             pass
         self._bucket = TokenBucket(cpm, state_path)
 
+    MAX_RETRIES = 3
+
     def _call(self, api: str, **kw) -> pd.DataFrame:
-        self._bucket.acquire()
-        df = getattr(self._pro, api)(**{k: v for k, v in kw.items() if v is not None})
-        return _to_date(df if df is not None else pd.DataFrame())
+        """限频 + 重试：分钟限频文案 → 等 61s 重试；其他（网络）错误指数退避 2/4/8s；
+        无权限（"没有…权限" / "积分不足"）立刻抛，不重试。"""
+        params = {k: v for k, v in kw.items() if v is not None}
+        last: Exception | None = None
+        for attempt in range(self.MAX_RETRIES + 1):
+            self._bucket.acquire()
+            try:
+                df = getattr(self._pro, api)(**params)
+                return _to_date(df if df is not None else pd.DataFrame())
+            except Exception as exc:                  # noqa: BLE001
+                msg = str(exc)
+                if ("没有" in msg and "权限" in msg) or "积分不足" in msg or attempt == self.MAX_RETRIES:
+                    raise
+                last = exc
+                time.sleep(61 if "每分钟" in msg else 2 ** (attempt + 1))
+        raise last  # pragma: no cover
 
     # ── 基础 ──
     def trade_cal(self, start, end, exchange: str = "SSE") -> pd.DataFrame:

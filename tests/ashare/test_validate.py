@@ -141,3 +141,39 @@ def test_row_completeness_bounds_expected_by_data_start(market_db):
     fixture 里 A 上市 2010、数据从 2023-12-25 起 → 不得误报。"""
     r = validate.check_row_completeness(market_db)
     assert r.passed and r.detail["data_start"] == D(2023, 12, 25) and r.detail["outside_window"] == 0
+
+
+def test_frozen_day_blocks_promotion(market_db):
+    """源某天返回空 → 全市场占位行 → 其余校验全过 → 这天若 promote 就永远不会重拉。必须阻断。"""
+    _mutate(market_db, "UPDATE daily_bar SET is_suspended = TRUE, vol = 0, amount = 0, open = close, high = close, low = close "
+                       "WHERE trade_date = DATE '2024-01-31'")
+    r = validate.check_frozen_days(market_db)
+    assert r.passed is False and r.blocking is True and r.detail["days"][0]["trade_date"] == D(2024, 1, 31)
+    with pytest.raises(ValidationError) as ei:
+        validate.run_all(market_db)
+    assert hasattr(ei.value, "results")                 # 告警项随异常一并带出
+
+
+def test_cross_source_partial_errors_do_not_discard_results(market_db):
+    """单只股票查询报错 → 记录到 errors，继续比较其余；只有一只都没比上才 SKIPPED。"""
+    class Flaky(FakeBao):
+        def hfq_close(self, ts_code, start, end):
+            if ts_code == "A00001.SZ":
+                raise RuntimeError("transient")
+            return super().hfq_close(ts_code, start, end)
+    bao = Flaky(scale=1.0); bao._path = market_db
+    r = validate.check_cross_source(market_db, bao, n_stocks=4, n_days=5)
+    assert not r.skipped and r.passed and r.detail["n_errors"] == 1 and r.detail["compared"] > 0
+
+
+def test_cross_source_samples_only_sh_sz_with_real_bars(market_db):
+    """北交所（BaoStock 不覆盖）与窗口内无真实成交的股票不进样本。"""
+    _mutate(market_db, "INSERT INTO stock_basic (ts_code, symbol, name, list_date) VALUES ('830001.BJ', '830001', '北', DATE '2020-01-01')")
+    _mutate(market_db, "INSERT INTO daily_bar (ts_code, trade_date, close, adj_factor, is_suspended) VALUES ('830001.BJ', DATE '2024-02-02', 1.0, 1.0, FALSE)")
+    seen = []
+    class Spy(FakeBao):
+        def hfq_close(self, ts_code, start, end):
+            seen.append(ts_code); return super().hfq_close(ts_code, start, end)
+    bao = Spy(); bao._path = market_db
+    validate.check_cross_source(market_db, bao, n_stocks=10, n_days=5)
+    assert "830001.BJ" not in seen and "C00003.SH" not in seen      # C 01-24 退市，窗口（最近 5 日）内无成交

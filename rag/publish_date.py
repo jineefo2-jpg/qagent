@@ -20,14 +20,17 @@ OVERRIDE_FILE = "publish_dates.json"
 
 
 def _from_filename(name: str) -> str | None:
-    m = _DATE_RE.search(name)
-    if not m:
-        return None
-    y, mo, d = (int(x) for x in m.groups())
-    try:
-        return _dt.date(y, mo, d).isoformat()
-    except ValueError:
-        return None
+    """文件名里有多个日期（如 `600519_2023-12-31_年报_发布2024-03-28.pdf`：报告期 + 发布日）→ 取【最大】。
+    取最早会让年报提前三个月可见 —— PIT 不安全方向；取最晚至多损失召回。
+    已知误判：B 股代码 + 两位后缀（`万科B_200002_01.pdf` → 2000-02-01），用同目录 publish_dates.json 覆盖。"""
+    found: list[_dt.date] = []
+    for m in _DATE_RE.finditer(name):
+        y, mo, d = (int(x) for x in m.groups())
+        try:
+            found.append(_dt.date(y, mo, d))
+        except ValueError:
+            continue
+    return max(found).isoformat() if found else None
 
 
 def _from_override(pdf_path: Path) -> str | None:

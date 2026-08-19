@@ -8,6 +8,7 @@
 | financial_ann_date | ann_date 缺失 = 0；ann_date 不晚于入库时间                  | 阻断 |
 | macro_publish_date | publish_date/source 缺失 = 0；publish_date >= period（D4）  | 阻断 |
 | limit_coverage     | limit_source='unknown' 在非停牌行中的占比（报告）           | 报告 |
+| frozen_days        | 某交易日有行但 0 只非停牌（源返回空被写成全市场占位）        | 阻断 |
 | cross_source       | 抽样 BaoStock 后复权收盘价偏差 < 0.5%；不可用 → SKIPPED     | 告警 |
 """
 from __future__ import annotations
@@ -152,6 +153,24 @@ def check_limit_coverage(path: str) -> CheckResult:
                        {"by_source": by_src, "unknown_share_non_suspended": share})
 
 
+# ══════════════ 6b. 冻结日（阻断）══════════════
+def check_frozen_days(path: str) -> CheckResult:
+    """日历开市、daily_bar 有行、但 0 只非停牌 —— 几乎只可能是数据源当天返回空（未发布 / 故障），
+    被 normalize 写成了全市场占位行。这种天一旦 promote，增量驱动会从下一天开始、永远不再重拉。
+    （架构 §5.3 的 SUSPECT 状态在此落地为阻断校验。）"""
+    c = _ro(path)
+    try:
+        rows = c.execute("""
+            SELECT trade_date, count(*) AS n FROM daily_bar
+            GROUP BY trade_date HAVING count(*) > 0 AND sum(CASE WHEN NOT is_suspended THEN 1 ELSE 0 END) = 0
+            ORDER BY trade_date
+        """).fetchall()
+    finally:
+        c.close()
+    days = [{"trade_date": r[0], "rows": r[1]} for r in rows]
+    return CheckResult("frozen_days", not days, True, {"days": days, "n": len(days)})
+
+
 # ══════════════ 7. 双源交叉（BaoStock，告警；不可用 → SKIPPED）══════════════
 def check_cross_source(path: str, bao_src, n_stocks: int = 200, n_days: int = 100,
                        seed: int = 0) -> CheckResult:
@@ -159,24 +178,28 @@ def check_cross_source(path: str, bao_src, n_stocks: int = 200, n_days: int = 10
         return CheckResult("cross_source", None, False, {"reason": "no BaoStock source"}, skipped=True)
     c = _ro(path)
     try:
-        codes = [r[0] for r in c.execute("SELECT DISTINCT ts_code FROM daily_bar ORDER BY ts_code").fetchall()]
         horizon = c.execute("SELECT max(trade_date) FROM daily_bar").fetchone()[0]
-        rng = random.Random(seed)
-        sample = rng.sample(codes, min(n_stocks, len(codes)))
         days = [r[0] for r in c.execute("SELECT trade_date FROM calendar WHERE is_open AND trade_date <= ? "
                                         "ORDER BY trade_date DESC LIMIT ?", [horizon, n_days]).fetchall()]
         if not days:
             return CheckResult("cross_source", None, False, {"reason": "no data"}, skipped=True)
         start, end = min(days), max(days)
+        # 只抽窗口内有真实成交的沪深股票：BaoStock 不覆盖北交所；已退市 / 全程停牌的股票无可比样本
+        codes = [r[0] for r in c.execute(
+            "SELECT DISTINCT ts_code FROM daily_bar WHERE trade_date BETWEEN ? AND ? AND NOT is_suspended "
+            "AND (ts_code LIKE '%.SH' OR ts_code LIKE '%.SZ') ORDER BY ts_code", [start, end]).fetchall()]
+        rng = random.Random(seed)
+        sample = rng.sample(codes, min(n_stocks, len(codes)))
         diffs: list[dict[str, Any]] = []
+        errors: list[dict[str, Any]] = []
         max_diff = 0.0
         compared = 0
         for code in sample:
             try:
                 ref = bao_src.hfq_close(code, start, end)
-            except Exception as exc:                 # noqa: BLE001 — 源不可用即 SKIPPED，不是 PASS
-                return CheckResult("cross_source", None, False,
-                                   {"reason": f"BaoStock 不可用: {str(exc)[:200]}"}, skipped=True)
+            except Exception as exc:                 # noqa: BLE001 — 单只失败记录并继续，不丢掉已比较的结果
+                errors.append({"ts_code": code, "error": str(exc)[:200]})
+                continue
             ours = c.execute("SELECT trade_date, close * adj_factor FROM daily_bar WHERE ts_code=? "
                              "AND trade_date BETWEEN ? AND ? AND NOT is_suspended", [code, start, end]).fetchall()
             ours_map = {r[0]: r[1] for r in ours}
@@ -190,9 +213,12 @@ def check_cross_source(path: str, bao_src, n_stocks: int = 200, n_days: int = 10
                         diffs.append({"ts_code": code, "trade_date": d, "ours": ours_map[d], "ref": ref_px, "diff": diff})
     finally:
         c.close()
+    if compared == 0:                                # 一个都没比上 → 源不可用，SKIPPED 而非 PASS
+        return CheckResult("cross_source", None, False,
+                           {"reason": "BaoStock 无可比样本", "errors": errors[:5], "sampled": len(sample)}, skipped=True)
     return CheckResult("cross_source", not diffs, False,
                        {"compared": compared, "n_bad": len(diffs), "max_abs_pct_diff": max_diff,
-                        "worst": diffs[:20]})
+                        "worst": diffs[:20], "errors": errors[:20], "n_errors": len(errors)})
 
 
 # ══════════════ 汇总 ══════════════
@@ -204,9 +230,12 @@ def run_all(path: str, bao_src=None) -> list[CheckResult]:
         check_financial_ann_date(path),
         check_macro_publish_date(path),
         check_limit_coverage(path),
+        check_frozen_days(path),
         check_cross_source(path, bao_src),
     ]
     failed = [r for r in results if r.blocking and not r.skipped and not r.passed]
     if failed:
-        raise ValidationError("阻断级校验未通过: " + "; ".join(f"{r.name}={r.detail}" for r in failed)[:2000])
+        err = ValidationError("阻断级校验未通过: " + "; ".join(f"{r.name}={r.detail}" for r in failed)[:2000])
+        err.results = results                        # type: ignore[attr-defined]  # 告警项也一并带出
+        raise err
     return results

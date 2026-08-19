@@ -51,10 +51,10 @@ def promote(staging_path: str, market_path: str, *, keep: int = 3) -> str:
     if market.exists():
         stamp = _dt.datetime.utcnow().strftime("%Y%m%dT%H%M%S%f")
         backup = str(market) + f".bak.{stamp}"
+        wal = pathlib.Path(str(market) + ".wal")
+        if wal.exists():                                # 正式库有 WAL = 有人原地写过正式路径，违反"只写 staging"
+            raise RuntimeError(f"正式库残留 WAL: {wal} —— 有进程原地写了 market，先排查再 promote")
         os.link(str(market), backup)                   # 零拷贝快照：同一 inode 多一个名字
-        wal = pathlib.Path(str(market) + ".wal")        # 旧库的 WAL（正常不该有）不跟着走
-        if wal.exists():
-            wal.unlink()
     os.replace(str(staging), str(market))              # 原子：读者要么看到旧 inode，要么看到新 inode
     _prune_backups(str(market), keep)
     return backup

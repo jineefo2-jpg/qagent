@@ -142,3 +142,18 @@ def test_preload_and_clear(q):
     assert len(q._PRELOAD["daily_bar"]) > 0
     q.clear_preload()
     assert q._PRELOAD == {}
+
+
+def test_snapshot_id_detects_in_place_edits(market_db):
+    """count/min/max 抓不到原地修改；内容哈希必须抓到：改一个 calendar.is_open / 一个行业名。"""
+    from ashare.data import _db
+    query.open_db(market_db); a = query.snapshot_id(); query.close_db()
+    w = _db.connect_write(market_db)
+    w.execute("UPDATE calendar SET is_open = FALSE WHERE trade_date = DATE '2024-01-31'")
+    w.close()
+    query.open_db(market_db); b = query.snapshot_id(); query.close_db()
+    w = _db.connect_write(market_db)
+    w.execute("UPDATE industry_member SET sw_l1 = '非银金融' WHERE ts_code = 'A00001.SZ'")
+    w.close()
+    query.open_db(market_db); c = query.snapshot_id(); query.close_db()
+    assert len({a, b, c}) == 3
