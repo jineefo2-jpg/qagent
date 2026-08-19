@@ -11,6 +11,7 @@
 只用 read_only 连接（D1 最硬一层）：这里没有任何写路径。
 """
 from __future__ import annotations
+import bisect
 import datetime as _dt
 import hashlib
 import os
@@ -50,6 +51,7 @@ _market_path: str | None = None
 _PRELOAD: dict[str, pd.DataFrame] = {}
 _CAL: pd.DataFrame | None = None            # 日历缓存：trade_date, is_open
 _OPEN_DAYS: list[_dt.date] | None = None    # 开市日列表缓存（回测循环里高频调用）
+_pinned_ident: tuple[int, int] | None = None  # snapshot_id(pin=True) 钉住的 inode：之后换文件要抛而不是静默重连
 
 
 def _file_ident(path: str) -> tuple[int, int]:
@@ -78,17 +80,27 @@ def open_db(market_path: str | None = None, derived_path: str | None = None) -> 
 
 
 def close_db() -> None:
-    global _conn_obj, _conn_ident, _conn_realpath, _CAL, _OPEN_DAYS
+    global _conn_obj, _conn_ident, _conn_realpath, _CAL, _OPEN_DAYS, _pinned_ident
     if _conn_obj is not None:
         _conn_obj.close()
     _conn_obj, _conn_ident, _conn_realpath, _CAL, _OPEN_DAYS = None, None, None, None, None
+    _pinned_ident = None
     _PRELOAD.clear()
 
 
 def _conn() -> duckdb.DuckDBPyConnection:
-    """每次取连接都重新 stat 一次路径（微秒级）：inode 变了就重连。"""
-    if _conn_obj is None or (_market_path and pathlib.Path(_market_path).exists()
-                             and _file_ident(_market_path) != _conn_ident):
+    """每次取连接都重新 stat 一次路径（微秒级）：inode 变了就重连。
+    但如果调用方已 snapshot_id(pin=True) 钉住快照，换文件必须【抛】——
+    静默重连会让一次回测横跨两个数据库而只记录一个 data_snapshot_id。"""
+    if _conn_obj is not None and _market_path and pathlib.Path(_market_path).exists():
+        ident = _file_ident(_market_path)
+        if ident != _conn_ident:
+            if _pinned_ident is not None:
+                raise QueryError(
+                    f"数据库在运行途中被替换（promote），而当前快照已钉住。"
+                    f"本次运行的结果横跨两份数据，不可信 —— 请重跑。路径: {_market_path}")
+            open_db(_market_path)
+    elif _conn_obj is None:
         open_db(_market_path)
     assert _conn_obj is not None
     return _conn_obj
@@ -98,24 +110,38 @@ _SNAPSHOT_TABLES = ("stock_basic", "daily_bar", "daily_basic", "financial_pit",
                     "macro_indicator", "money_flow", "index_daily")
 
 
-def snapshot_id() -> str:
-    """数据快照指纹：sha256(文件名 + schema_version + 各表 max(_ingested_at) + count)[:16]。
-    ★ 与 param_hash 一起写进 BacktestResult / docs/oos-runs.md（D7）：参数锁参数，快照锁数据。"""
-    c = _conn()
-    parts = [pathlib.Path(_conn_realpath or "").name]
-    ver = c.execute("SELECT value FROM _meta WHERE key='schema_version'").fetchone()
+def _compute_snapshot(conn) -> str:
+    """在【给定连接】上算数据指纹。抽出来是为了让 promote 用它自己的写连接算，
+    不必在同一进程里混用只读/读写连接（DuckDB 不允许）。"""
+    parts: list[str] = []
+    ver = conn.execute("SELECT value FROM _meta WHERE key='schema_version'").fetchone()
     parts.append(str(ver[0] if ver else "?"))
     for t in _SNAPSHOT_TABLES:
-        r = c.execute(f"SELECT max(_ingested_at), count(*) FROM {t}").fetchone()   # 表名为本模块字面量
+        r = conn.execute(f"SELECT max(_ingested_at), count(*) FROM {t}").fetchone()   # 表名为本模块字面量
         parts.append(f"{t}:{r[0]}:{r[1]}")
     # 无 _ingested_at 的三张小表用【内容哈希】：count/min/max 抓不到原地修改（改一个 is_open / 改一个行业名），
     # 而那同样改变回测结果（D7）。bit_xor(hash(...)) 与行序无关且不溢出。
     for t, cols in (("stock_status", "ts_code, start_date, end_date, status"),
                     ("industry_member", "ts_code, sw_l1, sw_l2, sw_l3, in_date, out_date"),
                     ("calendar", "trade_date, is_open")):
-        r = c.execute(f"SELECT count(*), bit_xor(hash({cols})) FROM {t}").fetchone()
+        r = conn.execute(f"SELECT count(*), bit_xor(hash({cols})) FROM {t}").fetchone()
         parts.append(f"{t}:{r[0]}:{r[1]}")
     return hashlib.sha256("|".join(parts).encode()).hexdigest()[:16]
+
+
+def snapshot_id(*, pin: bool = False) -> str:
+    """数据快照指纹：sha256(schema_version + 各表 max(_ingested_at)+count + 三张小表内容哈希)[:16]。
+
+    ★ 只函数化于【数据】，不含文件名/路径 —— 否则把 .bak 快照挂到别的路径重跑，
+      指纹就对不上自己记录的那次运行，而 D7 要的正是"同 param_hash + 同 data_snapshot_id ⇒ 同结果"。
+    ★ pin=True：钉住当前 inode。之后 promote 换了文件，_conn() 不再静默重连而是抛 QueryError ——
+      否则一次回测可能横跨两个数据库、却只记录一个指纹（D7 失效）。close_db() 解钉。
+      回测入口应 snapshot_id(pin=True)，结束前再取一次核对。"""
+    global _pinned_ident
+    c = _conn()
+    if pin:
+        _pinned_ident = _conn_ident
+    return _compute_snapshot(c)
 
 
 # ══════════════ 日期规范化（Q2）══════════════
@@ -171,17 +197,19 @@ def prev_trade_date(as_of_date: DateLike, n: int = 1) -> _dt.date:
     """严格早于 as_of_date 的第 n 个交易日。"""
     d = _norm_date(as_of_date)
     _check_in_calendar(d)
-    days = [x for x in _open_days() if x < d]
-    if len(days) < n:
+    days = _open_days()
+    i = bisect.bisect_left(days, d)          # days 已排序；O(log n) 而非每次扫 4000 个日期
+    if i < n:
         raise AsOfDateError(f"{d} 之前不足 {n} 个交易日")
-    return days[-n]
+    return days[i - n]
 
 
 def next_trade_date(as_of_date: DateLike, n: int = 1) -> _dt.date | None:
     """严格晚于 as_of_date 的第 n 个交易日。日历未覆盖到时返回 None（不抛）——回测末端必须处理。"""
     d = _norm_date(as_of_date)
-    days = [x for x in _open_days() if x > d]
-    return days[n - 1] if len(days) >= n else None
+    days = _open_days()
+    i = bisect.bisect_right(days, d)
+    return days[i + n - 1] if i + n - 1 < len(days) else None
 
 
 def get_trade_dates(as_of_date: DateLike, *,
@@ -192,10 +220,10 @@ def get_trade_dates(as_of_date: DateLike, *,
     'W' 即规格 §5.3 的 weekly_dates 定义 —— 唯一实现点，禁止各处自己算周末。"""
     end = _norm_date(as_of_date)
     _check_in_calendar(end)
-    days = [x for x in _open_days() if x <= end]
-    if start is not None:
-        s = _norm_date(start, name="start")
-        days = [x for x in days if x >= s]
+    all_days = _open_days()
+    hi = bisect.bisect_right(all_days, end)
+    lo = bisect.bisect_left(all_days, _norm_date(start, name="start")) if start is not None else 0
+    days = all_days[lo:hi]
     if freq == "D":
         return days
     if freq not in ("W", "M"):
@@ -213,7 +241,7 @@ def get_trade_dates(as_of_date: DateLike, *,
 
 
 # ══════════════ preload（骨架；行情类函数在 Task 11 接上）══════════════
-_PRELOADABLE = ("daily_bar", "daily_basic", "money_flow")
+_PRELOADABLE = ("daily_bar", "daily_basic")     # get_money_flow 不读缓存，列上去只会白占内存
 
 
 def preload(start: DateLike, end: DateLike,
@@ -240,7 +268,8 @@ _ST_STATES = ("ST", "*ST", "DELIST_PERIOD")
 
 def _stock_frame(as_of: _dt.date) -> pd.DataFrame:
     """所有股票（含已退市）+ as_of 当日的状态 / 停牌 / 20 日均成交额。一次 SQL，后续在 pandas 里分步。"""
-    days = [d for d in _open_days() if d <= as_of]
+    all_days = _open_days()
+    days = all_days[:bisect.bisect_right(all_days, as_of)]
     win_start = days[-20] if len(days) >= 20 else (days[0] if days else as_of)
     sql = """
     WITH st AS (
@@ -284,6 +313,10 @@ def explain_universe(as_of_date: DateLike, *,
     先硬性剔除、后算流动性分位 —— 顺序颠倒会让退市股/次新股参与分位计算，结果不同。"""
     as_of = _norm_date(as_of_date)
     _check_in_calendar(as_of)
+    if not is_trade_date(as_of):
+        # 非交易日当天没有 daily_bar 行 → step4 全 False → 静默返回空池。
+        # 与 get_tradable_mask 一致：宁可抛，不给一个看起来合理的空结果。
+        raise AsOfDateError(f"as_of_date={as_of} 不是交易日；股票池只在交易日有定义")
     f = _stock_frame(as_of)
     seasoned_before = as_of - _dt.timedelta(days=min_list_days)
 
@@ -421,7 +454,8 @@ def _window_start(as_of: _dt.date, lookback: int | None, start: DateLike | None)
     if lookback is not None:
         if lookback <= 0:
             raise QueryError("lookback 必须为正整数")
-        days = [d for d in _open_days() if d <= as_of]
+        all_days = _open_days()
+        days = all_days[:bisect.bisect_right(all_days, as_of)]
         if not days:
             raise AsOfDateError(f"as_of_date={as_of} 之前日历中没有交易日")
         lb = days[-lookback] if len(days) >= lookback else days[0]      # 不足 lookback 时取全部（数据起点）
@@ -568,6 +602,12 @@ def get_tradable_mask(exec_date: DateLike,
         "FROM daily_bar b LEFT JOIN stock_basic s ON s.ts_code = b.ts_code "
         "WHERE b.trade_date = ? AND b.ts_code IN (" + ",".join("?" * len(codes)) + ")",
         [d, *codes]).fetchall()
+    def _last_real_close(code: str, upto: _dt.date) -> float:
+        r = _conn().execute(
+            "SELECT close * adj_factor FROM daily_bar WHERE ts_code = ? AND trade_date <= ? "
+            "AND NOT is_suspended ORDER BY trade_date DESC LIMIT 1", [code, upto]).fetchone()
+        return r[0] if r and r[0] is not None else float("nan")
+
     by_code = {r[0]: r for r in rows}
     missing = [c for c in codes if c not in by_code]
     # 退市后 daily_bar 不再有行（ingest 只写到 delist_date 当日）；但 delist_date <= exec_date 的股票
@@ -601,7 +641,12 @@ def get_tradable_mask(exec_date: DateLike,
         amt = amt if amt is not None else float("nan")
 
         if delist is not None and delist <= d:
-            out.append((code, False, True, "delisted", o_h, c_h, amt, amp)); continue
+            if sus:      # 退市日通常已无成交（退市整理期在前一日结束）→ 当天是占位行，价格是前收，不能当真实成交价
+                px = _last_real_close(code, d)
+                out.append((code, False, True, "delisted", px, px, float("nan"), float("nan")))
+            else:
+                out.append((code, False, True, "delisted", o_h, c_h, amt, amp))
+            continue
         if sus or o is None:
             out.append((code, False, False, "suspended", o_h, c_h, amt, amp)); continue
         if up is None or dn is None:
@@ -795,7 +840,8 @@ def get_money_flow(as_of_date: DateLike,
     if bad:
         raise UnknownFieldError(f"get_money_flow 不支持字段 {bad}")
     codes = list(ts_codes)
-    days = [d for d in _open_days() if d <= as_of][-lookback:]
+    all_days = _open_days()
+    days = all_days[:bisect.bisect_right(all_days, as_of)][-lookback:]
     idx = pd.MultiIndex.from_product([codes, days], names=["ts_code", "trade_date"])
     if not codes or not days:
         return pd.DataFrame(columns=list(fields), index=_empty_mi())

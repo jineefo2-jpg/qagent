@@ -136,3 +136,12 @@ def test_parse_date_rejects_numeric():
     with _pt.raises(TypeError):
         _parse_date(20240102)
     assert _parse_date("20240102") == _parse_date("2024-01-02") == D(2024,1,2)
+
+
+def test_zero_volume_source_row_is_marked_suspended():
+    """源给出 vol=0、close 沿用前收的"行" → 必须当停牌，否则会在没成交的日子按前收成交。"""
+    daily = _daily([(D(2024,1,2), 100.0), (D(2024,1,3), 100.0)])
+    daily.loc[daily.trade_date == D(2024,1,3), ["vol", "amount"]] = 0.0
+    out = normalize_daily_bar(daily, _adj([D(2024,1,2), D(2024,1,3)]), None,
+                              [D(2024,1,2), D(2024,1,3)], BASIC, STATUS).set_index("trade_date")
+    assert out.loc[D(2024,1,3)].is_suspended and not out.loc[D(2024,1,2)].is_suspended

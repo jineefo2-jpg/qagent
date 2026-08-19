@@ -51,3 +51,27 @@ def test_detects_write_in_report_layer(tmp_path):
     _write(tmp_path, "report/stock_deep.py", "def f(c):\n    c.execute('INSERT INTO x VALUES (1)')\n")
     v = chk.check(str(tmp_path))
     assert any("INSERT" in x.upper() for x in v)
+
+
+def test_detects_adjust_none_outside_data_layer(tmp_path):
+    """D8：后复权是唯一真值。data 层之外传 adjust="none" 拿到的是原始价。"""
+    _write(tmp_path, "factors/price.py", 'def f(q, d, u):\n    return q.get_bars(d, u, adjust="none")\n')
+    v = chk.check(str(tmp_path))
+    assert any("L5" in x for x in v)
+
+
+def test_allows_adjust_none_inside_data_layer(tmp_path):
+    _write(tmp_path, "data/validate.py", 'def f(q, d, u):\n    return q.get_bars(d, u, adjust="none")\n')
+    assert chk.check(str(tmp_path)) == []
+
+
+def test_detects_private_import_from_data_layer(tmp_path):
+    """_PRELOAD 里是未掩码的原始行（含 limit_up、停牌日真实 OHLC），导入它等于绕过所有保护。"""
+    _write(tmp_path, "factors/price.py", "from ashare.data.query import _PRELOAD\n")
+    v = chk.check(str(tmp_path))
+    assert any("L6" in x for x in v)
+
+
+def test_allows_public_import_from_data_layer(tmp_path):
+    _write(tmp_path, "factors/price.py", "from ashare.data.query import get_bars, get_universe\n")
+    assert chk.check(str(tmp_path)) == []

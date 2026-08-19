@@ -6,6 +6,9 @@
   L3 因子签名：ashare/factors/{price,fundamental,flow,risk}.py 的公开函数前两个位置参数
                必须是 (as_of_date, universe)
   L4 写操作  ：ashare/report/**、ashare/agent_tools.py 不得出现 DML 字符串（D1）
+  L5 复权逃逸：ashare/data/** 之外不得传 adjust="none"（D8：后复权是唯一真值）
+  L6 私有绕过：ashare/data/** 之外不得从 ashare.data.* 导入下划线开头的名字
+               （_PRELOAD 里有原始价、limit_up 与未掩码的停牌行，绕过 get_bars/get_tradable_mask 的全部保护）
 """
 from __future__ import annotations
 import ast, pathlib, sys
@@ -74,6 +77,25 @@ def check(root: str = "ashare") -> list[str]:
                         violations.append(
                             f"{rel}:{node.lineno}: L3 因子 {node.name}() 前两个参数必须是 "
                             f"(as_of_date, universe)，实际 {names[:2]}")
+
+        # L5 adjust="none" 只允许在 data 层内部（ingest/validate 的原始价核对）
+        if not rel.startswith(DUCKDB_ALLOWED_PREFIX):
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Call):
+                    for kw in node.keywords:
+                        if kw.arg == "adjust" and isinstance(kw.value, ast.Constant) and kw.value.value == "none":
+                            violations.append(
+                                f"{rel}:{node.lineno}: L5 adjust=\"none\" 绕过后复权 —— 后复权是唯一真值（D8）")
+
+        # L6 不得从 ashare.data.* 导入私有名（_PRELOAD 等含原始价与未掩码行）
+        if not rel.startswith(DUCKDB_ALLOWED_PREFIX):
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ImportFrom) and node.module and node.module.startswith("ashare.data"):
+                    for a in node.names:
+                        if a.name.startswith("_"):
+                            violations.append(
+                                f"{rel}:{node.lineno}: L6 从 {node.module} 导入私有名 {a.name} —— "
+                                f"绕过 get_bars/get_tradable_mask 的掩码保护（D2/D8）")
 
         # L4 只读层不得有 DML
         if rel.startswith(READONLY_LAYERS):

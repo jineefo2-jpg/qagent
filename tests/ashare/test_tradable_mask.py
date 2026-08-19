@@ -115,3 +115,14 @@ def test_delisted_after_last_bar_still_sellable_at_last_close(q):
 def test_unknown_code_is_still_no_quote(q):
     m = q.get_tradable_mask("2024-01-26", ["ZZZZZZ.SZ"])
     assert m.loc["ZZZZZZ.SZ", "reason"] == "no_quote"
+
+
+def test_delisted_on_a_placeholder_day_prices_off_last_real_close(q, market_db):
+    """退市当天通常已无成交（退市整理期在前一日结束）→ 当天是占位行，其 OHLC 是前收。
+    强平价必须取最后一根【非停牌】K 线，与 missing 分支同口径，不能用占位价。"""
+    _set_bar(market_db, "C00003.SH", D(2024, 1, 24), is_suspended=True, vol=0, amount=0)
+    m = query.get_tradable_mask("2024-01-24", ["C00003.SH"])
+    r = m.loc["C00003.SH"]
+    assert (not r.can_buy) and r.can_sell and r.reason == "delisted"
+    last = query.get_bars("2024-01-23", ["C00003.SH"], lookback=1)["close"].iloc[0]
+    assert abs(r.close_hfq - last) < 1e-9

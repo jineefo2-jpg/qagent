@@ -25,8 +25,9 @@ def _by_name(results):
 def test_clean_fixture_passes_all_blocking_checks(market_db):
     res = validate.run_all(market_db)
     m = _by_name(res)
-    assert set(m) >= {"row_completeness", "placeholder_rows", "adj_factor_jumps", "financial_ann_date",
-                      "macro_publish_date", "limit_coverage", "cross_source"}
+    assert set(m) == {"row_completeness", "placeholder_rows", "adj_factor_jumps", "financial_ann_date",
+                      "macro_publish_date", "limit_coverage", "frozen_days", "industry_source",
+                      "zero_volume_rows", "cross_source"}          # 相等而非包含：删掉任一检查都要失败
     assert all(r.passed for r in res if r.blocking and not r.skipped)
     assert m["cross_source"].skipped is True            # 未提供 BaoStock → SKIPPED，不是 PASS
 
@@ -177,3 +178,21 @@ def test_cross_source_samples_only_sh_sz_with_real_bars(market_db):
     bao = Spy(); bao._path = market_db
     validate.check_cross_source(market_db, bao, n_stocks=10, n_days=5)
     assert "830001.BJ" not in seen and "C00003.SH" not in seen      # C 01-24 退市，窗口（最近 5 日）内无成交
+
+
+def test_industry_source_downgrade_is_blocking(market_db):
+    """降级来源 = 今天的行业回填到上市日 → 行业中性化前视。必须阻断，逼操作员显式承认。"""
+    _mutate(market_db, "UPDATE _meta SET value='tushare_static' WHERE key='industry_source'")
+    r = validate.check_industry_source(market_db)
+    assert r.passed is False and r.blocking is True and r.detail["industry_source"] == "tushare_static"
+    _mutate(market_db, "INSERT INTO _meta VALUES ('industry_source_ack', '1')")
+    assert validate.check_industry_source(market_db).passed is True     # 显式承认后放行，键留在库里
+    _mutate(market_db, "UPDATE _meta SET value='sw' WHERE key='industry_source'")
+    assert validate.check_industry_source(market_db).passed is True
+
+
+def test_zero_volume_non_suspended_row_is_blocking(market_db):
+    _mutate(market_db, "UPDATE daily_bar SET vol = 0 WHERE ts_code='B00002.SZ' AND trade_date=DATE '2024-01-10'")
+    r = validate.check_zero_volume_rows(market_db)
+    assert r.passed is False and r.blocking is True and r.detail["n"] == 1
+    assert r.detail["sample"][0] == {"ts_code": "B00002.SZ", "trade_date": D(2024, 1, 10)}

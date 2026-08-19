@@ -12,8 +12,35 @@ from __future__ import annotations
 import datetime as _dt
 import os
 import pathlib
+import shutil
 
 import duckdb
+
+
+def _stamp_snapshot(path: str) -> str:
+    """把即将上线的库的数据指纹写进它自己的 _meta.snapshot_id，并返回。
+    备份用这个指纹命名 —— 否则 docs/oos-runs.md 里记的 data_snapshot_id 无法对应到磁盘上的哪份 .bak。
+    用自己的写连接算（不经 query 的只读单例：同进程混用读写连接 DuckDB 会拒绝）。"""
+    from .query import _compute_snapshot
+    c = duckdb.connect(path)
+    try:
+        sid = _compute_snapshot(c)
+        c.execute("INSERT INTO _meta (key, value) VALUES ('snapshot_id', ?) "
+                  "ON CONFLICT (key) DO UPDATE SET value = excluded.value", [sid])
+    finally:
+        c.close()
+    return sid
+
+
+def _snapshot_of(path: str) -> str:
+    """库自己记的指纹；promote 之前建立的老库没有这个键 → 现算（数据都在，没有算不出来的道理）。"""
+    from .query import _compute_snapshot
+    c = duckdb.connect(path, read_only=True)
+    try:
+        r = c.execute("SELECT value FROM _meta WHERE key='snapshot_id'").fetchone()
+        return r[0] if r else _compute_snapshot(c)
+    finally:
+        c.close()
 
 
 def _checkpoint(path: str) -> None:
@@ -45,16 +72,20 @@ def promote(staging_path: str, market_path: str, *, keep: int = 3) -> str:
     if staging.stat().st_dev != market.parent.stat().st_dev:
         raise RuntimeError("staging 与 market 必须在同一文件系统（os.replace / os.link 的前提）")
 
+    _stamp_snapshot(str(staging))          # 指纹写进库自身，promote 之后仍可离线查
     _checkpoint(str(staging))
 
     backup = ""
     if market.exists():
-        stamp = _dt.datetime.utcnow().strftime("%Y%m%dT%H%M%S%f")
-        backup = str(market) + f".bak.{stamp}"
+        # 用旧库自己的 snapshot_id 命名，回滚时能直接对上 oos-runs.md 记的 data_snapshot_id
+        backup = str(market) + f".bak.{_snapshot_of(str(market))}"
+        if pathlib.Path(backup).exists():   # 同一份数据重复 promote → 快照名相同，无需再存一份
+            backup = ""
         wal = pathlib.Path(str(market) + ".wal")
         if wal.exists():                                # 正式库有 WAL = 有人原地写过正式路径，违反"只写 staging"
             raise RuntimeError(f"正式库残留 WAL: {wal} —— 有进程原地写了 market，先排查再 promote")
-        os.link(str(market), backup)                   # 零拷贝快照：同一 inode 多一个名字
+        if backup:
+            os.link(str(market), backup)               # 零拷贝快照：同一 inode 多一个名字
     os.replace(str(staging), str(market))              # 原子：读者要么看到旧 inode，要么看到新 inode
     _prune_backups(str(market), keep)
     return backup
@@ -70,6 +101,8 @@ def rollback(market_path: str, backup_path: str | None = None) -> str:
         backup_path = str(baks[-1])
     if not pathlib.Path(backup_path).exists():
         raise FileNotFoundError(f"快照不存在: {backup_path}")
+    # ★ 用 copy 而非 hardlink：promote 会 CHECKPOINT（以读写方式打开），
+    #   hardlink 是同一个 inode，会就地改动你正想保住的那份快照。
     tmp = str(market) + ".rollback.tmp"
-    os.link(backup_path, tmp)                          # 快照本身保留，用新名字挂同一 inode
+    shutil.copyfile(backup_path, tmp)
     return promote(tmp, str(market))

@@ -242,3 +242,15 @@ def test_ingest_industry_member_transient_error_propagates(conn):
     ingest.ingest_stock_basic(conn, src)
     with pytest.raises(RuntimeError, match="每分钟"):
         ingest.ingest_industry_member(conn, src)
+
+
+def test_industry_downgrade_refuses_to_overwrite_real_sw_history(conn):
+    """已有真实申万历史时，积分不足/无权限不得降级 —— 降级会用今天的行业回填到上市日。"""
+    src = FakeSrc()
+    ingest.ingest_stock_basic(conn, src)
+    ingest.ingest_industry_member(conn, src)                     # source='sw'
+    src.perm_error = RuntimeError("抱歉，您积分不足，权限的具体详情访问：https://tushare.pro/document/1?doc_id=108。")
+    with pytest.raises(RuntimeError, match="前视污染"):
+        ingest.ingest_industry_member(conn, src)
+    assert conn.execute("SELECT value FROM _meta WHERE key='industry_source'").fetchone()[0] == "sw"
+    assert conn.execute("SELECT count(*) FROM industry_member").fetchone()[0] == 2   # 历史没被删

@@ -9,6 +9,8 @@
 | macro_publish_date | publish_date/source 缺失 = 0；publish_date >= period（D4）  | 阻断 |
 | limit_coverage     | limit_source='unknown' 在非停牌行中的占比（报告）           | 报告 |
 | frozen_days        | 某交易日有行但 0 只非停牌（源返回空被写成全市场占位）        | 阻断 |
+| industry_source    | 'sw'，或操作员显式承认降级（_meta.industry_source_ack）      | 阻断 |
+| zero_volume_rows   | 非停牌行不得 vol=0（没成交的日子会被当成可按前收成交）        | 阻断 |
 | cross_source       | 抽样 BaoStock 后复权收盘价偏差 < 0.5%；不可用 → SKIPPED     | 告警 |
 """
 from __future__ import annotations
@@ -171,6 +173,45 @@ def check_frozen_days(path: str) -> CheckResult:
     return CheckResult("frozen_days", not days, True, {"days": days, "n": len(days)})
 
 
+# ══════════════ 6c. 行业来源 / 零成交行（阻断）══════════════
+def check_industry_source(path: str) -> CheckResult:
+    """降级来源（stock_basic.industry）会把【今天的行业】回填到每只股票的上市日 →
+    所有行业中性化因子前视污染。
+
+    阻断，但可以显式承认：没有申万成分权限的账号仍然能建库，只是必须用
+    `--allow-static-industry` 说出来（写入 _meta.industry_source_ack）。
+    承认过的库照样不能做行业中性化 —— P2 的 pipeline.neutralize 应读这个键并拒绝。"""
+    c = _ro(path)
+    try:
+        r = c.execute("SELECT value FROM _meta WHERE key='industry_source'").fetchone()
+        ack = c.execute("SELECT value FROM _meta WHERE key='industry_source_ack'").fetchone()
+        n = c.execute("SELECT count(*) FROM industry_member").fetchone()[0]
+    finally:
+        c.close()
+    src = r[0] if r else None
+    acked = bool(ack and ack[0] == "1")
+    return CheckResult("industry_source", src == "sw" or acked, True,
+                       {"industry_source": src, "acknowledged": acked, "rows": n,
+                        "note": "" if src == "sw" else
+                                "降级来源：行业为今天的值回填到上市日，不可用于行业中性化；"
+                                "确实接受请用 --allow-static-industry"})
+
+
+def check_zero_volume_rows(path: str) -> CheckResult:
+    """非停牌却 vol=0 的行：get_tradable_mask 会判定既非涨停也非跌停 → 可交易 →
+    回测在一个没有成交的日子按前收成交。"""
+    c = _ro(path)
+    try:
+        rows = c.execute("SELECT ts_code, trade_date FROM daily_bar "
+                         "WHERE NOT is_suspended AND coalesce(vol, 0) = 0 ORDER BY ts_code, trade_date "
+                         "LIMIT 20").fetchall()
+        n = c.execute("SELECT count(*) FROM daily_bar WHERE NOT is_suspended AND coalesce(vol, 0) = 0").fetchone()[0]
+    finally:
+        c.close()
+    return CheckResult("zero_volume_rows", n == 0, True,
+                       {"n": n, "sample": [{"ts_code": r[0], "trade_date": r[1]} for r in rows]})
+
+
 # ══════════════ 7. 双源交叉（BaoStock，告警；不可用 → SKIPPED）══════════════
 def check_cross_source(path: str, bao_src, n_stocks: int = 200, n_days: int = 100,
                        seed: int = 0) -> CheckResult:
@@ -231,6 +272,8 @@ def run_all(path: str, bao_src=None) -> list[CheckResult]:
         check_macro_publish_date(path),
         check_limit_coverage(path),
         check_frozen_days(path),
+        check_industry_source(path),
+        check_zero_volume_rows(path),
         check_cross_source(path, bao_src),
     ]
     failed = [r for r in results if r.blocking and not r.skipped and not r.passed]

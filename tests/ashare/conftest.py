@@ -73,6 +73,7 @@ def market_db(tmp_path: pathlib.Path) -> str:
          ("B00002.SZ", "食品饮料", "白酒", "白酒", dt.date(2010, 1, 1), None),
          ("C00003.SH", "钢铁", "普钢", "普钢", dt.date(2010, 1, 1), None),
          ("D00004.SZ", "银行", "城商行", "城商行", dt.date(2023, 12, 1), None)])
+    c.execute("INSERT INTO _meta VALUES ('industry_source', 'sw')")   # fixture 的行业是真实成分历史
 
     # 日线：每股每交易日一行（D9）。A 在 01-15~01-17 停牌；价格线性上涨便于断言；C 退市后无行
     bars = []

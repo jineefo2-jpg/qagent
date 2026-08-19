@@ -153,6 +153,9 @@ def ingest_stock_status(conn, src) -> int:
         "SELECT ts_code, name, list_date, delist_date FROM stock_basic").fetchdf()
     nc = src.namechange(ts_code=None)
     status = derive_stock_status(nc, basic)
+    # 全量刷新：不删的话，某只股票首次出现 namechange 记录时，之前那条覆盖全生命周期的 NORMAL
+    # 会永久残留并与真实区间重叠（PK 只含 start_date，重叠合法）。
+    conn.execute("DELETE FROM stock_status")
     n = _upsert(conn, "stock_status", status)
     set_job(conn, "stock_status:all", "stock_status", "all", "DONE", rows=n)
     return n
@@ -166,12 +169,17 @@ _PRICE_COLS = ("open", "high", "low", "close", "pre_close")
 
 
 def _status_at(status_rows: list[dict], d: _dt.date) -> str:
+    """区间重叠时取 start_date 【最新】的一段 —— 必须与 query._stock_frame 的
+    `QUALIFY row_number() ORDER BY start_date DESC` 同向。反向会让写入端按 NORMAL 算 10% 涨跌停、
+    读取端按 *ST 判 5%，涨跌停带宽 5%，一字板检测不出来 → 回测在锁死的日子成交。"""
+    best: tuple[_dt.date, str] | None = None
     for r in status_rows:
         start = r["start_date"]
         end = r.get("end_date")
         if start is not None and start <= d and (end is None or d <= end):
-            return r["status"]
-    return "NORMAL"
+            if best is None or start > best[0]:
+                best = (start, r["status"])
+    return best[1] if best else "NORMAL"
 
 
 def _none_if_nan(x):
@@ -241,8 +249,10 @@ def normalize_daily_bar(daily: pd.DataFrame,
     for c in _PRICE_COLS + ("vol", "amount", "adj_factor"):
         frame[c] = pd.to_numeric(frame[c], errors="coerce")       # 统一 float，避免 object 列 ffill 的 FutureWarning
 
-    # 3. 标记停牌（daily 无行 = 停牌）并填占位值；adj_factor 只前推，不后推
-    frame["is_suspended"] = frame["close"].isna()
+    # 3. 标记停牌并填占位值；adj_factor 只前推，不后推。
+    #    停牌判据 = 源无行 OR 成交量为 0：某些代码/年份 Tushare 会给出 vol=0、close 沿用前收的"行"，
+    #    只看 isna() 会把它当成可交易日 → get_tradable_mask 既非涨停也非跌停 → 在没成交的日子按前收成交。
+    frame["is_suspended"] = frame["close"].isna() | (frame["vol"].fillna(0) == 0)
     if seed_adj is not None and pd.isna(frame.at[0, "adj_factor"]):
         frame.at[0, "adj_factor"] = seed_adj
     frame["adj_factor"] = frame["adj_factor"].ffill()
@@ -314,6 +324,63 @@ def _parse_date(x) -> _dt.date:
     if d is None:
         raise ValueError(f"无法解析日期: {x!r}")
     return d
+
+
+def ingest_daily_bar_by_date(conn, src, trade_date) -> int:
+    """【全市场单日】入库：daily/adj_factor/stk_limit 各调一次 trade_date= 形式，共 3 次调用。
+
+    增量路径必须走这个，不能按股票循环 —— 5,300 只 × 3 接口 = 15,900 次/天，
+    在 120 次/分下要 2.2 小时；单日形式是 3 次（架构 §1.2 给的预算是全程 < 20 分钟）。
+    每只股票仍经 normalize_daily_bar，D9 补行 / 涨跌停兜底 / 跨批次种子的语义只有一处实现。"""
+    d = _parse_date(trade_date)
+    job = f"daily_bar:byday:{d.isoformat()}"
+    if job_state(conn, job) == "DONE":
+        return 0
+    set_job(conn, job, "daily_bar", d.isoformat(), "RUNNING")
+    try:
+        daily = src.daily(trade_date=d)
+        adj = src.adj_factor(trade_date=d)
+        limit = _fetch_limit_by_date(src, d)
+        by_code_daily = {c: g for c, g in daily.groupby("ts_code")} if len(daily) else {}
+        by_code_adj = {c: g for c, g in adj.groupby("ts_code")} if len(adj) else {}
+        by_code_lim = ({c: g for c, g in limit.groupby("ts_code")}
+                       if limit is not None and len(limit) else {})
+
+        listed = conn.execute(
+            "SELECT ts_code, list_date, delist_date FROM stock_basic "
+            "WHERE list_date <= ? AND (delist_date IS NULL OR delist_date >= ?) ORDER BY ts_code",
+            [d, d]).fetchall()
+        status_all: dict[str, list[dict]] = {}
+        for code, sd, ed, st in conn.execute(
+                "SELECT ts_code, start_date, end_date, status FROM stock_status ORDER BY ts_code, start_date").fetchall():
+            status_all.setdefault(code, []).append({"start_date": sd, "end_date": ed, "status": st})
+
+        frames = []
+        for code, ld, dd in listed:
+            basic = {"ts_code": code, "list_date": ld, "delist_date": dd}
+            seed_close, seed_adj = _seed_before(conn, code, d)
+            frames.append(normalize_daily_bar(
+                by_code_daily.get(code), by_code_adj.get(code), by_code_lim.get(code),
+                [d], basic, status_all.get(code, []), seed_close=seed_close, seed_adj=seed_adj))
+        out = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=_DAILY_BAR_COLS)
+        n = _upsert(conn, "daily_bar", out)
+        set_job(conn, job, "daily_bar", d.isoformat(), "DONE", rows=n)
+        return n
+    except Exception as exc:                 # noqa: BLE001
+        set_job(conn, job, "daily_bar", d.isoformat(), "RETRY", error=str(exc)[:500])
+        raise
+
+
+def _fetch_limit_by_date(src, d):
+    if getattr(src, "_stk_limit_denied", False):
+        return None
+    try:
+        return src.stk_limit(trade_date=d)
+    except Exception as exc:                 # noqa: BLE001
+        if _is_permission_denied(exc):
+            src._stk_limit_denied = True
+            return None
+        raise
 
 
 def ingest_daily_bar(conn, src, ts_code: str, start, end) -> int:
@@ -494,8 +561,12 @@ def _set_meta(conn, key: str, value: str) -> None:
 
 
 def ingest_industry_member(conn, src) -> int:
-    """申万成分历史（PIT 行业）。无权限 → 用 stock_basic.industry 降级，并在 _meta 显式记录。
-    降级不静默：industry_source='tushare_static' 会被 query.get_industry 与健康页读到。"""
+    """申万成分历史（PIT 行业）。无权限 → 用 stock_basic.industry 降级，并在 _meta 记录 industry_source。
+
+    ★ 降级会把【今天的行业】回填到每只股票的上市日 —— 对所有行业中性化因子构成前视污染。
+      所以：库里已经有 source='sw' 的真实历史时，拒绝降级（宁可整轮 ingest 失败也不能把历史换成假的）。
+      首次就无权限 → 允许降级，但 validate.check_industry_source 是阻断项，操作员必须显式承认。
+    ★ 注意 industry_source 目前【只被 validate 读取】，query 层不读；不要在别处声称它有更多保护作用。"""
     job = "industry_member:all"
     set_job(conn, job, "industry_member", "all", "RUNNING")
     try:
@@ -505,6 +576,13 @@ def ingest_industry_member(conn, src) -> int:
         except Exception as exc:             # noqa: BLE001 — 只吃无权限
             if not _is_permission_denied(exc):
                 raise
+            prev = conn.execute("SELECT value FROM _meta WHERE key='industry_source'").fetchone()
+            if prev and prev[0] == "sw":
+                raise RuntimeError(
+                    "申万成分接口无权限，但库里已有真实成分历史（industry_source='sw'）。"
+                    "降级会用今天的行业回填到上市日 → 所有行业中性化因子前视污染。"
+                    "请恢复接口权限后重跑；确实要降级请先手工清空 industry_member 并删除 _meta.industry_source。"
+                ) from exc
             basic = conn.execute("SELECT ts_code, industry, list_date FROM stock_basic").fetchall()
             if not basic:
                 raise RuntimeError("stock_basic 为空，无法降级生成行业成分：先跑 ingest_stock_basic")

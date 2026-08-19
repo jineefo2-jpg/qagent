@@ -83,3 +83,13 @@ def test_mixed_timestamp_and_date_inputs_do_not_crash():
     assert len(out) == 2
     assert all(isinstance(x, dt.date) for x in out.start_date), "输出必须统一为 datetime.date"
     assert out[out.ts_code == "600519.SH"].iloc[0].end_date is None, "NaT 必须归一化为 None"
+
+
+def test_status_at_takes_latest_segment_on_overlap():
+    """写入端与 query 端必须同向取最新段。反向 → 写入按 NORMAL 算 10% 涨跌停、读取按 *ST 判 5%，
+    带宽差 5%，一字板检测不出来 → 回测在锁死的日子成交。"""
+    from ashare.data.ingest import _status_at
+    rows = [{"start_date": D(2010,1,1), "end_date": None, "status": "NORMAL"},      # 残留的全生命周期行
+            {"start_date": D(2024,1,10), "end_date": D(2024,1,19), "status": "*ST"}]
+    assert _status_at(rows, D(2024,1,15)) == "*ST"
+    assert _status_at(rows, D(2024,1,5)) == "NORMAL"

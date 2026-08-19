@@ -163,3 +163,11 @@ def test_overlapping_industry_rows_latest_in_date_wins(market_db):
 
 def test_markets_empty_list_means_no_market(q):
     assert q.get_universe("2024-01-05", markets=[]) == []
+
+
+def test_non_trading_as_of_raises_instead_of_empty_pool(q):
+    """非交易日没有 daily_bar 行 → step4 全 False → 静默空池。与 get_tradable_mask 一致：宁可抛。"""
+    with pytest.raises(query.AsOfDateError, match="不是交易日"):
+        q.get_universe("2024-01-06")            # 周六
+    with pytest.raises(query.AsOfDateError):
+        q.explain_universe("2024-01-01")        # 元旦

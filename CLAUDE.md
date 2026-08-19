@@ -233,16 +233,23 @@ Detailed design: `docs/adr/0001-broker-abstraction.md`. The constraints below ar
 | D6 | T 日收盘算信号，**T+1 集合竞价（09:15–09:25）按开盘价成交**；涨跌停/停牌不可交易 | 拿不到的价格被当成成交价 |
 | D7 | 样本外只跑一次，记 `param_hash` **和** `data_snapshot_id`，缺一不可 | 样本外被污染成样本内 |
 | D8 | 后复权价是唯一真值，**禁止前复权** | 历史回测结果随新数据变动 |
-| D9 | 日线按交易日历补齐，停牌日写占位行（`vol=0`，OHLC=前收） | `rolling(20)` 拿到 25 个交易日，因子静默污染 |
+| D9 | 日线按交易日历补齐，停牌日写占位行（`vol=0`，OHLC=前收）；源给出 `vol=0` 的行同样算停牌 | `rolling(20)` 拿到 25 个交易日，因子静默污染；没成交的日子被按前收成交 |
 
 补充三条工程约束：
 
-1. `ashare/data/query.py` 是唯一数据出口。任何模块直接 `import duckdb` 都要过
-   `scripts/check_ashare_layering.py`（AST 静态检查，由 pytest 调用）。
-   取数函数唯一豁免：`get_tradable_mask(exec_date, ...)`；连接生命周期 `open_db` / `preload` 不返回数据，
-   同在白名单里显式列名（`scripts/check_ashare_layering.py` 的 `QUERY_FIRST_PARAM_WHITELIST`）。
+1. `ashare/data/query.py` 是唯一数据出口。`scripts/check_ashare_layering.py`（AST 静态检查，由 pytest 调用）
+   守六条：L1 只有 `ashare/data/**` 可 `import duckdb`；L2 query 公开取数函数首参 `as_of_date`
+   （唯一豁免 `get_tradable_mask(exec_date, ...)`；`open_db`/`preload` 不返回数据，白名单显式列名）；
+   L3 因子前两参 `(as_of_date, universe)`；L4 只读层无 DML；
+   **L5 data 层之外不得传 `adjust="none"`**（绕过后复权）；
+   **L6 data 层之外不得从 `ashare.data.*` 导入下划线私有名**（`_PRELOAD` 里是未掩码的原始行）。
 2. 任何回测/信号产物必须同时记录 `param_hash` 与 `data_snapshot_id`。
-3. `ashare/agent_tools.py` 的工具**永远不进 `TRADING_TOOLS`**。
+3. 行业中性化前先查 `_meta.industry_source`：不是 `'sw'` 说明行业是**今天的值回填到上市日**
+   （申万成分接口无权限时的降级），做行业中性化就是前视污染，必须拒绝。
+   `validate.check_industry_source` 是阻断项，操作员用 `--allow-static-industry` 显式承认才放行。
+4. 回测入口用 `query.snapshot_id(pin=True)` 钉住数据：钉住后 promote 换库会抛而不是静默重连，
+   否则一次运行可能横跨两个数据库却只记录一个 `data_snapshot_id`（D7 失效）。
+5. `ashare/agent_tools.py` 的工具**永远不进 `TRADING_TOOLS`**。
    注意 `TRADING_TOOLS` 的语义是「需要用户身份」而非「危险」——`get_user_profile` 也在其中。
    另：`TOOL_SCHEMAS.extend()` 必须插在 `quant_agent.py` 的 `_OPENAI_TOOLS` 赋值之前，
    否则模块加载时已固化，新工具静默失效。
