@@ -85,10 +85,21 @@ def test_last_bar_date(market_db):
 class FakeSrc:
     """最小可跑全流程的假源：2 只股票、2024-01-02~01-05、一天停牌。"""
     def trade_cal(self, start, end, exchange="SSE"):
-        return _to_date(pd.DataFrame({"exchange": ["SSE"] * 6,
-                                      "cal_date": ["20240102", "20240103", "20240104", "20240105", "20240106", "20240108"],
-                                      "is_open": [1, 1, 1, 1, 0, 1],
-                                      "pretrade_date": ["20231229", "20240102", "20240103", "20240104", "20240105", "20240105"]}))
+        # 按 [start, end] 生成"工作日开市"日历（元旦 01-01 休市），足够覆盖 pipeline 要求的前后余量
+        s = start if hasattr(start, "year") else dt.date.fromisoformat(str(start))
+        e = end if hasattr(end, "year") else dt.date.fromisoformat(str(end))
+        days, d = [], s
+        while d <= e:
+            days.append(d); d += dt.timedelta(days=1)
+        is_open = [int(x.weekday() < 5 and not (x.month == 1 and x.day == 1)) for x in days]
+        pre, pres = None, []
+        for x, o in zip(days, is_open):
+            pres.append(pre.strftime("%Y%m%d") if pre else None)
+            if o:
+                pre = x
+        return _to_date(pd.DataFrame({"exchange": ["SSE"] * len(days),
+                                      "cal_date": [x.strftime("%Y%m%d") for x in days],
+                                      "is_open": is_open, "pretrade_date": pres}))
     def stock_basic(self):
         return _to_date(pd.DataFrame({"ts_code": ["600519.SH", "000001.SZ"], "symbol": ["600519", "000001"],
                                       "name": ["贵州茅台", "平安银行"], "area": [None] * 2, "industry": ["白酒", "银行"],

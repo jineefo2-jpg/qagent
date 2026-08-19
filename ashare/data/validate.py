@@ -43,17 +43,19 @@ def _ro(path: str):
 
 # ══════════════ 1. 行数完整性（误差为 0）══════════════
 def check_row_completeness(path: str) -> CheckResult:
+    """每股行数 == 在市区间 ∩ 数据区间 内的交易日数（误差 0）；且不得有上市窗口外的行。
+    数据区间下界 = daily_bar 全表最早日期（全量回补从 2010 起，2010 前上市的股票之前本就没有行）。"""
     c = _ro(path)
     try:
-        horizon = c.execute("SELECT max(trade_date) FROM daily_bar").fetchone()[0]
+        lo, horizon = c.execute("SELECT min(trade_date), max(trade_date) FROM daily_bar").fetchone()
         if horizon is None:
-            return CheckResult("row_completeness", True, True, {"stocks": [], "note": "daily_bar 为空"})
+            return CheckResult("row_completeness", True, True, {"stocks": [], "outside_window": 0, "note": "daily_bar 为空"})
         rows = c.execute("""
-            WITH cal AS (SELECT trade_date FROM calendar WHERE is_open AND trade_date <= ?),
+            WITH cal AS (SELECT trade_date FROM calendar WHERE is_open AND trade_date BETWEEN ? AND ?),
             expect AS (
                 SELECT b.ts_code,
                        (SELECT count(*) FROM cal
-                         WHERE cal.trade_date >= b.list_date
+                         WHERE cal.trade_date >= greatest(b.list_date, ?)
                            AND cal.trade_date <= coalesce(b.delist_date, ?)) AS expected
                 FROM stock_basic b WHERE b.list_date IS NOT NULL
             ),
@@ -64,12 +66,17 @@ def check_row_completeness(path: str) -> CheckResult:
             FROM expect e LEFT JOIN actual a USING (ts_code)
             WHERE e.expected <> coalesce(a.actual, 0)
             ORDER BY e.ts_code
-        """, [horizon, horizon]).fetchall()
+        """, [lo, horizon, lo, horizon]).fetchall()
+        outside = c.execute("""
+            SELECT count(*) FROM daily_bar d JOIN stock_basic s USING (ts_code)
+            WHERE d.trade_date < s.list_date OR (s.delist_date IS NOT NULL AND d.trade_date > s.delist_date)
+        """).fetchone()[0]
     finally:
         c.close()
     bad = [{"ts_code": r[0], "expected": r[1], "actual": r[2], "missing": r[1] - r[2],
             "first_row": r[3], "last_row": r[4]} for r in rows]
-    return CheckResult("row_completeness", not bad, True, {"stocks": bad, "n_bad": len(bad)})
+    return CheckResult("row_completeness", not bad and outside == 0, True,
+                       {"stocks": bad, "n_bad": len(bad), "outside_window": outside, "data_start": lo})
 
 
 # ══════════════ 2. 占位行合规 ══════════════

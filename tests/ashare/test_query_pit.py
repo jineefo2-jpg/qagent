@@ -23,9 +23,23 @@ from ashare.data.query import UnknownFieldError
 D = dt.date
 
 
+def _extend_calendar(w):
+    """财报/宏观测试要用到 2023-05 / 2023-11 / 2024-02-20 等 as_of；把日历按工作日开市延到 2022-01-01~2024-02-29。
+    与 market_db 既有的真实片段（2023-12-25~2024-02-02）不重叠。"""
+    have = {r[0] for r in w.execute("SELECT trade_date FROM calendar").fetchall()}
+    rows = []
+    d = dt.date(2022, 1, 1)
+    while d <= dt.date(2024, 2, 29):
+        if d not in have:
+            rows.append((d, d.weekday() < 5, None))
+        d += dt.timedelta(days=1)
+    w.executemany("INSERT INTO calendar VALUES (?, ?, ?)", rows)
+
+
 @pytest.fixture
 def q(market_db):
     w = _db.connect_write(market_db)
+    _extend_calendar(w)
     fin = [
         # ts_code, ann_date, end_date, report_type, update_flag, revenue, n_income_attr_p, total_assets, roe
         ("A00001.SZ", D(2022,4,25), D(2022,3,31), "1", 0, 280.0, 28.0, 4900.0, 0.05),
@@ -173,3 +187,27 @@ def test_money_flow_nan_before_data_not_zero(q):
     assert len(mf) == 3
     assert math.isnan(mf.loc[("A00001.SZ", D(2024,1,3)), "hk_hold_ratio"])
     assert mf.loc[("A00001.SZ", D(2024,1,5)), "hk_hold_ratio"] == 5.2
+
+
+def test_financial_and_macro_reject_out_of_calendar_as_of(q):
+    """Q2：唯一出口行为一致 —— 财报/宏观查询对越界 as_of 同样抛 AsOfDateError，不静默返回最新数据。"""
+    from ashare.data.query import AsOfDateError
+    with pytest.raises(AsOfDateError):
+        q.get_financial("2030-01-01", ["A00001.SZ"], ["revenue"])
+    with pytest.raises(AsOfDateError):
+        q.get_financial_ttm("2030-01-01", ["A00001.SZ"], "revenue")
+    with pytest.raises(AsOfDateError):
+        q.get_macro("2030-01-01", ["m2_yoy"])
+
+
+def test_visible_restated_prev_fy_stays_out_of_ttm(q):
+    """重述行（FY2022 update_flag=1，ann 2024-01-22）在 as_of 2024-01-31 已"可见"，但 TTM 必须仍用原始披露 1000。
+    as_of 2024-01-31 最新为 FY2023（年报）→ TTM = 1310（更正公告值）；此处用 n_periods 视图核对 FY2022 值仍为 1000。"""
+    f = q.get_financial("2024-01-31", ["A00001.SZ"], ["revenue"], n_periods=5)
+    assert f.xs(D(2022,12,31), level="end_date").loc["A00001.SZ", "revenue"] == 1000.0
+    assert q.get_financial_ttm("2024-01-31", ["A00001.SZ"], "revenue")["A00001.SZ"] == 1310.0
+
+
+def test_get_financial_multiindex_keeps_end_date_column(q):
+    f = q.get_financial("2024-01-31", ["A00001.SZ"], ["revenue"], n_periods=2)
+    assert list(f.index.names) == ["ts_code", "end_date"] and "end_date" in f.columns

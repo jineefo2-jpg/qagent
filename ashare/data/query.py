@@ -421,7 +421,9 @@ def _window_start(as_of: _dt.date, lookback: int | None, start: DateLike | None)
         if lookback <= 0:
             raise QueryError("lookback 必须为正整数")
         days = [d for d in _open_days() if d <= as_of]
-        lb = days[-lookback] if len(days) >= lookback else days[0]
+        if not days:
+            raise AsOfDateError(f"as_of_date={as_of} 之前日历中没有交易日")
+        lb = days[-lookback] if len(days) >= lookback else days[0]      # 不足 lookback 时取全部（数据起点）
         s = lb if s is None else max(s, lb)
     return s
 
@@ -440,6 +442,8 @@ def get_bars(as_of_date: DateLike,
       涨跌停信息只能通过 get_tradable_mask 获取。"""
     as_of = _norm_date(as_of_date)
     _check_in_calendar(as_of)
+    if not fields:
+        raise UnknownFieldError("fields 不能为空")
     bad = [f for f in fields if f not in _BAR_FIELDS]
     if bad:
         raise UnknownFieldError(f"get_bars 不支持字段 {bad}（涨跌停请用 get_tradable_mask）")
@@ -483,6 +487,8 @@ def get_daily_basic(as_of_date: DateLike,
     """lookback=1 → 单日，index=ts_code；lookback>1 → MultiIndex (ts_code, trade_date)。"""
     as_of = _norm_date(as_of_date)
     _check_in_calendar(as_of)
+    if not fields:
+        raise UnknownFieldError("fields 不能为空")
     bad = [f for f in fields if f not in _DAILY_BASIC_FIELDS]
     if bad:
         raise UnknownFieldError(f"get_daily_basic 不支持字段 {bad}")
@@ -492,12 +498,17 @@ def get_daily_basic(as_of_date: DateLike,
             return pd.DataFrame(columns=list(fields)).rename_axis("ts_code")
         return pd.DataFrame(columns=list(fields), index=_empty_mi())
     s = _window_start(as_of, lookback, None)
-    cols = ", ".join(fields)                                     # 字段已白名单校验
-    df = _conn().execute(
-        f"SELECT ts_code, trade_date, {cols} FROM daily_basic WHERE ts_code IN ("
-        + ",".join("?" * len(codes)) + ") AND trade_date BETWEEN ? AND ? ORDER BY ts_code, trade_date",
-        [*codes, s, as_of]).fetchdf()
-    df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.date
+    cached = _PRELOAD.get("daily_basic")
+    if cached is not None and s >= cached["trade_date"].min() and as_of <= cached["trade_date"].max():
+        m = cached["ts_code"].isin(codes) & (cached["trade_date"] >= s) & (cached["trade_date"] <= as_of)
+        df = cached.loc[m, ["ts_code", "trade_date", *fields]].sort_values(["ts_code", "trade_date"]).copy()
+    else:
+        cols = ", ".join(fields)                                     # 字段已白名单校验
+        df = _conn().execute(
+            f"SELECT ts_code, trade_date, {cols} FROM daily_basic WHERE ts_code IN ("
+            + ",".join("?" * len(codes)) + ") AND trade_date BETWEEN ? AND ? ORDER BY ts_code, trade_date",
+            [*codes, s, as_of]).fetchdf()
+        df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.date
     if lookback == 1:
         return df.drop(columns=["trade_date"]).set_index("ts_code")[list(fields)]
     return df.set_index(["ts_code", "trade_date"])[list(fields)]
@@ -513,6 +524,8 @@ def get_index_bars(as_of_date: DateLike,
     """index=trade_date。用于 beta_250 中性化与 P3 宏观 ERP / trend_ma200。"""
     as_of = _norm_date(as_of_date)
     _check_in_calendar(as_of)
+    if not fields:
+        raise UnknownFieldError("fields 不能为空")
     bad = [f for f in fields if f not in _INDEX_FIELDS]
     if bad:
         raise UnknownFieldError(f"get_index_bars 不支持字段 {bad}")
@@ -555,11 +568,28 @@ def get_tradable_mask(exec_date: DateLike,
         "WHERE b.trade_date = ? AND b.ts_code IN (" + ",".join("?" * len(codes)) + ")",
         [d, *codes]).fetchall()
     by_code = {r[0]: r for r in rows}
+    missing = [c for c in codes if c not in by_code]
+    # 退市后 daily_bar 不再有行（ingest 只写到 delist_date 当日）；但 delist_date <= exec_date 的股票
+    # 必须仍走强平路径（can_sell=True），否则持仓永远卡在旧值。清仓价用最后一根非停牌 K 线的后复权收盘价，
+    # 引擎在此之上再按 B8 打折（退市整理期首日收盘 × 0.5）。
+    delisted_late: dict[str, float] = {}
+    if missing:
+        for code, delist, last_px in _conn().execute(
+                "SELECT s.ts_code, s.delist_date, "
+                "  (SELECT close * adj_factor FROM daily_bar b WHERE b.ts_code = s.ts_code AND NOT b.is_suspended "
+                "   ORDER BY b.trade_date DESC LIMIT 1) "
+                "FROM stock_basic s WHERE s.ts_code IN (" + ",".join("?" * len(missing)) + ") "
+                "AND s.delist_date IS NOT NULL AND s.delist_date <= ?", [*missing, d]).fetchall():
+            delisted_late[code] = last_px if last_px is not None else float("nan")
     out = []
     for code in codes:
         r = by_code.get(code)
         if r is None:
-            out.append((code, False, False, "no_quote", float("nan"), float("nan"), float("nan"), float("nan")))
+            if code in delisted_late:
+                px = delisted_late[code]
+                out.append((code, False, True, "delisted", px, px, float("nan"), float("nan")))
+            else:
+                out.append((code, False, False, "no_quote", float("nan"), float("nan"), float("nan"), float("nan")))
             continue
         _, o, h, l, c, pc, amt, adj, up, dn, sus, delist = r
         delist = None if delist is None else pd.Timestamp(delist).date()
@@ -625,10 +655,14 @@ def get_financial(as_of_date: DateLike,
     """PIT 取数：WHERE ann_date <= as_of_date，按 end_date 分组取 ann_date 最大者。
     n_periods=1 → index=ts_code；>1 → MultiIndex (ts_code, end_date) 按 end_date 倒序 n 期。
     include_restated=False（默认）→ 只取 update_flag=0 的原始披露值。
-      True 仅供研究「重述影响」，任何进入回测的因子都必须用 False。
+      True 仅供研究「重述影响」，任何进入回测的因子都必须用 False ——
+      重述行的 ann_date 可能仍是原始公告日（Tushare 不保证），True 不是 PIT 安全的。
     额外返回列：ann_date、end_date、report_type、lag_days(= as_of - ann_date)。
-    注：不做交易日历范围检查 —— 财报的覆盖范围是公告日，PIT 过滤自然处理越界（早于最早公告 → 空）。"""
+    注：只返回有可见披露的股票（index 是 ts_codes 的子集）；get_financial_ttm 则对无数据的股票返回 NaN。"""
     as_of = _norm_date(as_of_date)
+    _check_in_calendar(as_of)
+    if not fields:
+        raise UnknownFieldError("fields 不能为空")
     bad = [f for f in fields if f not in _FIN_FIELDS]
     if bad:
         raise UnknownFieldError(f"get_financial 不支持字段 {bad}")
@@ -647,8 +681,7 @@ def get_financial(as_of_date: DateLike,
     df["lag_days"] = [(as_of - a).days for a in df["ann_date"]]
     if n_periods == 1:
         return df.set_index("ts_code")[out_cols]
-    return df.set_index(["ts_code", "end_date"])[[c for c in out_cols if c != "end_date"]].assign(
-        end_date=lambda x: x.index.get_level_values("end_date"))[out_cols]
+    return df.set_index(["ts_code", "end_date"], drop=False)[out_cols]
 
 
 _TTM_FLOW = ("total_revenue", "revenue", "operate_profit", "total_profit", "n_income", "n_income_attr_p",
@@ -672,6 +705,7 @@ def get_financial_ttm(as_of_date: DateLike,
     比率科目（roe 等）不支持 TTM → UnknownFieldError。
     任一所需期次不可见（PIT）→ NaN，不外推。返回 index=ts_codes 顺序的 Series。"""
     as_of = _norm_date(as_of_date)
+    _check_in_calendar(as_of)
     if field in _TTM_FLOW:
         kind = "flow"
     elif field in _TTM_STOCK:
@@ -711,6 +745,7 @@ def get_macro(as_of_date: DateLike,
     """WHERE publish_date <= as_of_date；同 (indicator, period) 取 publish_date 最大者。
     index=period，columns=indicator，附加列 <indicator>__publish_date 便于审计。"""
     as_of = _norm_date(as_of_date)
+    _check_in_calendar(as_of)
     inds = list(indicators)
     cols: list[str] = []
     for i in inds:
@@ -751,6 +786,10 @@ def get_money_flow(as_of_date: DateLike,
       调用方（north_hold_chg_20 因子）靠 FactorSpec.available_from 声明。"""
     as_of = _norm_date(as_of_date)
     _check_in_calendar(as_of)
+    if lookback < 1:
+        raise QueryError("lookback 必须 >= 1")
+    if not fields:
+        raise UnknownFieldError("fields 不能为空")
     bad = [f for f in fields if f not in _MONEY_FLOW_FIELDS]
     if bad:
         raise UnknownFieldError(f"get_money_flow 不支持字段 {bad}")

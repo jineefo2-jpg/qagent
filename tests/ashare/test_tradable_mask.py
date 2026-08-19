@@ -100,3 +100,18 @@ def test_raw_limit_prices_do_not_leak(q):
 def test_exec_date_must_be_a_trading_day(q):
     with pytest.raises(query.AsOfDateError):
         q.get_tradable_mask("2024-01-06", ["A00001.SZ"])          # 周六
+
+
+def test_delisted_after_last_bar_still_sellable_at_last_close(q):
+    """退市后 daily_bar 不再有行（C 最后一根 K 线是 01-24）。01-25 及以后仍须给强平路径：
+    can_sell=True、reason=delisted、清仓价 = 最后一根非停牌 K 线的后复权收盘价（引擎再按 B8 打折）。"""
+    m = q.get_tradable_mask("2024-01-26", ["C00003.SH"])
+    r = m.loc["C00003.SH"]
+    assert (not r.can_buy) and r.can_sell and r.reason == "delisted"
+    last = q.get_bars("2024-01-24", ["C00003.SH"], lookback=1)["close"].iloc[0]
+    assert abs(r.close_hfq - last) < 1e-9 and abs(r.open_hfq - last) < 1e-9
+
+
+def test_unknown_code_is_still_no_quote(q):
+    m = q.get_tradable_mask("2024-01-26", ["ZZZZZZ.SZ"])
+    assert m.loc["ZZZZZZ.SZ", "reason"] == "no_quote"

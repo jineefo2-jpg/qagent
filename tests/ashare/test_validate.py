@@ -134,3 +134,10 @@ def test_validate_only_uses_read_only_connection(market_db):
     import inspect
     src = inspect.getsource(validate)
     assert "connect_write" not in src
+
+
+def test_row_completeness_bounds_expected_by_data_start(market_db):
+    """全量回补从 2010 起：2010 前上市的股票之前没有行是正常的。期望下界 = max(list_date, 数据起点)。
+    fixture 里 A 上市 2010、数据从 2023-12-25 起 → 不得误报。"""
+    r = validate.check_row_completeness(market_db)
+    assert r.passed and r.detail["data_start"] == D(2023, 12, 25) and r.detail["outside_window"] == 0

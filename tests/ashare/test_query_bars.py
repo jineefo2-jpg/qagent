@@ -131,3 +131,17 @@ def test_preload_is_used_by_get_bars(q):
     df = q.get_bars("2024-01-05", ["A00001.SZ"], lookback=2)
     assert len(df) == 2
     q.clear_preload()
+
+
+def test_empty_fields_rejected(q):
+    with pytest.raises(UnknownFieldError):
+        q.get_bars("2024-01-05", ["A00001.SZ"], lookback=1, fields=())
+    with pytest.raises(UnknownFieldError):
+        q.get_daily_basic("2024-01-05", ["A00001.SZ"], fields=())
+
+
+def test_daily_basic_uses_preload(q):
+    q.preload("2024-01-02", "2024-01-12", tables=("daily_basic",))
+    one = q.get_daily_basic("2024-01-05", ["A00001.SZ", "B00002.SZ"])
+    assert list(one.index) == ["A00001.SZ", "B00002.SZ"] and one.loc["A00001.SZ", "total_mv"] == 1e6
+    q.clear_preload()
