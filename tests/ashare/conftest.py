@@ -31,7 +31,7 @@ def _all_days(a: dt.date, b: dt.date):
 
 @pytest.fixture
 def market_db(tmp_path: pathlib.Path) -> str:
-    """一个最小但语义完整的 market 库：日历 + 3 只股票（含一只 ST 期、一只中途停牌、一只已退市）。
+    """一个最小但语义完整的 market 库：日历 + 4 只股票（正常但中途停牌 / ST 区间 / 已退市 / 次新）。
     写完即关闭写连接（同进程不可同时持读写连接）。返回路径。"""
     duckdb = pytest.importorskip("duckdb")
     from ashare.data import _db
@@ -103,7 +103,7 @@ def market_db(tmp_path: pathlib.Path) -> str:
         "adj_factor, limit_up, limit_down, limit_source, is_suspended) VALUES "
         "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", bars)
 
-    # daily_basic：成交额/市值 —— C 最小市值 & 最低成交额（流动性剔除的靶子）
+    # daily_basic：市值 —— C 最小市值（成交额在 daily_bar 的 base_amt 里分层）
     db_rows = []
     for code, mv in (("A00001.SZ", 1e6), ("B00002.SZ", 5e5), ("C00003.SH", 1e4), ("D00004.SZ", 2e5)):
         for d in TRADING_DAYS:

@@ -44,39 +44,51 @@ class UnknownFieldError(QueryError):
 
 # ══════════════ 连接生命周期 ══════════════
 _conn_obj: duckdb.DuckDBPyConnection | None = None
+_conn_ident: tuple[int, int] | None = None   # (st_dev, st_ino)：识别影子替换（os.replace 不改路径但换 inode）
 _conn_realpath: str | None = None
 _market_path: str | None = None
 _PRELOAD: dict[str, pd.DataFrame] = {}
 _CAL: pd.DataFrame | None = None            # 日历缓存：trade_date, is_open
+_OPEN_DAYS: list[_dt.date] | None = None    # 开市日列表缓存（回测循环里高频调用）
+
+
+def _file_ident(path: str) -> tuple[int, int]:
+    st = os.stat(path)
+    return (st.st_dev, st.st_ino)
 
 
 def open_db(market_path: str | None = None, derived_path: str | None = None) -> None:
-    """惰性建立 read_only 连接。幂等。底层文件 realpath 变化（影子替换发生过）→ 自动重连。"""
-    global _conn_obj, _conn_realpath, _market_path, _CAL
-    path = market_path or os.environ.get("ASHARE_MARKET_DB") or _db.DEFAULT_MARKET_PATH
+    """惰性建立 read_only 连接。幂等。
+    底层文件被【影子替换】（promote 用 os.replace：路径不变、inode 变）→ 自动重连；
+    旧连接读的是已 unlink 的旧 inode，不重连会永远看旧数据。
+    derived_path：P2 因子/回测结果库，本期未 ATTACH（预留参数）。"""
+    global _conn_obj, _conn_ident, _conn_realpath, _market_path, _CAL, _OPEN_DAYS
+    path = market_path or _market_path or os.environ.get("ASHARE_MARKET_DB") or _db.DEFAULT_MARKET_PATH
     if not pathlib.Path(path).exists():
         raise QueryError(f"market 库不存在: {path}（先跑 python -m ashare.data.ingest）")
-    real = os.path.realpath(path)
-    if _conn_obj is not None and _conn_realpath == real:
+    ident = _file_ident(path)
+    if _conn_obj is not None and _conn_ident == ident:
         return
     if _conn_obj is not None:
         _conn_obj.close()
     _conn_obj = _db.connect_read(path)
-    _conn_realpath, _market_path = real, path
-    _CAL = None
+    _conn_ident, _conn_realpath, _market_path = ident, os.path.realpath(path), path
+    _CAL, _OPEN_DAYS = None, None
     _PRELOAD.clear()
 
 
 def close_db() -> None:
-    global _conn_obj, _conn_realpath, _CAL
+    global _conn_obj, _conn_ident, _conn_realpath, _CAL, _OPEN_DAYS
     if _conn_obj is not None:
         _conn_obj.close()
-    _conn_obj, _conn_realpath, _CAL = None, None, None
+    _conn_obj, _conn_ident, _conn_realpath, _CAL, _OPEN_DAYS = None, None, None, None, None
     _PRELOAD.clear()
 
 
 def _conn() -> duckdb.DuckDBPyConnection:
-    if _conn_obj is None:
+    """每次取连接都重新 stat 一次路径（微秒级）：inode 变了就重连。"""
+    if _conn_obj is None or (_market_path and pathlib.Path(_market_path).exists()
+                             and _file_ident(_market_path) != _conn_ident):
         open_db(_market_path)
     assert _conn_obj is not None
     return _conn_obj
@@ -96,6 +108,12 @@ def snapshot_id() -> str:
     for t in _SNAPSHOT_TABLES:
         r = c.execute(f"SELECT max(_ingested_at), count(*) FROM {t}").fetchone()   # 表名为本模块字面量
         parts.append(f"{t}:{r[0]}:{r[1]}")
+    # 无 _ingested_at 的三张表也要进指纹：ST 区间 / 行业成分 / 日历变了同样改变回测结果（D7）
+    for t, key in (("stock_status", "start_date"), ("industry_member", "in_date"), ("calendar", "trade_date")):
+        r = c.execute(f"SELECT count(*), max({key}), min({key}) FROM {t}").fetchone()
+        parts.append(f"{t}:{r[0]}:{r[1]}:{r[2]}")
+    r = c.execute("SELECT count(*), max(end_date) FROM stock_status WHERE status <> 'NORMAL'").fetchone()
+    parts.append(f"st:{r[0]}:{r[1]}")
     return hashlib.sha256("|".join(parts).encode()).hexdigest()[:16]
 
 
@@ -133,8 +151,11 @@ def _check_in_calendar(d: _dt.date, name: str = "as_of_date") -> None:
 
 
 def _open_days() -> list[_dt.date]:
-    cal = _calendar()
-    return list(cal.loc[cal["is_open"], "trade_date"])
+    global _OPEN_DAYS
+    if _OPEN_DAYS is None:
+        cal = _calendar()
+        _OPEN_DAYS = list(cal.loc[cal["is_open"], "trade_date"])
+    return _OPEN_DAYS
 
 
 def is_trade_date(as_of_date: DateLike) -> bool:
@@ -179,9 +200,12 @@ def get_trade_dates(as_of_date: DateLike, *,
     if freq not in ("W", "M"):
         raise QueryError(f"freq 只能是 D/W/M，收到 {freq!r}")
     key = (lambda x: x.isocalendar()[:2]) if freq == "W" else (lambda x: (x.year, x.month))
+    # 末元素是否算周期末：看日历里【下一个交易日】（可能晚于 as_of，日历是公开信息，不构成前视）
+    # 是否仍在同一周期。周三 as_of 时本周还没结束 → 周三不是调仓日。日历尽头无法判断 → 算作周期末。
+    tail_next = next_trade_date(end)
     out: list[_dt.date] = []
     for i, x in enumerate(days):
-        nxt = days[i + 1] if i + 1 < len(days) else None
+        nxt = days[i + 1] if i + 1 < len(days) else tail_next
         if nxt is None or key(nxt) != key(x):
             out.append(x)
     return out
@@ -215,20 +239,23 @@ _ST_STATES = ("ST", "*ST", "DELIST_PERIOD")
 
 def _stock_frame(as_of: _dt.date) -> pd.DataFrame:
     """所有股票（含已退市）+ as_of 当日的状态 / 停牌 / 20 日均成交额。一次 SQL，后续在 pandas 里分步。"""
+    days = [d for d in _open_days() if d <= as_of]
+    win_start = days[-20] if len(days) >= 20 else (days[0] if days else as_of)
     sql = """
     WITH st AS (
+        -- 区间重叠（ingest 原样拷贝 namechange，schema 允许）时取 start_date 最新的一段，避免一股多行
         SELECT ts_code, status FROM stock_status
         WHERE start_date <= ? AND (end_date IS NULL OR ? <= end_date)
+        QUALIFY row_number() OVER (PARTITION BY ts_code ORDER BY start_date DESC) = 1
     ),
     bar AS (
         SELECT ts_code, is_suspended FROM daily_bar WHERE trade_date = ?
     ),
     liq AS (
-        SELECT ts_code, avg(amount) AS adv20 FROM (
-            SELECT ts_code, amount,
-                   row_number() OVER (PARTITION BY ts_code ORDER BY trade_date DESC) AS rn
-            FROM daily_bar WHERE trade_date <= ?
-        ) WHERE rn <= 20 GROUP BY ts_code
+        -- 20 日均成交额：D9 保证每交易日一行，[win_start, as_of] 恰为 20 个交易日；
+        -- 停牌占位行 amount=0 计入均值（近期停牌的股票被压低——这是有意的）
+        SELECT ts_code, avg(amount) AS adv20 FROM daily_bar
+        WHERE trade_date BETWEEN ? AND ? GROUP BY ts_code
     )
     SELECT b.ts_code, b.market, b.list_date, b.delist_date,
            st.status, bar.is_suspended, liq.adv20
@@ -238,7 +265,7 @@ def _stock_frame(as_of: _dt.date) -> pd.DataFrame:
     LEFT JOIN liq ON liq.ts_code = b.ts_code
     ORDER BY b.ts_code
     """
-    df = _conn().execute(sql, [as_of, as_of, as_of, as_of]).fetchdf()
+    df = _conn().execute(sql, [as_of, as_of, as_of, win_start, as_of]).fetchdf()
     for c in ("list_date", "delist_date"):
         df[c] = [None if pd.isna(x) else pd.Timestamp(x).date() for x in df[c]]
     return df.set_index("ts_code")
@@ -263,12 +290,12 @@ def explain_universe(as_of_date: DateLike, *,
     out["step1_listed"] = [(ld is not None and ld <= as_of) and (dd is None or dd > as_of)
                            for ld, dd in zip(f["list_date"], f["delist_date"])]
     out["step2_seasoned"] = [(ld is not None and ld <= seasoned_before) for ld in f["list_date"]]
-    st_flag = f["status"].isin(_ST_STATES).fillna(False)
+    st_flag = f["status"].isin(_ST_STATES)
     out["step3_not_st"] = (~st_flag) if exclude_st else True
     has_bar = f["is_suspended"].notna()
     susp = f["is_suspended"].fillna(True).astype(bool)
     out["step4_tradable"] = (has_bar & ~susp) if exclude_suspended else has_bar
-    out["step5_market"] = f["market"].isin(list(markets)) if markets else True
+    out["step5_market"] = f["market"].isin(list(markets)) if markets is not None else True
 
     hard = out[["step1_listed", "step2_seasoned", "step3_not_st", "step4_tradable", "step5_market"]].all(axis=1)
     pool = f.loc[hard, "adv20"].fillna(0.0)
@@ -278,26 +305,14 @@ def explain_universe(as_of_date: DateLike, *,
 
     out["included"] = out[["step1_listed", "step2_seasoned", "step3_not_st",
                            "step4_tradable", "step5_market", "step6_liquid"]].all(axis=1)
-    reasons = []
-    for c in out.index:
-        r = out.loc[c]
-        if not r.step1_listed:
-            dd = f.at[c, "delist_date"]
-            reasons.append("delisted" if (dd is not None and dd <= as_of) else "not_listed")
-        elif not r.step2_seasoned:
-            reasons.append("seasoning")
-        elif not r.step3_not_st:
-            reasons.append("st")
-        elif not r.step4_tradable:
-            flag = f.at[c, "is_suspended"]
-            reasons.append("no_bar" if pd.isna(flag) else ("suspended" if bool(flag) else "no_bar"))
-        elif not r.step5_market:
-            reasons.append("market")
-        elif not r.step6_liquid:
-            reasons.append("illiquid")
-        else:
-            reasons.append("")
-    out["drop_reason"] = reasons
+    import numpy as np
+    delisted = pd.Series([(dd is not None and dd <= as_of) for dd in f["delist_date"]], index=f.index)
+    conds = [~out["step1_listed"] & delisted, ~out["step1_listed"],
+             ~out["step2_seasoned"], ~out["step3_not_st"],
+             ~out["step4_tradable"] & has_bar & susp, ~out["step4_tradable"],
+             ~out["step5_market"], ~out["step6_liquid"]]
+    labels = ["delisted", "not_listed", "seasoning", "st", "suspended", "no_bar", "market", "illiquid"]
+    out["drop_reason"] = np.select([c.to_numpy() for c in conds], labels, default="")
     return out
 
 
@@ -324,13 +339,16 @@ def get_stock_basic(as_of_date: DateLike,
     as_of = _norm_date(as_of_date)
     _check_in_calendar(as_of)
     sql = """
+    WITH m AS (
+        -- 区间语义与 stock_status 一致：in_date / out_date 均【含当日】；重叠时取 in_date 最新一段
+        SELECT ts_code, sw_l1, sw_l2, sw_l3 FROM industry_member
+        WHERE in_date <= ? AND (out_date IS NULL OR ? <= out_date)
+        QUALIFY row_number() OVER (PARTITION BY ts_code ORDER BY in_date DESC) = 1
+    )
     SELECT b.ts_code, b.symbol, b.name, m.sw_l1, m.sw_l2, m.sw_l3, b.market,
            b.list_date, b.delist_date, b.is_hs
-    FROM stock_basic b
-    LEFT JOIN industry_member m
-      ON m.ts_code = b.ts_code AND m.in_date <= ? AND (m.out_date IS NULL OR ? <= m.out_date)
+    FROM stock_basic b LEFT JOIN m ON m.ts_code = b.ts_code
     """
-    # 区间语义与 stock_status 一致：in_date / out_date 均【含当日】
     params: list = [as_of, as_of]
     if ts_codes is not None:
         codes = list(ts_codes)
@@ -342,7 +360,6 @@ def get_stock_basic(as_of_date: DateLike,
     df = _conn().execute(sql, params).fetchdf()
     for c in ("list_date", "delist_date"):
         df[c] = [None if pd.isna(x) else pd.Timestamp(x).date() for x in df[c]]
-    df = df.drop_duplicates("ts_code", keep="last")     # 行业区间若重叠取最新一段
     return df.set_index("ts_code")[_BASIC_COLS]
 
 

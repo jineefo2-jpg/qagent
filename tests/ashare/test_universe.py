@@ -24,7 +24,7 @@ def q(market_db):
 def test_seasoning_drops_recent_ipo(q):
     u = q.get_universe("2024-01-05")
     assert "D00004.SZ" not in u                          # 上市 35 天 < 250
-    assert q.get_universe("2024-01-05", min_list_days=30) .__contains__("D00004.SZ")
+    assert "D00004.SZ" in q.get_universe("2024-01-05", min_list_days=30)
 
 
 def test_st_period_is_excluded_only_inside_the_window(q):
@@ -132,3 +132,34 @@ def test_universe_functions_reject_bad_dates(q):
         q.get_universe("2030-01-01")
     with pytest.raises(query.AsOfDateError):
         q.get_industry("nope")
+
+
+def test_overlapping_status_rows_do_not_crash_latest_segment_wins(market_db):
+    """schema 允许区间重叠（PK 只含 start_date）；ingest 原样拷贝 namechange。取 start_date 最新一段。"""
+    from ashare.data import _db
+    w = _db.connect_write(market_db)
+    w.execute("INSERT INTO stock_status VALUES ('A00001.SZ', DATE '2020-01-01', NULL, 'NORMAL')")   # 与既有 2010 段重叠
+    w.execute("INSERT INTO stock_status VALUES ('A00001.SZ', DATE '2024-01-04', NULL, 'ST')")        # 更新的一段：ST
+    w.close()
+    query.open_db(market_db)
+    try:
+        assert "A00001.SZ" not in query.get_universe("2024-01-05")
+        assert "A00001.SZ" in query.get_universe("2024-01-03")
+    finally:
+        query.close_db()
+
+
+def test_overlapping_industry_rows_latest_in_date_wins(market_db):
+    from ashare.data import _db
+    w = _db.connect_write(market_db)
+    w.execute("INSERT INTO industry_member VALUES ('A00001.SZ', '医药生物', '中药', '中药', DATE '2020-01-01', NULL)")
+    w.close()
+    query.open_db(market_db)
+    try:
+        assert query.get_industry("2024-01-05", min_members=1)["A00001.SZ"] == "医药生物"
+    finally:
+        query.close_db()
+
+
+def test_markets_empty_list_means_no_market(q):
+    assert q.get_universe("2024-01-05", markets=[]) == []

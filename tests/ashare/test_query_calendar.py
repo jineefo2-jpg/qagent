@@ -74,14 +74,48 @@ def test_get_trade_dates_daily_and_weekly_and_monthly(q):
     assert daily == [D(2024,1,2), D(2024,1,3), D(2024,1,4), D(2024,1,5),
                      D(2024,1,8), D(2024,1,9), D(2024,1,10), D(2024,1,11), D(2024,1,12)]
     weekly = q.get_trade_dates("2024-01-31", start="2024-01-01", freq="W")
-    assert weekly == [D(2024,1,5), D(2024,1,12), D(2024,1,19), D(2024,1,26), D(2024,1,31)]
+    assert weekly == [D(2024,1,5), D(2024,1,12), D(2024,1,19), D(2024,1,26)]     # 01-31 是周三，本周未结束
     monthly = q.get_trade_dates("2024-02-02", start="2023-12-01", freq="M")
     assert monthly == [D(2023,12,29), D(2024,1,31), D(2024,2,2)]
 
 
-def test_weekly_uses_last_trading_day_not_friday(q):
-    """2024-01-31 是周三，但它是当周（也是本日历末段）最后一个交易日 → 计入。"""
-    assert D(2024,1,31) in q.get_trade_dates("2024-01-31", start="2024-01-29", freq="W")
+def test_period_end_uses_calendar_lookahead(q):
+    """周期末判定看日历里下一个交易日是否同周期（日历公开，不构成前视）：
+    01-31 周三、日历显示 02-01/02-02 仍是本周交易日 → 01-31 不是周末调仓日；
+    02-02 之后日历没有下一个交易日 → 无法判断，算作周期末。"""
+    assert q.get_trade_dates("2024-01-31", start="2024-01-29", freq="W") == []
+    assert q.get_trade_dates("2024-02-02", start="2024-01-29", freq="W") == [D(2024,2,2)]
+    assert q.get_trade_dates("2024-01-26", start="2024-01-22", freq="W") == [D(2024,1,26)]
+
+
+def test_snapshot_id_reflects_status_and_industry_tables(market_db):
+    """无 _ingested_at 的表（stock_status / industry_member / calendar）也必须进指纹（D7）。"""
+    from ashare.data import _db
+    query.open_db(market_db); a = query.snapshot_id(); query.close_db()
+    w = _db.connect_write(market_db)
+    w.execute("INSERT INTO stock_status VALUES ('A00001.SZ', DATE '2024-01-29', DATE '2024-01-30', 'ST')")
+    w.close()
+    query.open_db(market_db); b = query.snapshot_id(); query.close_db()
+    assert a != b
+
+
+def test_conn_reconnects_when_file_replaced_in_place(market_db, tmp_path):
+    """promote 用 os.replace：路径不变、inode 变。旧连接读的是旧 inode，必须自动重连。"""
+    import os, shutil
+    from ashare.data import _db
+    query.open_db(market_db)
+    a = query.snapshot_id()
+    # 造一个不同内容的新文件，原子替换到同一路径
+    new = str(tmp_path / "new.duckdb")
+    shutil.copyfile(market_db, new)
+    w = _db.connect_write(new)
+    w.execute("INSERT INTO daily_basic (ts_code, trade_date, total_mv) VALUES ('Z00009.SZ', DATE '2024-01-02', 1.0)")
+    w.execute("CHECKPOINT"); w.close()
+    os.replace(new, market_db)
+    try:
+        assert query.snapshot_id() != a
+    finally:
+        query.close_db()
 
 
 # ══════════════ 越界与格式 ══════════════
