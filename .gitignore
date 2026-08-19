@@ -21,9 +21,21 @@ docs/*.pdf
 static/charts/
 
 # 凭证 SQLite (X3 起,加密存储 broker 凭证)
-data/
+# 锚定到仓库根：不加 / 会把 ashare/data/ 源码目录也吞掉
+/data/
 
 # IDE
 .vscode/
-.idea/
+.idea/*
+!.idea/misc.xml
+!.idea/modules.xml
+!.idea/jdk.table.xml
+!.idea/demo.iml
 .DS_Store
+
+# A 股数据底座
+data/ashare_market.duckdb*
+data/ashare_derived.duckdb*
+data/ashare_staging/
+data/rate_state.json
+data/parquet_export/

@@ -24,6 +24,7 @@ from .config import (
     CHUNK_SIZE, CHUNK_OVERLAP, MIN_CHUNK_LEN,
     COLLECTION_NAME, RERANKER_MODEL,
 )
+from .publish_date import resolve_publish_date
 
 
 # ════════════════════════════════════════════════════════════
@@ -191,6 +192,8 @@ def build_chunks(pdf_path: Path):
     doc_name = pdf_path.stem
     pages = extract_pdf_pages(pdf_path)
     out = []
+    # 时点隔离的地基：每个 chunk 带 publish_date（入库时写零成本，事后回补要重解析全部语料）
+    publish_date, publish_date_source = resolve_publish_date(pdf_path)
 
     for page_num, page_text in pages:
         for idx, c in enumerate(chunk_text(page_text, CHUNK_SIZE, CHUNK_OVERLAP)):
@@ -209,6 +212,8 @@ def build_chunks(pdf_path: Path):
                     "page": page_num,
                     "chunk_idx": idx,
                     "source": pdf_path.name,
+                    "publish_date": publish_date,                  # 'YYYY-MM-DD' 或 ''（chroma 不接受 None）
+                    "publish_date_source": publish_date_source,    # override | filename | unknown
                 }
             ))
     return out
