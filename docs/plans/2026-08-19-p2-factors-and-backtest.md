@@ -272,7 +272,13 @@ tests/ashare/
 
 ### Task 6: 资金 + 风险因子
 
-**Files:** Create `ashare/factors/flow.py`, `ashare/factors/risk.py`; Modify `tests/ashare/test_factors_price.py`（追加）
+**Files:** Create `ashare/factors/flow.py`, `ashare/factors/risk.py`; Modify `ashare/factors/__init__.py`; Modify `tests/ashare/test_factors_price.py`（追加）
+
+**★ 本任务收口：`__init__.py` 必须 import 四个因子模块**（price/fundamental/flow/risk）。
+装饰器只在模块被导入时才注册；不导入的话 `import ashare.factors` 后 `FACTOR_REGISTRY` 是空的，
+而**空注册表是静默失败**——回测会一路跑到"没有因子可用"才报，或者更糟：合成分数全 NaN、
+`build_targets` 返回空、净值一条直线，看起来像"策略没信号"而不是"代码没装配"。
+加一条断言：`len(FACTOR_REGISTRY) == 18` 且四个 category 各自非空。
 
 **Interfaces**
 - Produces：
@@ -290,6 +296,8 @@ tests/ashare/
 - `compute_factor('north_hold_chg_20', '2015-06-12', u)` 返回全 NaN 且不抛
 - `log_mv` / `beta_250` 的 `spec.neutralize is False`
 - `beta_250`：构造与指数完全同步的股票 → beta ≈ 1；2 倍波动 → beta ≈ 2
+- **注册表装配断言**：`import ashare.factors` 后 `len(FACTOR_REGISTRY) == 18`；
+  `list_factors('price')/('fundamental')/('flow')/('risk')` 各为 6/8/1/3 个
 
 ---
 
