@@ -1,11 +1,5 @@
 # 文档知识库
 
-## 工程方法
-
-- [Harness Coding 学习文档](harness-coding.md) — Agent 重构护栏、金丝雀测试、Phase A/B/X/C 路线图（从本仓库摘编）
-
-## RAG 研报库
-
 把要让 Agent 引用的 PDF 放到这个目录。
 
 ## 支持的文件类型
