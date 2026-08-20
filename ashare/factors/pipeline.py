@@ -31,6 +31,7 @@ import pandas as pd
 
 from ashare.data import query
 from .base import FactorSpec
+from .risk import industry as _industry_factor, log_mv as _log_mv_factor
 
 DateLike = Union[str, _dt.date]
 
@@ -65,6 +66,7 @@ def neutralize(s: pd.Series, as_of_date: DateLike, universe: Sequence[str], *,
     残差与回归元【无权】正交（X'e = 0）—— 这正是等权 top-N 组合关心的度量。
     行业哑变量去掉一列（否则与截距完全共线，规格 §10.8）。
     市值缺失的股票算不出 log_mv，无论 `by` 取什么都置 NaN（不猜市值）。
+    回归元取自已注册的 `risk.log_mv` / `risk.industry` —— 与 §9 风格归因是同一个定义。
     返回 `(残差, warnings)`；有效样本 < MIN_OBS 或设计矩阵秩亏 → 返回【原 Series】+ warning。
     """
     bad = [t for t in by if t not in _BY_TERMS]
@@ -73,13 +75,17 @@ def neutralize(s: pd.Series, as_of_date: DateLike, universe: Sequence[str], *,
         raise ValueError(f"neutralize 的 by 只支持 {_BY_TERMS}，收到未知项 {bad}")
 
     codes = list(universe)
-    mv = query.get_daily_basic(as_of_date, codes, fields=("total_mv",))["total_mv"] \
-              .reindex(s.index).astype(float)
-    valid = s.notna() & mv.notna() & (mv > 0)
+    # ★ 回归元走【已注册的风险因子】，不在这里另算一遍：
+    #   §9 的风格归因用 risk.log_mv / risk.industry 度量残差的规模暴露，而那正是检验
+    #   §3.2「OLS 而非 WLS」裁决的唯一手段。若中性化减掉的量与归因度量的量是两份
+    #   各自演化的实现，归因可以报告「规模暴露已清零」而账本实际带着倾斜 ——
+    #   裁决就永远无法被证伪。两者必须是同一个定义。
+    log_mv = _log_mv_factor(as_of_date, codes).reindex(s.index).astype(float)
+    valid = s.notna() & log_mv.notna()
 
     parts = [pd.Series(1.0, index=s.index, name="const")]
     if "log_mv" in by:
-        parts.append(np.log(mv.where(mv > 0)).rename("log_mv"))
+        parts.append(log_mv.rename("log_mv"))
     if "industry" in by:
         src = query.industry_source()
         if src != "sw":
@@ -89,7 +95,7 @@ def neutralize(s: pd.Series, as_of_date: DateLike, universe: Sequence[str], *,
                 f"industry_source={src!r} 不是 'sw'：行业标签是今天的值回填到上市日，"
                 f"用它做行业中性化会把未来的行业分类带进历史横截面（前视）。"
                 f"请恢复申万成分数据后重建，或改用 by=('log_mv',)。")
-        ind = query.get_industry(as_of_date, codes).reindex(s.index)
+        ind = _industry_factor(as_of_date, codes).reindex(s.index)
         valid &= ind.notna()
         # ★ 用【有效样本】构造哑变量，不能用全体：
         #   某个行业若全员无效（因子值 NaN，或市值缺失/为 0），在全体上建出的那一列在
@@ -99,7 +105,12 @@ def neutralize(s: pd.Series, as_of_date: DateLike, universe: Sequence[str], *,
         #   这条路是走得到的：get_industry 把缺失和成分 < min_members 的行业都并进 __OTHER__，
         #   而 __OTHER__ 收的恰是次新股之类最容易因子值缺失的名字。
         #   where(valid) 把无效行置 NaN，get_dummies 默认不为 NaN 建列 → 空类别自动消失。
-        parts.append(pd.get_dummies(ind.where(valid), prefix="ind", drop_first=True, dtype=float))
+        #   ★ .astype(object) 不可省：risk.industry 返回 category dtype，而 get_dummies
+        #     对 categorical 会为【零观测的类别也建列】—— where(valid) 只把值置成 NaN，
+        #     类别表还在，于是上面这层保护被无声地废掉，又退回秩亏。转成 object 后
+        #     get_dummies 只按实际出现的值建列。
+        parts.append(pd.get_dummies(ind.where(valid).astype(object),
+                                    prefix="ind", drop_first=True, dtype=float))
 
     idx = s.index[valid]
     if len(idx) < MIN_OBS:

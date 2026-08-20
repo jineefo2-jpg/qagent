@@ -315,6 +315,21 @@ tests/ashare/
 > 但守卫要放在这里 —— **一处覆盖 18 个因子**，而不是在每个因子里各写一遍。
 > 同时校验：非空、无 NaN 代码、类型为 str。
 
+> **★ 2026-08-20 追加（Task 6 转来）：`combine` 必须用【白名单】排除风险因子，不是黑名单。**
+> `FactorSpec` 没有 `is_alpha` 字段，而 `category` 已经携带了完全相同的信息 ——
+> 不加第二个字段（两个真相来源会打架）。但判据要**失败关闭**：
+> `combine` 只接受 `category ∈ {'price','fundamental','flow'}`，其余一律拒绝并报错。
+> 黑名单（`category != 'risk'`）是失败**开放**的：将来新增一个类别、或者类别名打错一个字母，
+> 都会静默变成 alpha。
+> **为什么这条不能漏**：`industry` 自带保护（category dtype 让 `winsorize_mad` 的
+> `median()` 抛 TypeError），但 `log_mv` 和 `beta_250` 会一路顺利穿过 `pipeline.process`
+> 产出看起来完全正常的分数。而拿 `log_mv` 当 alpha 就是一个纯粹的规模押注 ——
+> 在 A 股历史回测里它会**非常好看**（小盘溢价），这正是它最危险的地方。
+>
+> 另：Task 6 的装配断言（`len(FACTOR_REGISTRY) == 18`）是在因子函数层验的，
+> 因为 `compute_factor` 当时还不存在。Task 7 要**两条路径都断言** ——
+> `compute_factor` 的短路会遮住 `store.build` 与直接调 `spec.fn` 的调用方走的那条路。
+
 ### Task 7: compute_factor / compute_panel / combine
 
 **Files:** Modify `ashare/factors/base.py`; Modify `tests/ashare/test_factor_base.py`
