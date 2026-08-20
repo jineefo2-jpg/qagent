@@ -518,6 +518,27 @@ def coverage_report(names: list[str]) -> pd.DataFrame:
 
 ### 4.3 回测引擎输入输出
 
+> **派生库的写入口在数据层，不在 backtest / factors 层（2026-08-20 裁决）。**
+>
+> `BacktestResult.save()/load()` 与 Task 8 的因子落库都要写 `derived.duckdb`，
+> 而分层闸 **L1 只允许 `ashare/data/**` `import duckdb`** —— 两处都撞上同一堵墙。
+>
+> **不放宽 L1。** 这道闸故意是粗粒度的：「这个文件能不能 import duckdb」AST 查得出来，
+> 「能 import 但只准连 derived.duckdb」查不出来。一旦 `factors/store.py` 能 import duckdb，
+> 它同样能 `duckdb.connect('market.duckdb')` 然后 SELECT 未经掩码的原始行 ——
+> 那正是 D2 要挡的东西。
+>
+> **落法**：新建**公开**模块 `ashare/data/derived_store.py`，独家持有派生库的读写
+> （因子值 + 回测运行记录）。它只收发 DataFrame 与基础类型，**绝不 import
+> `ashare.backtest` 或 `ashare.factors`** —— 否则低层反向依赖高层。
+> `BacktestResult.save()` 负责把自己序列化成 dict 再交给它。
+> 不额外包一层 `factors/store.py` 转发：单实现的抽象没有存在意义。
+>
+> 注意 L2（首参 `as_of_date`）**不延伸到** `derived_store`：回测引擎读因子面板天然是
+> 读一个日期区间（2010–2024 一次读完），强行套 `as_of_date` 形状就不对。
+> 这里的前视保护在**写入时**——因子值本身是按 PIT 纪律算出来的。
+
+
 ```python
 # ashare/backtest/types.py
 from __future__ import annotations
@@ -549,7 +570,7 @@ class BacktestConfig:
     factors: tuple[tuple[str, float], ...]      # 有序元组以便 hash；((name, weight), ...)
     constraints: PortfolioConstraints = PortfolioConstraints()
     cost: CostConfig = CostConfig()
-    macro_timing: bool = True                   # False → 恒定满仓（P2 阶段默认 False）
+    macro_timing: bool = False                   # False → 恒定满仓（P2 阶段默认 False）
     position_floor: float = 0.20
     position_cap: float = 1.00
     benchmark: str = "000985.CSI"

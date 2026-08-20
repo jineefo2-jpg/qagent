@@ -338,7 +338,14 @@ tests/ashare/
 
 ### Task 8: 因子落库 store
 
-**Files:** Create `ashare/factors/store.py`; Create `tests/ashare/test_factor_store.py`
+> **★ 2026-08-20 裁决：本任务的文件改为 `ashare/data/derived_store.py`。**
+> 原定的 `ashare/factors/store.py` 要 `import duckdb`，撞分层闸 L1（只有 `ashare/data/**` 可以）。
+> 不放宽 L1 —— 闸是故意粗粒度的，一旦 factors 层能 import duckdb，它同样能连 market.duckdb
+> 读未掩码的原始行。派生库读写（因子值 + 回测运行记录）统一归这一个公开模块，
+> 只收发 DataFrame 与基础类型，绝不反向 import `ashare.backtest` / `ashare.factors`。
+> 不再包一层转发：单实现的抽象没有存在意义。详见架构 §4.3 的裁决框。
+
+**Files:** Create `ashare/data/derived_store.py`; Create `tests/ashare/test_factor_store.py`
 
 **Interfaces**
 - Consumes：`_derived.connect_write/read`、`compute_factor`、`query.snapshot_id`
@@ -488,7 +495,24 @@ tests/ashare/
 
 ---
 
+> **★ 2026-08-20 裁决：`engine_version` 绝不进 `param_hash`。**
+>
+> Task 9 的实现者指出 §4.3 把 `engine_version` 放在 Result 而非 Config 上，
+> 于是「引擎语义改了、参数没改」会得到同一个指纹配不同的数字。这是真的，
+> 但**把它塞进 hash 会把 D7 弄坏，而不是修好**：每次引擎升版都会铸出一个新 hash，
+> 于是静默地又发一次样本外机会 —— 那正是 D7 要挡的污染。
+>
+> `(param_hash, data_snapshot_id)` 是**实验的身份**；`engine_version` 是**跑它的代码的身份**。
+> 后者记在 `docs/oos-runs.md` 的同一行里做溯源，永远不进指纹。
+> 引擎改了还想再跑样本外，就是第二次样本外 —— 该被闸挡下来，由人显式承认。
+
 ### Task 13: 引擎 engine.run_backtest
+
+> **★ 调仓频率不设 config 字段，但也不许当函数参数（2026-08-20 裁决）。**
+> 周频是用户定的产品决策（周频调仓、持 1–4 周），不是调参旋钮，为单一取值加字段是投机。
+> 但 `run_backtest()` **禁止**接受 `freq`/`rebalance_days` 之类的参数 ——
+> 那会让日频与周频两次运行共用一个指纹。若将来真要可调，它必须进 `BacktestConfig`，
+> 让 `param_hash` 覆盖到。
 
 **Files:** Create `ashare/backtest/engine.py`, `ashare/backtest/store.py`; Create `tests/ashare/test_engine.py`
 
