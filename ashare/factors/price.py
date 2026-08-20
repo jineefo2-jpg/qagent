@@ -103,6 +103,9 @@ def turnover_20(as_of_date: DateLike, universe: Sequence[str], *, window: int = 
 def amihud_20(as_of_date: DateLike, universe: Sequence[str], *, window: int = 20) -> pd.Series:
     """`1e9 × mean(|r_s| / amount_s)`，r 取对数收益。值大 = 单位成交额推动的价格幅度大。
 
+    ★ 常数 1e9 与 amount 的单位（Tushare 是千元）都不影响结果：后面要过 zscore，
+      任何正的常数乘子都被标准化抹掉。只有拿 ILLIQ 的绝对水平对比文献时才需要在意单位。
+
     ★ `amount <= 0`（停牌日成交额为 0）必须先剔除：`|r|/0 = inf`，而 MAD 去极值对
       inf 无能为力（median 还在，但 clip 上界之外的 inf 会被截到上界，成为最"非流动"
       的一只），一只停牌股就能绑架整个横截面的排序。
