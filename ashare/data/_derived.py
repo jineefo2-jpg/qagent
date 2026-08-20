@@ -11,9 +11,24 @@ import pathlib
 import duckdb
 
 from . import _db
-from ._db import DEFAULT_DERIVED_PATH   # 路径常量单一来源，别在这里再抄一遍字面量
+
+# 路径常量单一来源在 _db，这里再导出一次：调用方只需要认识 _derived 一个模块
+DEFAULT_DERIVED_PATH = _db.DEFAULT_DERIVED_PATH
 
 _SCHEMA_SQL = pathlib.Path(__file__).with_name("derived_schema.sql")
+
+# ★ 因子值的覆盖语义（Task 8 的 store 应导入而不是自己写一遍）：
+#   重算 = 覆盖，且 snapshot_id 必须跟着更新。若写入方发的是 ON CONFLICT DO NOTHING，
+#   留下的是陈旧值【配陈旧 snapshot_id】—— read() 会认为它属于当前快照并放行，静默喂进回测。
+UPSERT_FACTOR_VALUE = """
+INSERT INTO factor_value (factor_name, param_hash, trade_date, ts_code,
+                          raw_value, processed_value, snapshot_id)
+VALUES (?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT (factor_name, param_hash, trade_date, ts_code) DO UPDATE SET
+  raw_value       = excluded.raw_value,
+  processed_value = excluded.processed_value,
+  snapshot_id     = excluded.snapshot_id
+"""
 
 
 def connect_write(path: str | None = None) -> duckdb.DuckDBPyConnection:

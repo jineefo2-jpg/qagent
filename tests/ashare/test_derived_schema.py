@@ -4,6 +4,7 @@ market 库由 promote.py 原子替换（os.replace），因子值若住在里面
 所以 derived 必须是独立文件。本文件守的就是这条边界，外加 D1 的只读硬保证。
 """
 from __future__ import annotations
+import datetime as dt
 import pathlib
 
 import pytest
@@ -36,9 +37,14 @@ def test_init_schema_creates_both_tables(derived_db):
 
 
 def test_init_schema_is_idempotent(derived_db):
+    """幂等的关键不是"第二次不抛"，是"第二次不清空缓存"。
+    有人把 CREATE TABLE IF NOT EXISTS 改成 CREATE OR REPLACE TABLE，只断言不抛的测试照样过，
+    而每次 init 都会抹掉全部已算因子值 —— 那才是这个测试要拦的回归。"""
     conn = _derived.connect_write(derived_db)
     _derived.init_schema(conn)
-    _derived.init_schema(conn)          # 第二次不得抛
+    conn.execute("INSERT INTO factor_value VALUES ('f', 'p', DATE '2024-01-02', 'A.SZ', 1.0, 0.5, 'snap')")
+    _derived.init_schema(conn)          # 第二次不得抛，也不得清空
+    assert conn.execute("SELECT count(*) FROM factor_value").fetchone()[0] == 1
     conn.close()
 
 
@@ -157,3 +163,32 @@ def test_derived_path_is_a_separate_file_from_market():
 
 def test_gitignore_covers_derived_db():
     assert "data/ashare_derived.duckdb*" in (REPO / ".gitignore").read_text(encoding="utf-8")
+
+
+def test_d7_provenance_columns_are_not_null(derived_db):
+    """D7 说 param_hash 与 data_snapshot_id「缺一不可」。PK 列由 DuckDB 隐式 NOT NULL —— 恰好
+    保护了【缓存键】而漏掉【溯源列】。缺了 snapshot_id 的行无法追溯来源，且 store.read 的
+    `snapshot_id = ?` 对 NULL 恒为 NULL，这些行会从每次读取里静默消失而不是报错。"""
+    conn = _derived.connect_write(derived_db)
+    _derived.init_schema(conn)
+    with pytest.raises(duckdb.ConstraintException):
+        conn.execute("INSERT INTO factor_value (factor_name, param_hash, trade_date, ts_code, raw_value) "
+                     "VALUES ('f', 'p', DATE '2024-01-02', 'A.SZ', 1.0)")          # 无 snapshot_id
+    with pytest.raises(duckdb.ConstraintException):
+        conn.execute("INSERT INTO backtest_run (run_id, param_hash) VALUES ('r1', 'p1')")   # 无 data_snapshot_id
+    with pytest.raises(duckdb.ConstraintException):
+        conn.execute("INSERT INTO backtest_run (run_id, data_snapshot_id) VALUES ('r2', 's1')")  # 无 param_hash
+    conn.close()
+
+
+def test_upsert_factor_value_overwrites_value_and_snapshot(derived_db):
+    """覆盖语义必须活在 ashare/ 里而不是测试里：写入方若发 DO NOTHING，会留下陈旧值【配陈旧
+    snapshot_id】，read() 会认为它属于当前快照并放行 —— 静默把另一批数据算出的因子喂进回测。"""
+    conn = _derived.connect_write(derived_db)
+    _derived.init_schema(conn)
+    key = ("f", "p", dt.date(2024, 1, 2), "A.SZ")
+    conn.execute(_derived.UPSERT_FACTOR_VALUE, [*key, 1.0, 0.5, "snap_a"])
+    conn.execute(_derived.UPSERT_FACTOR_VALUE, [*key, 2.0, 0.9, "snap_b"])
+    assert conn.execute("SELECT raw_value, processed_value, snapshot_id FROM factor_value").fetchall() \
+        == [(2.0, 0.9, "snap_b")]
+    conn.close()
