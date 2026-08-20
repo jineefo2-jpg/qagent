@@ -59,7 +59,7 @@ def zscore(s: pd.Series) -> pd.Series:
 
 
 def neutralize(s: pd.Series, as_of_date: DateLike, universe: Sequence[str], *,
-               by: tuple[str, ...] = ("log_mv", "industry")) -> tuple[pd.Series, list[str]]:
+               by: tuple[str, ...] = _BY_TERMS) -> tuple[pd.Series, list[str]]:
     """横截面 OLS 取残差：`x = α + β·log_mv + Σγₖ·Dₖ + ε`。
 
     残差与回归元【无权】正交（X'e = 0）—— 这正是等权 top-N 组合关心的度量。
@@ -91,7 +91,15 @@ def neutralize(s: pd.Series, as_of_date: DateLike, universe: Sequence[str], *,
                 f"请恢复申万成分数据后重建，或改用 by=('log_mv',)。")
         ind = query.get_industry(as_of_date, codes).reindex(s.index)
         valid &= ind.notna()
-        parts.append(pd.get_dummies(ind, prefix="ind", drop_first=True, dtype=float))
+        # ★ 用【有效样本】构造哑变量，不能用全体：
+        #   某个行业若全员无效（因子值 NaN，或市值缺失/为 0），在全体上建出的那一列在
+        #   有效子集上恒为 0 → 设计矩阵秩亏 → 整个横截面退回未中性化的原值。
+        #   drop_first 的基准行业若全员无效更糟：剩余哑变量在每个有效行上和为 1，
+        #   与截距完全共线，同样秩亏。
+        #   这条路是走得到的：get_industry 把缺失和成分 < min_members 的行业都并进 __OTHER__，
+        #   而 __OTHER__ 收的恰是次新股之类最容易因子值缺失的名字。
+        #   where(valid) 把无效行置 NaN，get_dummies 默认不为 NaN 建列 → 空类别自动消失。
+        parts.append(pd.get_dummies(ind.where(valid), prefix="ind", drop_first=True, dtype=float))
 
     idx = s.index[valid]
     if len(idx) < MIN_OBS:

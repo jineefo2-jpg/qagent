@@ -498,7 +498,7 @@ def neutralize(s: pd.Series, as_of_date, universe, *,
     有效样本 < 30 或设计矩阵秩亏 → 返回原 Series + warning，不静默返回 NaN。
     返回 (残差, warnings)：warnings 上浮到 BacktestResult.warnings，降级的那一天在运行记录里看得见。"""
 def zscore(s: pd.Series) -> pd.Series: ...
-def process(s: pd.Series, as_of_date, universe, *, spec: FactorSpec) -> pd.Series:
+def process(s: pd.Series, as_of_date, universe, *, spec: FactorSpec) -> tuple[pd.Series, list[str]]:
     """1 winsorize_mad → 2 (spec.neutralize 时) neutralize → 3 zscore → 4 fillna(0)"""
 ```
 

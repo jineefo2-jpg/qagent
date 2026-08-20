@@ -1,16 +1,19 @@
-"""Task 3：因子处理链 —— MAD 去极值 → 行业+市值 WLS 中性化 → zscore → fillna(0)。
+"""Task 3：因子处理链 —— MAD 去极值 → 行业+市值 OLS 中性化 → zscore → fillna(0)。
 
 四步顺序不可调换（算法说明书 §3）。本文件的每个用例都钉住一条"为什么是这样"，
 而不只是"跑通了"：
   · MAD vs 3σ      —— 同一份数据下 3σ 截不干净
-  · WLS vs OLS     —— 大盘残差在 OLS 下系统性偏移，在 WLS 下接近 0
+  · OLS vs WLS     —— 组合是等权 top-N，相关的是【无权】正交（OLS 的恒等式 X'e = 0）；
+                      WLS 只在 sqrt(MV) 内积下正交，等权组合会因此带规模倾斜。
+                      代价（OLS 大盘残差偏移）同样钉住，不假装没有。裁决见算法说明书 §3.2
   · industry_source —— 降级的行业标签做中性化 = 前视污染，必须抛
   · 秩亏 / 样本不足 —— 返回原值 + warning，不静默返回 NaN
+  · 哑变量只用有效样本建 —— 某行业全员无效会让整个横截面失去中性化
   · fillna 在 zscore 之后 —— 提前填 0 会拉动均值、污染其他所有股票的分数
 
 中性化的数值检验用【构造的横截面】（monkeypatch query 的三个取数函数）：
-WLS 的判别需要 100 只股票的市值分层，market_db 只有 4 只。真实取数链路由
-test_neutralize_on_real_market_db 这一条覆盖（不打桩，直接读 fixture 库）。
+OLS/WLS 的判别需要 100 只股票的市值分层且因子对规模【非线性】，market_db 只有 4 只。
+真实取数链路由 test_neutralize_on_real_market_db 这一条覆盖（不打桩，直接读 fixture 库）。
 """
 from __future__ import annotations
 import datetime as dt
@@ -44,13 +47,6 @@ def _patch_cross_section(monkeypatch, mv: pd.Series, ind: pd.Series | None = Non
     monkeypatch.setattr(query, "get_industry", _industry)
     monkeypatch.setattr(query, "industry_source", lambda: source)
 
-
-def _wcorr(a: np.ndarray, b: np.ndarray, w: np.ndarray) -> float:
-    """加权相关系数。WLS 的正交性是【加权】意义下的：Σ wᵢεᵢxᵢ = 0，
-    普通相关系数对 WLS 残差本来就不为 0（见 test_neutralize_uses_wls_not_ols 的解释）。"""
-    ca, cb = a - np.average(a, weights=w), b - np.average(b, weights=w)
-    return float(np.average(ca * cb, weights=w) /
-                 np.sqrt(np.average(ca * ca, weights=w) * np.average(cb * cb, weights=w)))
 
 
 # ══════════════ 3.1 MAD 去极值 ══════════════
@@ -306,3 +302,29 @@ def test_process_surfaces_neutralize_warnings(monkeypatch):
     out, warns = pipeline.process(s, AS_OF, codes, spec=_spec())
     assert warns
     assert out.abs().sum() > 0                              # 没中性化，但仍然出了 zscore
+
+
+def test_industry_with_all_members_invalid_does_not_kill_the_whole_cross_section(monkeypatch):
+    """一个行业全员无效（因子值 NaN / 市值缺失）时，若哑变量用【全体】构造，
+    那一列在有效子集上恒为 0 → 秩亏 → 整个横截面退回未中性化的原值。
+    基准行业（drop_first 丢掉的那个）全员无效更糟：剩余哑变量在每行和为 1，与截距共线。
+    这条路走得到：get_industry 把缺失与小行业并进 __OTHER__，而 __OTHER__ 收的
+    恰是次新股之类最容易因子值缺失的名字。"""
+    n = 120
+    codes = _codes(n)
+    rng = np.random.default_rng(7)
+    mv = pd.Series(np.exp(rng.uniform(np.log(5e8), np.log(1e12), n)), index=codes)
+    # __OTHER__ 排序在 CJK 行业名之前 → 它就是 drop_first 丢掉的基准行业
+    ind = pd.Series(["__OTHER__" if i < 8 else f"行业{i % 5}" for i in range(n)], index=codes)
+    s = pd.Series(rng.normal(size=n) + 0.3 * np.log(mv.to_numpy()), index=codes)
+    s.iloc[:8] = np.nan                     # 基准行业全员无效
+    _patch_cross_section(monkeypatch, mv, ind)
+
+    resid, warns = pipeline.neutralize(s, AS_OF, codes)
+    assert warns == [], f"不该退回原值：{warns}"
+    r = resid.dropna()
+    assert len(r) == n - 8
+    assert abs(np.corrcoef(r.to_numpy(), np.log(mv.reindex(r.index).to_numpy()))[0, 1]) < 1e-10
+    for k in sorted(set(ind.iloc[8:])):     # 有效样本里的每个行业残差均值 ≈ 0
+        m = ind.reindex(r.index) == k
+        assert abs(r[m].mean()) < 1e-9

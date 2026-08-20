@@ -4,7 +4,7 @@
 
 **Goal:** 建成一个可复现、防前视/幸存者偏差的**周频横截面回测引擎**与 16 个因子的因子库，且用已知 A 股异象反测引擎正确性。
 
-**Architecture:** 因子是纯函数 `f(as_of_date, universe) -> Series`，只经 `ashare.data.query` 取数（P1 已建，L1–L6 静态守卫）。处理链固定为 MAD 去极值 → 行业+市值 WLS 中性化 → zscore → 填 0。回测按周调仓：T 日收盘算信号、T+1 开盘价成交、涨跌停/停牌不可交易。因子值预落库到 `data/ashare_derived.duckdb`，否则五闸（200 次 shuffle × 参数网格）跑不动。
+**Architecture:** 因子是纯函数 `f(as_of_date, universe) -> Series`，只经 `ashare.data.query` 取数（P1 已建，L1–L6 静态守卫）。处理链固定为 MAD 去极值 → 行业+市值 OLS 中性化 → zscore → 填 0（为什么 OLS 不是 WLS：见算法说明书 §3.2）。回测按周调仓：T 日收盘算信号、T+1 开盘价成交、涨跌停/停牌不可交易。因子值预落库到 `data/ashare_derived.duckdb`，否则五闸（200 次 shuffle × 参数网格）跑不动。
 
 **Tech Stack:** Python 3.9.6、DuckDB、pandas、numpy、statsmodels（仅 Newey-West）、pytest
 
@@ -53,7 +53,7 @@ ashare/
 ├── factors/
 │   ├── __init__.py
 │   ├── base.py          @factor 装饰器 + FactorSpec + FACTOR_REGISTRY + compute_factor/panel/combine
-│   ├── pipeline.py      winsorize_mad / neutralize(WLS) / zscore / process —— 顺序固定不可调换
+│   ├── pipeline.py      winsorize_mad / neutralize(OLS) / zscore / process —— 顺序固定不可调换
 │   ├── store.py         factor_value 预落库（唯一写 derived 库的因子模块）
 │   ├── price.py         6 个量价因子
 │   ├── fundamental.py   8 个基本面因子
@@ -73,7 +73,7 @@ ashare/
 
 tests/ashare/
 ├── test_factor_base.py      注册表 / param_hash / available_from / min_coverage 重归一
-├── test_factor_pipeline.py  MAD / WLS 中性化 / zscore / 秩亏降级 / 行业来源拒绝
+├── test_factor_pipeline.py  MAD / OLS 中性化 / zscore / 秩亏降级 / 行业来源拒绝
 ├── test_factors_price.py    6 个量价因子的数值断言（构造已知序列）
 ├── test_factors_fundamental.py  8 个基本面因子（PIT + 累计口径）
 ├── test_factor_store.py     落库/读取/快照失效
@@ -167,7 +167,7 @@ tests/ashare/
 
 ---
 
-### Task 3: 处理链 —— MAD 去极值 / WLS 中性化 / zscore
+### Task 3: 处理链 —— MAD 去极值 / OLS 中性化 / zscore
 
 **Files:** Create `ashare/factors/pipeline.py`; Create `tests/ashare/test_factor_pipeline.py`
 
