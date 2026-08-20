@@ -125,3 +125,40 @@ def test_param_hash_serializes_date_params():
     s = _spec(start=dt.date(2016, 12, 5))
     assert s.param_hash(start=dt.date(2016, 12, 5)) == s.param_hash()
     assert s.param_hash(start=dt.date(2017, 1, 1)) != s.param_hash()
+
+
+def test_direction_must_be_plus_or_minus_one():
+    """direction 只在装饰器这一个入口进入系统，而每个错值都在钱的路径上静默失败：
+    0 = 该因子对合成分数零贡献，2 = 双倍加权，符号反了 = 反向下注。都不报错，只产出假净值。"""
+    # 只列【数值上就是错】的：0 / ±2 / None / 字符串。
+    # True 与 1.0 在 Python 里 == 1，数值上就是 +1，没有腐蚀 —— 守卫不管类型洁癖，只管符号与幅度。
+    for bad in (0, 2, -2, None, "+1"):
+        with pytest.raises(ValueError, match="direction"):
+            @base.factor(name=f"bad_{bad!r}", direction=bad, category="price", lookback_days=1)
+            def _f(as_of_date, universe):
+                ...
+    assert base.FACTOR_REGISTRY == {}, "校验失败的因子不得留在注册表里"
+
+
+def test_unserializable_default_param_fails_at_registration_not_at_first_hash():
+    """不可确定性序列化的默认参数进了 param_hash 就等于主键随进程变。
+    要在【注册时】炸 —— 等到 store.build 才炸的话，traceback 里已经看不出是哪个因子模块。"""
+    with pytest.raises(TypeError, match="确定性序列化"):
+        @base.factor(name="unserializable", direction=1, category="price", lookback_days=1,
+                weird=object())
+        def _f(as_of_date, universe):
+            ...
+    assert "unserializable" not in base.FACTOR_REGISTRY
+
+
+def test_date_param_serialization_format_is_pinned():
+    """只断言"同日期同哈希、异日期异哈希"是不够的：把 isoformat 换成 str() 或 toordinal()
+    照样过，却会改掉每一个含日期参数的 param_hash，静默孤立掉对应的 factor_value 行。"""
+    @base.factor(name="dated", direction=1, category="flow", lookback_days=1,
+            start=dt.date(2016, 12, 5))
+    def _f(as_of_date, universe):
+        ...
+    expect = hashlib.sha256(
+        ("dated" + json.dumps({"start": "2016-12-05"}, sort_keys=True, separators=(",", ":")))
+        .encode("utf-8")).hexdigest()[:12]
+    assert base.FACTOR_REGISTRY["dated"].param_hash() == expect

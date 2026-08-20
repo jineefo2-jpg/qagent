@@ -347,7 +347,12 @@ tests/ashare/
   只返回 `snapshot_id == query.snapshot_id()` 的行，不等的行**当未命中**。
   不校验就会静默把另一批数据算出的因子值喂进回测 —— 这是 P2 里最容易造出"好看的假净值"的一条路（架构 B4）。
 - `build` 幂等：同 `(factor_name, param_hash, trade_date, ts_code)` 覆盖写；`overwrite=False` 时跳过
-  已有且 `snapshot_id` 相同的 (因子, 日期)。
+  已有且 `snapshot_id` 相同的 (因子, 日期)。写入用 `_derived.UPSERT_FACTOR_VALUE`（覆盖语义与
+  `snapshot_id` 更新绑在一起；发 `DO NOTHING` 会留下陈旧值配陈旧快照，read 会当成当前快照放行）。
+- **PK 命中 ≠ 缓存有效**：`param_hash` 只区分 `default_params`，`neutralize` / `direction` /
+  因子函数体都不在哈希里（函数体本来也没法哈希）。所以把 `neutralize=True→False` 改一下，
+  同一个 PK 下存的就是另一种语义的 `processed_value`。`build` 把 PK 命中当成"存在某一代"，
+  **不能**当成"这一代与当前 spec 一致"；判定有效性靠 `snapshot_id` + `overwrite`。
 - `read` 命中不到就**返回空**，不静默现算 —— 现算与落库的口径分歧是最难查的一类 bug；由调用方决定要不要 `build`。
 - store 是**唯一写 derived 库**的因子模块。
 

@@ -20,7 +20,7 @@ from typing import Any, Callable, Mapping
 def _json_default(o: Any) -> str:
     if isinstance(o, _dt.date):           # date / datetime 都有 isoformat
         return o.isoformat()
-    # 不可确定性序列化的参数进了主键，等于主键随进程变 —— 宁可注册时就炸
+    # 不可确定性序列化的参数进了主键，等于主键随进程变 —— register 会试算一次，注册时就炸
     raise TypeError(f"因子参数类型 {type(o).__name__} 无法确定性序列化，不能进 param_hash")
 
 
@@ -62,15 +62,24 @@ def factor(*, name: str, direction: int, category: str, lookback_days: int,
     多余的关键字参数全部收进 `default_params`，即因子的可调参数及其默认值。
     """
     def register(fn: Callable) -> Callable:
+        # ★ direction 只在这里进入系统，而每个错值都在【钱的路径】上静默失败：
+        #   0 让该因子对合成分数毫无贡献；2 双倍加权；符号反了就是反向下注。
+        #   三者都不报错，只产出一条看起来合理的净值曲线 —— 正是 CLAUDE.md 铁律要拦的那类。
+        #   只校验 direction：category 打错会在 list_factors 里明显缺人，min_coverage 越界会明显输出空，
+        #   唯独 direction 是"数字被悄悄改坏而外观正常"。
+        if direction not in (1, -1):
+            raise ValueError(f"因子 {name!r} 的 direction 必须是 +1 或 -1，实际 {direction!r}")
         old = FACTOR_REGISTRY.get(name)
         if old is not None:
             raise ValueError(
                 f"因子重名: {name!r} 已由 {old.fn.__module__}.{old.fn.__qualname__} 注册")
-        FACTOR_REGISTRY[name] = FactorSpec(
+        spec = FactorSpec(
             name=name, fn=fn, direction=direction, category=category,
             lookback_days=lookback_days, neutralize=neutralize,
             available_from=available_from, min_coverage=min_coverage,
             default_params=default_params)
+        spec.param_hash()   # 试算一次：不可序列化的默认参数在【注册时】炸，而不是等到 store.build
+        FACTOR_REGISTRY[name] = spec
         return fn
     return register
 
