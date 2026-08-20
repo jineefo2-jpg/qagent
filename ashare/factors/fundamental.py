@@ -16,10 +16,14 @@
   2 分子取 PIT 财报（`ann_date <= as_of`）、分母取 as_of 【当日】市值，两个时点必须一致。
     错配是双向的前视：旧财报配新市值，或新财报配旧市值，都不会抛。
 
-  3 分母 ≤ 0 一律 NaN，永不 ±inf（§10.2）。A 股有成片的亏损股与资不抵债股：
-    净资产 −50 除出来是个【有限的】负 BP，会被排到"最贵"的一端；扭亏样本的
+  3 分母【为负或接近 0】一律 NaN，永不 ±inf（§2.2 / §10.2）。A 股有成片的亏损股与
+    资不抵债股：净资产 −50 除出来是个【有限的】负 BP，会被排到"最贵"的一端；扭亏样本的
     `25 / (−5) − 1 = −6` 更是把业绩大幅改善读成大幅恶化。而 inf 连 MAD 去极值都拦不住
     （clip 到上界后成为最极端的一只），过完 zscore 就独占整个组合。
+    ★ "接近 0"与"为负"同等重要，而且更隐蔽：30/0.01 = 3000 是【有限】的，`den > 0`
+      放行、MAD 一样 clip 到上界 —— 落点与 ±inf 分毫不差。所以除了 `_ratio` 这条
+      ≤ 0 的公共闸门，roe_ttm / np_yoy / sue 各自还有一条"接近 0"判据（§2.2 的裁决表，
+      两条是无阈值的原理性判据，只有 np_yoy 那条 0.01 是判断值）。
 
   4 期数不足一律 NaN，不外推、不前向填充。sue 的 σ 尤其危险：样本越少 σ 越小、
     SUE 越大 —— 放宽期数闸门等于让数据最少的股票系统性地排在最前面。
@@ -43,6 +47,12 @@ _Q_LAST_DAY = {3: 31, 6: 30, 9: 30, 12: 31}     # 季末月 → 当月最后一�
 _NP_YOY_PERIODS = 6                             # 单季 e* 与 e*−4 各需两期累计值 → e*..e*−5
 _SUE_PERIODS = 13                               # 12 期单季（e*..e*−11）→ 累计 e*..e*−12
 _SUE_LAGS = 8                                   # §2.2 的差分集合 {k}_{k=0}^{7}
+_SUE_SIGMA_EPS = 1e-9                           # σ 相对 mean|Δ| 的【浮点判零】阈，不是调参
+# ★ 本文件唯一的【判断值】（其余两条近零判据都是无阈值的原理性判据）：分母至少要有分子
+#   的 1%，等价于给隐含增速封顶 100 倍。故意定得宽松 —— 只杀基数效应，不碰真实高增长。
+#   §2.2 把它的复核交给 §9 风格归因：若右尾仍由基数效应主导，正确的补救是改用 SUE 那种
+#   以历史波动标准化的形式，而不是把 100 倍挪成 50 倍（挪阈值治不了比值在零点的不稳定）。
+_NP_YOY_MIN_BASE = 0.01
 
 
 # ══════════════ 取数与除法的两条公共通道 ══════════════
@@ -63,7 +73,11 @@ def _mv(as_of_date: DateLike, codes: list[str]) -> pd.Series:
 
 
 def _ratio(num: pd.Series, den: pd.Series, name: str) -> pd.Series:
-    """`num / den`，但分母 ≤ 0 或缺失一律 NaN —— 这条通道是本文件对 ±inf 的唯一防线。"""
+    """`num / den`，但分母 ≤ 0 或缺失一律 NaN —— 这条通道拦的是 ±inf 与符号翻转。
+
+    ★ 它【不】负责 §2.2 的另一半"分母接近 0"：那一半没有通用判据（怎样算接近 0
+      取决于分子的量级 / 端点符号 / 是不是浮点残差），三个因子各自在调用处解决。
+    """
     return (num / den.where(den > 0)).rename(name)
 
 
@@ -107,12 +121,18 @@ def _lag(single: pd.DataFrame, e_star: pd.Series, k: int) -> pd.Series:
 
     偏移按季末日历算，不是"倒数第 k 行" —— 中间漏报一期时，按行数取会把 e*−5 当成
     e*−4，于是同比拿去年三季度的数当去年同期，静默错季。
+
+    ★ e* 本身不是季末（脏数据）→ 该股 NaN，不能让 `_q_offset` 抛 KeyError：
+      `financial_pit.end_date` 是裸 DATE 没有 CHECK，一行 end_date=10-31 就能成为某股的
+      e*，抛出去的是【整次调用】—— 同一横截面里数据完好的股票也一起拿不到值。
+      `_single_quarter` 的循环里早就有同样的 `continue`，这里补齐另一半。
     """
     col = {c: i for i, c in enumerate(single.columns)}
     mat = single.to_numpy(dtype=float)
     out = []
     for row, end in enumerate(e_star):
-        j = col.get(_q_offset(end, k)) if isinstance(end, _dt.date) else None
+        ok = isinstance(end, _dt.date) and end.month in _Q_LAST_DAY
+        j = col.get(_q_offset(end, k)) if ok else None
         out.append(mat[row, j] if j is not None else np.nan)
     return pd.Series(out, index=single.index, dtype=float)
 
@@ -148,15 +168,24 @@ def sp_ttm(as_of_date: DateLike, universe: Sequence[str]) -> pd.Series:
 # ══════════════ 4–6 盈利能力 / 质量 ══════════════
 @factor(name="roe_ttm", direction=1, category="fundamental", lookback_days=1)
 def roe_ttm(as_of_date: DateLike, universe: Sequence[str]) -> pd.Series:
-    """`TTM(归母净利) / ½(E_{e*} + E_{e*−4})`。
+    """`TTM(归母净利) / ½(E_{e*} + E_{e*−4})`，且要求【两个端点】净资产都 > 0。
 
     分母的期初期末平均【不用自己算】：`get_financial_ttm` 对存量科目返回的就是
-    (最新 + 上年同期)/2，与 §2.2 的定义逐字一致。资不抵债（均值 ≤ 0）→ NaN。
+    (最新 + 上年同期)/2，与 §2.2 的定义逐字一致。
+
+    ★ 只查平均值 > 0 不够（§2.2 裁决）：E_{e*}=−999.98 配 E_{e*−4}=1000 的平均值是
+      0.01，闸门放行后 ROE = 10000 —— 一个【有限】的数，MAD 去极值把它 clip 到上界，
+      落点与 ±inf 相同。一大负一大正相抵出来的近零分母描述的是一家正滑向资不抵债的
+      公司，根本不是可用的分母。查两个端点的符号是【原理性】判据，不需要任何阈值。
+      E_{e*} 走 `_pit`（同一套 PIT 可见集，e* 与 TTM 那边一致），上年同期由
+      `2·平均 − E_{e*}` 反解 —— 只为看符号，不必再查一次库。
     """
     codes = list(universe)
+    eq_end = _pit(as_of_date, codes, "total_hldr_eqy_exc_min_int")
+    eq_avg = query.get_financial_ttm(as_of_date, codes, "total_hldr_eqy_exc_min_int")
+    both_positive = (eq_end > 0) & (2.0 * eq_avg - eq_end > 0)
     return _ratio(query.get_financial_ttm(as_of_date, codes, "n_income_attr_p"),
-                  query.get_financial_ttm(as_of_date, codes, "total_hldr_eqy_exc_min_int"),
-                  "roe_ttm")
+                  eq_avg.where(both_positive), "roe_ttm")
 
 
 @factor(name="gross_margin", direction=1, category="fundamental", lookback_days=1)
@@ -193,11 +222,20 @@ def np_yoy(as_of_date: DateLike, universe: Sequence[str]) -> pd.Series:
 
     分母 ≤ 0 → NaN：扭亏样本（去年同期亏损）算出来的比值符号是反的，
     `25 / (−5) − 1 = −6` 会把一个业绩大幅改善的样本打成最差分（§10.2）。
+
+    ★ 分母【接近 0】同样置 NaN，判据是相对下限 `base > 0.01 · |分子|`（§2.2）：
+      0.01 的基数配 30 的单季利润给出 2999，这是个【有限】值，`base > 0` 放行、
+      MAD 去极值 clip 到上界 —— 与 ±inf 落到同一个位置，而 direction=+1 让它成为
+      等权 top-N 的头号买入。A 股有大量微利/保壳公司把利润做到近零，它们次年的
+      "增速"是上一年盈余管理的产物，不是经营改善。
+      用相对下限而不是绝对下限：全市场净利跨 4 个数量级，对茅台不算钱的门槛
+      对小盘股是全部身家。`base > 0.01·|num|` 一条式子同时管住了负分母
+      （右端非负，负 base 必然落选）与近零分母。
     """
     codes = list(universe)
     single, e_star = _single_quarter(as_of_date, codes, "n_income_attr_p", _NP_YOY_PERIODS)
-    base = _lag(single, e_star, 4)
-    return (_lag(single, e_star, 0) / base.where(base > 0) - 1.0).rename("np_yoy")
+    num, base = _lag(single, e_star, 0), _lag(single, e_star, 4)
+    return (num / base.where(base > _NP_YOY_MIN_BASE * num.abs()) - 1.0).rename("np_yoy")
 
 
 @factor(name="sue", direction=1, category="fundamental", lookback_days=1)
@@ -209,11 +247,15 @@ def sue(as_of_date: DateLike, universe: Sequence[str]) -> pd.Series:
       SUE 就不再是"以自身波动为单位的盈余惊喜"，而是一个量纲混杂的数。
     ★ 8 个差分缺一不可（= 12 期单季齐全）。放宽成"有几期算几期"会让 σ 变小、SUE 变大，
       数据最少的次新股因此系统性地排在最前面。
-    ★ σ = 0（盈利完全线性增长）→ NaN，不是 ±inf。
+    ★ σ ≈ 0（盈利完全线性增长）→ NaN，不是 ±inf。闸门挂在【差分自身的量级】上
+      （σ > 1e-9 · mean|Δ|），不是 σ > 0：8 个差分完全相同时 σ 数学上就是 0，但在
+      1e9 的量级上浮点残差会给出 3.6e-7，绝对闸门放行后 SUE 算出 1e15 —— 一个有限的、
+      过得了 MAD 去极值的天文数字。相对判据纯粹在回答"这个 σ 实际上是不是零"，
+      是浮点判零，不是可调的参数（§2.2）。
     """
     codes = list(universe)
     single, e_star = _single_quarter(as_of_date, codes, "n_income_attr_p", _SUE_PERIODS)
     diff = pd.concat([_lag(single, e_star, k) - _lag(single, e_star, k + 4)
                       for k in range(_SUE_LAGS)], axis=1)
     sd = diff.std(axis=1, ddof=1).where(diff.notna().all(axis=1))
-    return (diff.iloc[:, 0] / sd.where(sd > 0)).rename("sue")
+    return (diff.iloc[:, 0] / sd.where(sd > _SUE_SIGMA_EPS * diff.abs().mean(axis=1))).rename("sue")

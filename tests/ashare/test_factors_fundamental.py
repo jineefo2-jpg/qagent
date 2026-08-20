@@ -10,6 +10,9 @@ n_periods>1 时是 MultiIndex (ts_code, end_date) 且 end_date 倒序、`drop=Fa
   · 跨年不重置 —— Q1 单季写成「Q1 累计 − 上年年报累计」，得到巨额负数（§10.1）
   · 累计当单季 —— np_yoy 直接对累计值做同比，Q2–Q4 得到一个【看起来很合理】的错数
   · 分母不设限 —— 扭亏样本的负分母给出 ±inf，zscore 之后独占整个组合（§10.2）
+  · 分母只挡 ≤0 不挡【接近 0】—— 2999 / 10000 / 1.4e15 都是【有限】值，MAD 去极值把它们
+    clip 到与 ±inf 完全相同的位置，direction=+1 下成为等权 top-N 的头号买入（§2.2 裁决表）
+  · e* 取全池最大值而不是每股一个 —— 横截面看起来照样是满的，只是错了季
   · 期数不足硬算 —— sue 拿 5 期数据算 8 个差分的 σ
   · 分子分母时点错配 —— PIT 分子配上另一天的市值
   · 口径混用 —— accrual 的分子用归母净利（分母却是全部资产）、分母用期初期末平均（§2.2 下标是 e*）
@@ -68,9 +71,20 @@ def _extend_calendar(w) -> None:
 # C00003.SH —— 只有一期披露：np_yoy / sue 必须 NaN，不得外推
 # D00004.SZ —— 8 个同比差分完全相等 → σ=0，sue 必须 NaN 而不是 inf
 # E00005.SZ —— 与 A 逐期同值但缺 2021Q1 → 只有 11 期单季（sue 的期数闸门靶子）
+# F00006.SZ —— FY2023 仍未公告（e* 停在 2023Q3）：与 A 同池时两只股的 e* 不同
+# G00007.SZ —— end_date 不是季末的脏行（`financial_pit.end_date` 没有 CHECK）
+# H00008.SZ —— np_yoy 的近零分母（0.01 对 30）
+# I00009.SZ —— roe_ttm 的近零分母：净资产一大负一大正相抵，平均 0.01
+# J00010.SZ —— sue 的浮点残差 σ：8 个差额数学上全等，量级 1e9
 _A_NI_CUM = {2020: (5, 10, 15, 20), 2021: (10, 20, 30, 40),
              2022: (20, 40, 60, 80), 2023: (31, 61, 91, 121)}
 _D_NI_CUM = {2021: (10, 20, 30, 40), 2022: (20, 40, 60, 80), 2023: (30, 60, 90, 120)}
+_F_NI_CUM = {2022: (3, 6, 12, 20), 2023: (7, 15, 27, 40)}      # 2023Q3 单季 12，去年同期 6
+# J：每季单季值【恒为】同一个数，8 个同比差额数学上完全相等 → σ 应为 0。写成
+# k·s 的字面量（3.7e9+0.1 这类非二进制小数）之后，减法的浮点残差把 σ 抬到 3.6e-7，
+# 于是 σ > 0 的绝对闸门放行、SUE 算出 1.4e15 —— 正是 §2.2 说的那个"浮点判零"场景。
+_J_SINGLE = {2021: 3.7e9 + 0.1, 2022: 4.2e9 + 0.1, 2023: 4.7e9 + 0.1}
+_J_NI_CUM = {y: tuple(k * s for k in (1, 2, 3, 4)) for y, s in _J_SINGLE.items()}
 _Q_END = ((3, 31), (6, 30), (9, 30), (12, 31))
 _ANN = ((4, 28), (8, 25), (10, 27), (3, 30))          # Q1/H1/Q3 当年公告；年报次年 3-30
 
@@ -93,9 +107,13 @@ def _fixture_rows() -> list[tuple]:
     rows = _quarterly_rows("A00001.SZ", _A_NI_CUM)
     rows += _quarterly_rows("D00004.SZ", _D_NI_CUM)
     rows += [r for r in _quarterly_rows("E00005.SZ", _A_NI_CUM) if r[2] != D(2021, 3, 31)]
+    rows += _quarterly_rows("J00010.SZ", _J_NI_CUM)
     # 年报默认次年 3-30 公告，那样 as_of=2024-01-25 时 e* 会停在三季报；这里统一提前到
     # 01-20，好让 AS_OF 的 e* 确定地落在 FY2023 上（否则用例会"因为别的原因"通过）。
     rows = [r if r[2] != D(2023, 12, 31) else (r[0], _FY23_ANN) + r[2:] for r in rows]
+    # ★ F 必须加在 remap【之后】：它的 FY2023 保持默认的次年 3-30 公告，AS_OF 当天不可见，
+    #   e* 因此停在 2023Q3 —— 与 e* 落在 FY2023 的 A 同池，才测得到「每股各用自己的 e*」。
+    rows += _quarterly_rows("F00006.SZ", _F_NI_CUM)
     # A 的 FY2022 / FY2023 补上存量与现金流科目（估值 / 质量类因子要用）
     by_end = {(r[0], r[2]): i for i, r in enumerate(rows)}
     for end, ta, eq, ni, cfo, gm in ((D(2022, 12, 31), 1600.0, 800.0, 85.0, 60.0, 40.0),
@@ -121,6 +139,20 @@ def _fixture_rows() -> list[tuple]:
         # C：只有一期
         _fin("C00003.SH", D(2023, 3, 30), D(2022, 12, 31), ni_attr=7.0, rev=70.0,
              eq=100.0, ta=200.0, ni=7.0, cfo=6.0, gm=33.0),
+        # G：end_date=2023-10-31 —— 不是季末。schema 里 end_date 是裸 DATE，没有 CHECK；
+        #    merge_financial_frames 只丢 NULL，这种行进得来，且会成为该股的 e*。
+        _fin("G00007.SZ", D(2023, 11, 15), D(2023, 10, 31), ni_attr=8.0),
+        # H：单季 30 对去年同期 0.01 → 不设相对下限时 np_yoy = 2999（隐含增速 3000 倍）
+        _fin("H00008.SZ", D(2022, 10, 27), D(2022, 9, 30), ni_attr=100.0),
+        _fin("H00008.SZ", D(2023, 3, 30), D(2022, 12, 31), ni_attr=100.01),
+        _fin("H00008.SZ", D(2023, 10, 27), D(2023, 9, 30), ni_attr=200.0),
+        _fin("H00008.SZ", _FY23_ANN, D(2023, 12, 31), ni_attr=230.0),
+        # I：净资产 1000 → −999.98，平均 0.01。只看平均值的闸门放行，roe = 100/0.01 = 10000
+        #    另兼 accrual 的分母陷阱 ta=0（自 roe 自带端点闸门后，`_ratio` 那条 ≤0 公共闸门
+        #    在池子里就没有别的靶子了）：(100−40)/0 不设闸就是 inf。
+        _fin("I00009.SZ", D(2023, 3, 30), D(2022, 12, 31), ni_attr=80.0, eq=1000.0),
+        _fin("I00009.SZ", _FY23_ANN, D(2023, 12, 31), ni_attr=100.0, eq=-999.98,
+             ni=100.0, cfo=40.0, ta=0.0),
     ]
     return rows
 
@@ -204,6 +236,43 @@ def test_np_yoy_negative_base_is_nan_not_a_finite_ratio(fin_db):
     assert np.isnan(got), f"负分母产出了有限值 {got}"
 
 
+def test_np_yoy_near_zero_base_is_nan_not_a_three_thousand_fold_growth(fin_db):
+    """H 的去年同期单季 = 100.01 − 100 = 0.01，本期 30 → 30/0.01 − 1 = 2999。
+
+    ★ 这是个【有限】值，`den > 0` 放行、MAD 去极值把它 clip 到上界 —— 落点与 ±inf
+      完全相同，正是模块 docstring 说要防的地方；direction=+1 还会让它成为等权 top-N
+      的头号买入。§2.2 的相对下限 |base| > 0.01·|分子|（隐含增速上限 100 倍）拦的就是它。
+    """
+    out = ff.np_yoy(AS_OF, ["H00008.SZ", "A00001.SZ"])
+    assert np.isnan(out["H00008.SZ"]), f"近零分母产出了 {out['H00008.SZ']}"
+    assert out["A00001.SZ"] == pytest.approx(30 / 20 - 1, rel=1e-12), "同池的正常股被连坐"
+
+
+def test_two_stocks_with_different_e_star_each_use_their_own_quarter(fin_db):
+    """★ e* 是【每股一个】：AS_OF 当天 A 的 FY2023 已公告（e*=2023Q4，单季同比 30/20），
+    F 的 FY2023 还没（e*=2023Q3，单季同比 12/6）。
+
+    取全池的 max(e*) 当作一个全局 e* 既不报错也不缺行：cum 是整池的宽表，只要
+    【有股票】披露了 2023Q4 这一列就在，F 在该列上是 NaN，横截面看起来照样是满的。
+    必须让两只股票在【同一次调用】里各自拿到自己的非 NaN 值，这条才钉得住。
+    """
+    out = ff.np_yoy(AS_OF, ["A00001.SZ", "F00006.SZ"])
+    assert out["A00001.SZ"] == pytest.approx(30 / 20 - 1, rel=1e-12)
+    assert out["F00006.SZ"] == pytest.approx(12 / 6 - 1, rel=1e-12), "F 用了 A 的 e*"
+
+
+def test_single_quarter_refuses_to_difference_across_a_missing_period(fin_db):
+    """E 缺 2021Q1 → 2021Q2 的单季值拼不出来（少了上一期累计），必须 NaN。
+
+    ★ 必须用【单只股票】的票池：cum 是整池的宽表，只要池里还有别的股票披露了 2021Q1，
+      那一列就在，「按季末日历取上一期」与「按上一个列位置取」两种实现给出同一个答案 ——
+      本文件其余用例里的每一个缺口都被 A00001 这样掩盖着。E 独自成池时 2021-03-31 这一列
+      根本不存在，按位置取会落到 2020-12-31 上，把「2021H1 − 2020 年报」当成 2021Q2 的单季。
+    """
+    got = ff.np_yoy("2021-09-01", ["E00005.SZ"])["E00005.SZ"]
+    assert np.isnan(got), f"跨过缺失期做了差分，得到 {got}"
+
+
 def test_np_yoy_needs_both_periods_and_never_extrapolates(fin_db):
     """C 只有一期披露：e* 的单季值都拼不出来（缺上一期累计），更没有去年同期。"""
     assert np.isnan(ff.np_yoy(AS_OF, ["C00003.SH"])["C00003.SH"])
@@ -280,8 +349,35 @@ def test_eleven_period_stock_still_gets_np_yoy(fin_db):
     assert ff.np_yoy(AS_OF, ["E00005.SZ"])["E00005.SZ"] == pytest.approx(30 / 20 - 1, rel=1e-12)
 
 
+def test_sue_float_residue_sigma_is_nan_not_a_giant_finite_number(fin_db):
+    """J 每季的单季值恒定 → 8 个差额【数学上】完全相等，σ 应为 0；但量级在 1e9，
+    减法的浮点残差把 σ 抬到 3.6e-7 —— 绝对闸门 `σ > 0` 放行，SUE 算出 1.4e15。
+
+    §2.2 的判据因此挂在差额【自身的量级】上（σ > 1e-9·mean|Δ|）：这不是调参，
+    是在回答"这个 σ 实际上是不是零"。
+    """
+    out = ff.sue(AS_OF, ["J00010.SZ", "A00001.SZ"])
+    assert np.isnan(out["J00010.SZ"]), f"浮点残差 σ 产出了 {out['J00010.SZ']:.3e}"
+    assert out["A00001.SZ"] == pytest.approx(_SUE_A, rel=1e-12), "同池的正常股被连坐"
+
+
 def test_sue_is_nan_for_a_stock_with_one_report(fin_db):
     assert np.isnan(ff.sue(AS_OF, ["C00003.SH"])["C00003.SH"])
+
+
+# ══════════════ 2b 脏 end_date：只该毒到那一只股票 ══════════════
+@pytest.mark.parametrize("name,expect", [("np_yoy", 30 / 20 - 1), ("sue", _SUE_A)])
+def test_a_dirty_end_date_nans_only_that_stock(fin_db, name, expect):
+    """G 的 e* 是 2023-10-31（不是季末）。按季末日历往前推 k 期要查 `_Q_LAST_DAY[10]` ——
+    抛 KeyError，而且抛掉的是【整次调用】：同池里一只数据完好的股票也什么都拿不到。
+
+    ★ 这种行是真进得来的：schema 里 `financial_pit.end_date` 是裸 DATE，没有 CHECK，
+      merge_financial_frames 只丢 NULL。`_single_quarter` 的循环里早就为此设了 `continue`，
+      等于已经承认这种行存在 —— 只有 e* 那条路上漏了一道。
+    """
+    out = getattr(ff, name)(AS_OF, ["G00007.SZ", "A00001.SZ"])
+    assert np.isnan(out["G00007.SZ"]), f"脏 e* 产出了 {out['G00007.SZ']}"
+    assert out["A00001.SZ"] == pytest.approx(expect, rel=1e-12), "脏数据把同池的干净股票也带崩了"
 
 
 # ══════════════ 3 估值三兄弟：分子 PIT 财报 / 分母 as_of 市值 ══════════════
@@ -340,6 +436,18 @@ def test_roe_ttm_negative_average_equity_is_nan(fin_db):
     assert np.isnan(ff.roe_ttm(AS_OF, ["B00002.SZ"])["B00002.SZ"])
 
 
+def test_roe_ttm_needs_both_equity_endpoints_positive_not_just_the_average(fin_db):
+    """I 的净资产 1000 → −999.98，平均 0.01 > 0：只看平均值的闸门会放行 100/0.01 = 10000。
+
+    §2.2：要求【两个端点】都 > 0。这条是原理性的、不带阈值 —— 一大负一大正相抵出来的
+    近零分母描述的是一家正滑向资不抵债的公司，不是一个可用的分母。查端点符号直接
+    杀掉这一类，不需要"多接近算接近 0"这种判断。
+    """
+    out = ff.roe_ttm(AS_OF, ["I00009.SZ", "A00001.SZ"])
+    assert np.isnan(out["I00009.SZ"]), f"一负一正的净资产均值产出了 {out['I00009.SZ']}"
+    assert out["A00001.SZ"] == pytest.approx(121 / 900, rel=1e-12), "两端点都为正的股票被连坐"
+
+
 def test_accrual_closed_form_and_direction_of_the_ratio(fin_db):
     """(TTM(净利 130) − TTM(经营现金流 90)) / 期末总资产 2000 = 0.02。"""
     assert ff.accrual(AS_OF, ["A00001.SZ"])["A00001.SZ"] == pytest.approx(40 / 2000, rel=1e-12)
@@ -370,10 +478,13 @@ def test_gross_margin_ignores_the_restated_row(fin_db):
 # ══════════════ 5 交叉校验：ep_ttm ↔ 1/pe_ttm（两条独立取数路径）══════════════
 def test_ep_ttm_correlates_with_the_vendor_pe_ttm(fin_db):
     """X01..X12 的 e* 落在 2023Q3，ep_ttm 必须真的走「Q3累计 + 上年年报 − 上年同期累计」；
-    daily_basic.pe_ttm 是供应商自算的（这里带 ±3% 抖动）。两条路径的相关性 > 0.95。
+    daily_basic.pe_ttm 带 ±3% 抖动，断言相关性 > 0.95。
 
-    这条测的是【两个数据源互证】，不是我们的算术自证：TTM 拼接、字段选取、分母口径
-    任一错位都会让相关性塌掉，而它们各自都不会抛异常。
+    ★ 在 CI 里这【不是】两个数据源互证，是自证：fixture 的 pe_ttm 正是拿 `_x_ttm(i)`
+      反推出来的，而 `_x_ttm` 就是下一条闭式用例在 rtol=1e-12 上钉着的同一个手算值 ——
+      本条除非那条更紧的先红，否则不可能红。留着它是因为它钉住的是【形状】：
+      两条路径都要对得上 index、对得上量纲、都不许出 NaN。
+      真正的两源互证是下面 `@real_db` 的同名用例（跑全 A 横截面，当前 skip）。
     """
     ep = ff.ep_ttm(_X_ASOF, _X_CODES)
     inv_pe = 1.0 / query.get_daily_basic(_X_ASOF, _X_CODES, fields=("pe_ttm",))["pe_ttm"].reindex(_X_CODES)
@@ -389,7 +500,7 @@ def test_ep_ttm_ttm_assembly_matches_the_hand_computed_value(fin_db):
 
 
 # ══════════════ 6 分子分母时点一致（打桩探针）══════════════
-@pytest.mark.parametrize("name", ["ep_ttm", "bp", "sp_ttm", "accrual", "gross_margin"])
+@pytest.mark.parametrize("name", ["ep_ttm", "bp", "sp_ttm", "accrual", "gross_margin", "roe_ttm"])
 def test_numerator_and_denominator_share_the_same_as_of_date(monkeypatch, name):
     """"分子取 PIT 财报、分母取 as_of 当日市值，两者时点必须一致"（规格 §2.2）。
     错配是【反方向】的前视：拿旧财报配新市值，或反过来 —— 都不会报错。"""
@@ -471,9 +582,10 @@ def test_empty_universe_returns_an_empty_series(fin_db, name):
 
 @pytest.mark.parametrize("name", _ALL)
 def test_no_factor_ever_returns_an_infinity(fin_db, name):
-    """全池扫一遍：±inf 一个都不许有（B 有负净资产、D 有零离散度，两个陷阱都在池里）。
-    inf 活过 MAD 去极值（clip 到上界）也活过 zscore，最后独占整个组合。"""
-    out = getattr(ff, name)(AS_OF, ["A00001.SZ", "B00002.SZ", "C00003.SH", "D00004.SZ"])
+    """全池扫一遍：±inf 一个都不许有（B 负净资产、D 零离散度、G 脏 e*、H/I/J 三个近零分母，
+    陷阱全在池里）。inf 活过 MAD 去极值（clip 到上界）也活过 zscore，最后独占整个组合。"""
+    out = getattr(ff, name)(AS_OF, ["A00001.SZ", "B00002.SZ", "C00003.SH", "D00004.SZ",
+                                    "G00007.SZ", "H00008.SZ", "I00009.SZ", "J00010.SZ"])
     assert not np.isinf(out.to_numpy(dtype=float)).any(), f"{name} 产出了 inf: {out.to_dict()}"
 
 
