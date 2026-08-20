@@ -432,7 +432,7 @@ tests/ashare/
 **Interfaces**
 - Produces：`build_targets(scores: pd.Series, target_position: float, prev_weights: pd.Series, industry: pd.Series, constraints: PortfolioConstraints) -> pd.Series`
 
-**决策（规格 §6.2，U1：先等权不上 LP）**
+**决策（算法说明书 §7.2 —— 计划初稿误引「§6.2」，那是设计规格的编号；U1：先等权不上 LP）**
 ```
 1. 按 scores 降序取前 top_n
 2. 初始权重 = target_position / top_n
@@ -539,6 +539,22 @@ tests/ashare/
 > `(param_hash, data_snapshot_id)` 是**实验的身份**；`engine_version` 是**跑它的代码的身份**。
 > 后者记在 `docs/oos-runs.md` 的同一行里做溯源，永远不进指纹。
 > 引擎改了还想再跑样本外，就是第二次样本外 —— 该被闸挡下来，由人显式承认。
+
+> **★ 2026-08-20 追加（Task 10 转来，三条都会静默出错）：**
+>
+> **① `prev_weights` 每期必须从持仓重算，不能把上期 `build_targets` 的返回值喂回去。**
+> 换手是**实际要交易的量**，而账本在两次调仓之间随价格漂移。
+> 每期算 `prev_w = 上期持仓 × T 日收盘后复权价 / 净值`。
+> 把上期目标喂回去是最自然、也是错的那个写法 —— 它假装账本一直停在目标上。
+>
+> **② `scores` 必须以【完整股票池】为索引、缺失处填 NaN。**
+> `build_targets` 用覆盖率闸区分「数据中断」与「正常稀疏」，
+> 调用方若先 `dropna()` 再传进来，覆盖率恒为 100%，闸就瞎了。
+>
+> **③ `build_targets` 返回 `(Series, list[str])`，不是 `Series`。**
+> 沿用 `pipeline.process` 已有的约定。调用处写成 `targets, warns = ...`，
+> warnings 必须汇进 `BacktestResult.warnings` ——
+> **静默放宽换手、静默留现金、静默冻结账本，正是这三件事必须被看见。**
 
 ### Task 13: 引擎 engine.run_backtest
 
