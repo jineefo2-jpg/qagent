@@ -102,7 +102,8 @@ tests/ashare/
 
 ### Task 1: derived 库 schema + 连接
 
-**Files:** Create `ashare/data/_derived.py`, `ashare/data/derived_schema.sql`; Create `tests/ashare/test_derived_schema.py`; Modify `.gitignore`
+**Files:** Create `ashare/data/_derived.py`, `ashare/data/derived_schema.sql`; Create `tests/ashare/test_derived_schema.py`
+（`.gitignore` 无需改动：P1 的 `/data/` 与 `data/ashare_derived.duckdb*` 已覆盖，加个断言钉住即可）
 
 **Interfaces**
 - Produces：`_derived.connect_write(path=None)` / `connect_read(path=None)` / `init_schema(conn)` / `DEFAULT_DERIVED_PATH`
@@ -117,13 +118,18 @@ tests/ashare/
                started_at TIMESTAMP, elapsed_sec DOUBLE, config_json VARCHAR,
                metrics_json VARCHAR, is_oos BOOLEAN)
   ```
-- `snapshot_id` 变化 → 该快照下的因子值视为失效，**加新行不删旧行**（同一 param_hash 可有多个 snapshot 的值）。
+- **`snapshot_id` 是列不是主键的一部分**：重算即覆盖，`snapshot_id` 列记录"这行是哪批数据算出来的"。
+  理由：`factor_value` 是**缓存**，真相来源是 market 库。缓存要的是有效性键不是世代历史；
+  含进主键会让表随每次 promote 成倍膨胀（16 因子 × 780 周 × 5000 股 已经 6200 万行）。
+  D7 的可复现性由「恢复 `.bak.<snapshot_id>` 备份 + 重算因子」保证，不靠缓存留档。
+  **代价（Task 8 必须承接）**：`read()` 必须校验行上的 `snapshot_id` 等于当前 `query.snapshot_id()`，
+  不等就当未命中 —— 否则会静默把另一批数据算出的因子值喂进回测。
 - 与 market 库分文件：market 由 promote 原子替换，derived 不能跟着被换掉。
 
 **验收断言**
 - 建表幂等；`factor_value` 主键不含 snapshot_id（同因子同参同日同股在不同快照下**覆盖**，靠 `snapshot_id` 列记录来源）
 - 只读连接上 DML 抛 `duckdb.InvalidInputException`
-- `.gitignore` 覆盖 `data/ashare_derived.duckdb*`
+- `data/ashare_derived.duckdb` 被 `.gitignore` 覆盖（断言 `git check-ignore` 命中，防止有人日后放开 `/data/`）
 
 ---
 
@@ -329,7 +335,9 @@ tests/ashare/
   ```
 
 **决策**
-- 缓存 key 必须含 `param_hash` **和** `snapshot_id`：否则会用旧数据算出的因子跑新回测（架构 B4）。
+- **`read` 必须按 `snapshot_id` 校验命中**（Task 1 把 snapshot_id 定为列而非主键的直接代价）：
+  只返回 `snapshot_id == query.snapshot_id()` 的行，不等的行**当未命中**。
+  不校验就会静默把另一批数据算出的因子值喂进回测 —— 这是 P2 里最容易造出"好看的假净值"的一条路（架构 B4）。
 - `build` 幂等：同 `(factor_name, param_hash, trade_date, ts_code)` 覆盖写；`overwrite=False` 时跳过
   已有且 `snapshot_id` 相同的 (因子, 日期)。
 - `read` 命中不到就**返回空**，不静默现算 —— 现算与落库的口径分歧是最难查的一类 bug；由调用方决定要不要 `build`。
@@ -339,6 +347,8 @@ tests/ashare/
 - `build` 两次 → 行数不翻倍；第二次返回 0（跳过）
 - `snapshot_id` 变化后再 `build` → 该日该因子的行被覆盖且 `snapshot_id` 列更新
 - `read` 未命中返回空 DataFrame（带正确列名），不现算
+- **`snapshot_id` 不匹配 = 未命中**：写入一批因子值，改动 market 库让 `snapshot_id` 变化，
+  断言 `read` 返回空而不是返回陈旧值（这条不通过 = 回测会拿错数据的因子）
 - `coverage_report` 给出每因子的 `first_date/last_date/n_dates/mean_coverage`
 
 ---
