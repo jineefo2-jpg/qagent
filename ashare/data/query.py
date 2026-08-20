@@ -414,6 +414,18 @@ def get_industry(as_of_date: DateLike,
     return s
 
 
+def industry_source() -> str | None:
+    """`_meta.industry_source`：`'sw'` = 真实申万成分历史；其余（如 `'tushare_static'`）
+    = 今天的行业回填到上市日（P1 在申万成分接口无权限时的降级）。无记录返回 None。
+
+    ★ 行业中性化前【必须】查这个：在降级标签上做行业中性化就是把今天的行业分类
+      用到了历史横截面上，属于前视污染。建库时的 `--allow-static-industry` 只放行建库，
+      不放行中性化 —— 所以这里返回原始值，由调用方（factors/pipeline.py）拒绝。
+    无位置参数，不是取数函数，L2 首参规则不适用。"""
+    r = _conn().execute("SELECT value FROM _meta WHERE key='industry_source'").fetchone()
+    return r[0] if r else None
+
+
 # ══════════════ 行情（D8：对外只给后复权；原始价不出 query 层）══════════════
 _BAR_FIELDS = ("open", "high", "low", "close", "pre_close", "vol", "amount")
 _PRICE_FIELDS = ("open", "high", "low", "close", "pre_close")

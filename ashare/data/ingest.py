@@ -566,7 +566,9 @@ def ingest_industry_member(conn, src) -> int:
     ★ 降级会把【今天的行业】回填到每只股票的上市日 —— 对所有行业中性化因子构成前视污染。
       所以：库里已经有 source='sw' 的真实历史时，拒绝降级（宁可整轮 ingest 失败也不能把历史换成假的）。
       首次就无权限 → 允许降级，但 validate.check_industry_source 是阻断项，操作员必须显式承认。
-    ★ 注意 industry_source 目前【只被 validate 读取】，query 层不读；不要在别处声称它有更多保护作用。"""
+    ★ 读者只有两处：validate.check_industry_source（建库阻断项，可被 --allow-static-industry 承认）
+      与 query.industry_source()（factors/pipeline.neutralize 在做行业中性化前查，非 'sw' 直接抛，
+      不接受承认）。不要在别处声称它有更多保护作用。"""
     job = "industry_member:all"
     set_job(conn, job, "industry_member", "all", "RUNNING")
     try:
