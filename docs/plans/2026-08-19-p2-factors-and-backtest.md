@@ -308,6 +308,13 @@ tests/ashare/
 
 ---
 
+> **★ 2026-08-20 追加（Task 4 评审转来）：`compute_factor` 是校验 universe 的唯一入口。**
+> 现在 6 个量价因子对「universe 含重复代码」的行为不一致：2 个在 `unstack` 处抛
+> `ValueError`，4 个静默返回带重复索引的 Series，而 `pipeline.process` 的横截面回归
+> 会把重复项当两只股票加权两次。`get_universe` 返回 sorted unique 所以现在不可达，
+> 但守卫要放在这里 —— **一处覆盖 18 个因子**，而不是在每个因子里各写一遍。
+> 同时校验：非空、无 NaN 代码、类型为 str。
+
 ### Task 7: compute_factor / compute_panel / combine
 
 **Files:** Modify `ashare/factors/base.py`; Modify `tests/ashare/test_factor_base.py`
@@ -461,6 +468,14 @@ tests/ashare/
 - **成交价断言**：`trades.price_hfq == mask.open_hfq`，且不等于当日 `close_hfq`（钉住"不是收盘价成交"）
 
 ---
+
+> **★ 2026-08-20 追加（Task 4 评审转来）：用真实数据重定 `volatility_60` 的 `min_coverage`。**
+> 评审做了 2000 路径蒙特卡洛：停牌日经 ffill 后，vol 估计量**无偏但方差爆炸** ——
+> 在共享的 0.60 闸边界上，p5/p95 = 0.757/1.385，即一只股票的 60 日波动率在真值的
+> −24% 到 +39% 之间掷硬币。噪声会通过 errors-in-variables 把 IC 衰减向零。
+> **本期不动阈值**：只用合成蒙特卡洛就调参数，正是本项目的五道闸要防的无根据调参。
+> 这里要做的是：量出收紧 `min_coverage` 到 0.70 / 0.80 各自的 IC 与覆盖率代价，
+> 再决定。（评审也确认了不该改估计量本身：掩码掉补出来的收益会留下跨多日的那一个，更糟。）
 
 ### Task 12: 成本 cost.charge + 指标 metrics.compute
 
