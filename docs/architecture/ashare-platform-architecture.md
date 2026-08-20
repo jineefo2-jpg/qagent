@@ -491,9 +491,12 @@ def combine(weights: Mapping[str, float], as_of_date, universe: list[str]) -> pd
 # ashare/factors/pipeline.py —— 顺序固定，不可调换（规格 §5.2）
 def winsorize_mad(s: pd.Series, n: float = 3.0) -> pd.Series: ...
 def neutralize(s: pd.Series, as_of_date, universe, *,
-               by: tuple[str, ...] = ("log_mv", "industry")) -> pd.Series:
-    """横截面 OLS 取残差。行业 dummy 来自 get_industry（已并小行业）。
-    有效样本 < 30 或设计矩阵秩亏 → 返回原 Series 并在 warnings 里记一条，不静默返回 NaN。"""
+               by: tuple[str, ...] = ("log_mv", "industry")) -> tuple[pd.Series, list[str]]:
+    """横截面 OLS 取残差（为什么不是 Barra 的 WLS：见算法说明书 §3.2 的裁决 ——
+    组合是等权 top-N，相关的是【无权】正交，那是 OLS 的恒等式）。
+    行业 dummy 来自 get_industry（已并小行业）；industry_source != 'sw' 直接抛（回填行业 = 前视）。
+    有效样本 < 30 或设计矩阵秩亏 → 返回原 Series + warning，不静默返回 NaN。
+    返回 (残差, warnings)：warnings 上浮到 BacktestResult.warnings，降级的那一天在运行记录里看得见。"""
 def zscore(s: pd.Series) -> pd.Series: ...
 def process(s: pd.Series, as_of_date, universe, *, spec: FactorSpec) -> pd.Series:
     """1 winsorize_mad → 2 (spec.neutralize 时) neutralize → 3 zscore → 4 fillna(0)"""

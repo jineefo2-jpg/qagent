@@ -134,23 +134,30 @@ def test_neutralized_residual_carries_no_size_or_industry_exposure(monkeypatch, 
     resid, warns = pipeline.neutralize(s, AS_OF, codes)
     assert warns == []
 
-    w = np.sqrt(mv.to_numpy())
     r, x = resid.to_numpy(), np.log(mv.to_numpy())
-    assert abs(_wcorr(r, x, w)) < 1e-10                     # 残差不再含市值暴露
+    # 【无权】正交是 OLS 的恒等式 X'e = 0，也正是等权 top-N 组合关心的度量。
+    # 若实现改成 WLS，这一条会失败（WLS 只在 sqrt(MV) 内积下正交）。
+    assert abs(np.corrcoef(r, x)[0, 1]) < 1e-10
     for k in sorted(set(ind)):                              # 每个行业（含被丢掉的基准行业）
         m = (ind == k).to_numpy()
-        assert abs(np.average(r[m], weights=w[m])) < 1e-9
+        assert abs(r[m].mean()) < 1e-9
 
 
-def test_neutralize_uses_wls_not_ols(monkeypatch):
-    """WLS ≠ OLS 的钉子。
+def test_neutralize_uses_ols_not_wls(monkeypatch):
+    """OLS ≠ WLS 的钉子，方向与 Barra 相反 —— 因为问题不同。
 
-    90 只小盘 + 10 只大盘，因子值是 log 市值的【单调但凹】函数（市值效应在头部饱和）——
-    一条直线拟合不了两端。OLS 被 90 只小盘主导，大盘组整体掉在回归线一侧；
-    sqrt(MV) 加权后大盘占了约 68% 的权重，WLS 的线穿过大盘组，其残差均值回到 0 附近。
+    Barra 用 sqrt(MV) 加权是为了在风险模型里高效估计【因子收益】（异方差校正）。
+    我们做的是 alpha 中性化，目的是"残差不再是规模的代理"，而衡量它的度量取决于组合怎么加权：
+    本项目是【等权 top-N】，所以相关的是【无权】正交 —— OLS 的恒等式，WLS 给不了。
 
-    注：若因子值与 log 市值【严格线性】，OLS 与 WLS 的残差都恒为 0，这个用例就退化成
-    永远通过 —— 判别 WLS 必须要有直线拟合不了的成分。
+    构造：90 只小盘 + 10 只大盘，因子值是 log 市值的单调【凹】函数（一条直线拟合不了两端）。
+    - OLS：无权正交精确成立（残差不含等权规模暴露）；代价是大盘组残差整体偏移一侧，
+      但大盘只占 10 个名字，在等权组合里影响最小。
+    - WLS：大盘组偏移小，代价是无权相关系数显著不为零 —— 偏差转移到了占 90 个名字的小盘上，
+      等权组合会因此带上规模倾斜，让人误把小盘暴露当成 alpha。
+
+    注：若因子值与 log 市值【严格线性】，两种估计的残差都恒为 0，用例退化成永远通过 ——
+    判别必须要有直线拟合不了的成分。
     """
     n_s, n_l = 90, 10
     codes = _codes(n_s + n_l)
@@ -164,15 +171,21 @@ def test_neutralize_uses_wls_not_ols(monkeypatch):
 
     resid, warns = pipeline.neutralize(s, AS_OF, codes, by=("log_mv",))
     assert warns == []
+    r = resid.to_numpy()
 
-    X = np.column_stack([np.ones_like(x), x])               # 同一份数据的 OLS 反事实
-    beta_ols, *_ = np.linalg.lstsq(X, s.to_numpy(), rcond=None)
-    ols = s.to_numpy() - X @ beta_ols
+    X = np.column_stack([np.ones_like(x), x])               # 同一份数据的 WLS 反事实
+    rw = np.sqrt(np.sqrt(mv.to_numpy()))
+    beta_wls, *_ = np.linalg.lstsq(X * rw[:, None], s.to_numpy() * rw, rcond=None)
+    wls = s.to_numpy() - X @ beta_wls
 
+    # 判别：等权组合关心的无权正交，OLS 精确成立、WLS 显著不成立
+    assert abs(np.corrcoef(r, x)[0, 1]) < 1e-10
+    assert abs(np.corrcoef(wls, x)[0, 1]) > 0.05
+
+    # 代价也钉住，别假装没有：OLS 的大盘组确有偏移，我们接受它（10 个名字 vs 90 个）
     scale = s.std()
-    assert abs(ols[big].mean()) > 0.25 * scale              # OLS：大盘组系统性偏移（实测 0.34σ）
-    assert abs(resid.to_numpy()[big].mean()) < 0.05 * scale  # WLS：回到 0 附近（实测 0.007σ）
-    assert abs(resid.to_numpy()[big].mean()) < 0.1 * abs(ols[big].mean())
+    assert abs(r[big].mean()) > 0.25 * scale
+    assert abs(wls[big].mean()) < abs(r[big].mean())
 
 
 def test_neutralize_rejects_backfilled_industry_source(monkeypatch, cross_section):
@@ -189,7 +202,7 @@ def test_neutralize_by_log_mv_only_works_on_degraded_industry(monkeypatch, cross
     _patch_cross_section(monkeypatch, mv, ind, source="tushare_static")
     resid, warns = pipeline.neutralize(s, AS_OF, codes, by=("log_mv",))
     assert warns == []
-    assert abs(_wcorr(resid.to_numpy(), np.log(mv.to_numpy()), np.sqrt(mv.to_numpy()))) < 1e-10
+    assert abs(np.corrcoef(resid.to_numpy(), np.log(mv.to_numpy()))[0, 1]) < 1e-10
 
 
 def test_neutralize_with_too_few_observations_returns_input_plus_warning(monkeypatch):

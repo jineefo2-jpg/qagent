@@ -1,12 +1,20 @@
 """因子处理链（算法说明书 §3）—— 顺序固定，不可调换：
 
-    1 MAD 去极值  →  2 行业 + 市值 WLS 中性化  →  3 zscore  →  4 fillna(0)
+    1 MAD 去极值  →  2 行业 + 市值 OLS 中性化  →  3 zscore  →  4 fillna(0)
 
 ★ 为什么 MAD 不是 3σ：A 股横截面尾部极厚，均值与标准差【本身】已被极值污染，
   3σ 的上界会被拉到天上，等于没截。median ± n·1.4826·MAD 只依赖分位数，不被少数极值绑架。
 
-★ 为什么 WLS 不是 OLS：5,400 只里小盘占绝大多数，OLS 回归线被小盘主导，
-  大盘股残差因此系统性偏移。以 sqrt(总市值) 加权是 Barra 的标准处理。
+★ 为什么 OLS 不是 WLS（本项目的裁决，与 Barra 的做法不同，理由是问题不同）：
+  Barra 用 sqrt(MV) 加权是为了在【风险模型】里高效估计因子收益（异方差校正）。
+  我们做的是 alpha 中性化，目的是"残差不再是规模的代理"，而衡量它的度量取决于组合怎么加权。
+  本项目的组合是【等权 top-N】，所以相关的度量是【无权】正交 —— 恰是 OLS 的恒等式（X'e = 0）。
+  WLS 的残差只在 sqrt(MV) 内积下正交，无权相关系数一般不为零，等权组合会因此带上规模倾斜，
+  让人误把小盘暴露当成 alpha。
+  另一面：OLS"回归线被小盘主导、大盘残差偏移"确实存在，但大盘股在等权组合里只占少数名字，
+  影响最小；WLS 把偏差转移到数量占绝大多数的小盘股上，等权组合里影响最大。
+  ★ 会推翻这个裁决的证据：Task 12 的风格归因在真实数据上显示残差仍有显著规模暴露。
+    那时正确的补救是加非线性规模项（size²或秩变换），而不是换成 WLS —— WLS 同样不解决非线性。
 
 ★ 为什么 fillna(0) 只能在最后：中性化后 0 = 行业内平均水平，是诚实的中性先验；
   提前填会把这些 0 算进 zscore 的均值和标准差，把【所有】股票的分数一起拉偏。
@@ -52,10 +60,11 @@ def zscore(s: pd.Series) -> pd.Series:
 
 def neutralize(s: pd.Series, as_of_date: DateLike, universe: Sequence[str], *,
                by: tuple[str, ...] = ("log_mv", "industry")) -> tuple[pd.Series, list[str]]:
-    """横截面 WLS 取残差：`x = α + β·log_mv + Σγₖ·Dₖ + ε`，权重 `sqrt(总市值)`。
+    """横截面 OLS 取残差：`x = α + β·log_mv + Σγₖ·Dₖ + ε`。
 
+    残差与回归元【无权】正交（X'e = 0）—— 这正是等权 top-N 组合关心的度量。
     行业哑变量去掉一列（否则与截距完全共线，规格 §10.8）。
-    权重恒需要 total_mv，因此市值缺失的股票无论 `by` 取什么都算不出残差（置 NaN）。
+    市值缺失的股票算不出 log_mv，无论 `by` 取什么都置 NaN（不猜市值）。
     返回 `(残差, warnings)`；有效样本 < MIN_OBS 或设计矩阵秩亏 → 返回【原 Series】+ warning。
     """
     bad = [t for t in by if t not in _BY_TERMS]
@@ -90,9 +99,7 @@ def neutralize(s: pd.Series, as_of_date: DateLike, universe: Sequence[str], *,
 
     X = pd.concat(parts, axis=1).loc[idx].to_numpy(dtype=float)
     y = s.loc[idx].to_numpy(dtype=float)
-    # WLS：最小化 Σ wᵢεᵢ²，w = sqrt(MV) ⇒ 两边各乘 sqrt(w) 后跑普通最小二乘
-    rw = np.sqrt(np.sqrt(mv.loc[idx].to_numpy(dtype=float)))
-    beta, _res, rank, _sv = np.linalg.lstsq(X * rw[:, None], y * rw, rcond=None)
+    beta, _res, rank, _sv = np.linalg.lstsq(X, y, rcond=None)
     if rank < X.shape[1]:
         # lstsq 秩亏时不抛，它给一个最小范数解 —— 那份"残差"没做过真正的中性化，静默且不可察
         return s.copy(), [f"{as_of_date} 中性化跳过：设计矩阵秩亏（rank {rank} < {X.shape[1]} 列），返回原值"]
