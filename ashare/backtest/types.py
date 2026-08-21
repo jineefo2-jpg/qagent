@@ -79,6 +79,9 @@ def _jsonable(o):
     if isinstance(o, Mapping):
         return {str(k): _jsonable(v) for k, v in o.items()}
     if isinstance(o, (list, tuple, set)):
+        # ⚠ set 的迭代序随进程变（PYTHONHASHSEED）。对 param_hash 无害（`_hash_canon` 不收 set，
+        #   json 的 default 会拒），但 Task 12 若往 metrics 里塞一个 set，summary() 的字节
+        #   就不再稳定：同一个结果两次调用给出两串不同的 JSON。真出现了在这里 sorted()。
         return [_jsonable(v) for v in o]
     if isinstance(o, _dt.date):          # pd.Timestamp 是 datetime 的子类，走这里
         return o.isoformat()
@@ -91,8 +94,11 @@ def _jsonable(o):
 def _json_size(d: dict) -> int:
     """按最坏情况量：`ensure_ascii=False`（中文 3 字节/字）+ 默认分隔符（比 REST 实际发出的紧凑
     分隔符更宽）。不带 `default=`：真有东西没被 `_jsonable` 收干净，要在这里炸，
-    而不是等 starlette 序列化响应时炸 —— 那时 traceback 里已经看不出是哪个字段。"""
-    return len(json.dumps(d, ensure_ascii=False).encode("utf-8"))
+    而不是等 starlette 序列化响应时炸 —— 那时 traceback 里已经看不出是哪个字段。
+    `allow_nan=False` 同理，而且是这道网的【另一半】：summary 里有七八个字段根本不走
+    `_jsonable`（elapsed_sec / cost_multiplier / 因子权重 …），一个 NaN 或 inf 在这里不炸，
+    就会炸在 starlette 的响应序列化里 —— 一次 500，且看起来像是 REST 层的毛病。"""
+    return len(json.dumps(d, ensure_ascii=False, allow_nan=False).encode("utf-8"))
 
 
 def _warnings_note(shown: int, total: int) -> str:
@@ -138,6 +144,19 @@ class BacktestConfig:
     shuffle_seed: int | None = None     # 非 None → 每个调仓日横截面打乱分数（闸 3）
     factor_param_override: Mapping[str, Mapping] = field(default_factory=dict)
 
+    def __post_init__(self):
+        # 因子重名是【配置笔误】，不是一种配置。param_hash 会排序（见下），于是
+        # (("a",.3),("a",.7)) 与 (("a",.7),("a",.3)) 同指纹；而下游拿到的是
+        # `dict(cfg.factors)`（架构 §4.2 的 combine 收 Mapping），后一条覆盖前一条 ——
+        # 权重 0.7 与 0.3 两个不同的策略共用一个 D7 指纹，闸 1 把新实验读成重放
+        # （算法说明书 §8 闸 1「撞车」那一侧）。
+        # 拒绝而不是去重：静默保留两个权重里的哪一个，都是在跑另一个回测且无人知晓。
+        names = [n for n, _ in self.factors]
+        dup = sorted({n for n in names if names.count(n) > 1})
+        if dup:
+            raise ValueError(f"因子名重复: {dup} —— 同一个名字两条权重，下游 dict() 只会留下"
+                             f"后一条，两个不同策略却是同一个 param_hash。请合并成一条。")
+
     def param_hash(self) -> str:
         """sha256(canonical_json(策略语义字段))[:16] —— D7 的参数指纹。
 
@@ -151,11 +170,28 @@ class BacktestConfig:
         #   三个诊断字段，不得改动 equity / trades / positions / metrics 里的任何一个数。
         #   哪天诊断开始影响结果路径（比如改用 IC 加权合成），必须把它挪回哈希里，
         #   否则两次结果不同的运行共用一个 D7 指纹。
+        #   （另：`asdict` 与 `dataclasses.fields()` 都跳过 ClassVar —— 把一个"旋钮"写成
+        #   ClassVar 会同时躲开这里的全量 payload 和测试里的字段表守卫，两道网都拦不住。
+        #   影响结果的东西一律写成字段。）
         payload.pop("compute_diagnostics")
         # 因子顺序不是语义：combine 是 Σ wᵢ·dirᵢ·zᵢ（架构 §4.2），加法可交换，
         # 换个书写顺序是同一个策略。不排序的话 D7 台账里会多出一条根本不存在的"新实验"。
         # （求和次序带来的 ulp 级差异远在 1e-12 定精度之下，不构成"结果不同"。）
+        # 排序本身会让重名因子撞成一个指纹 —— 那一侧在 `__post_init__` 里拒掉了。
         payload["factors"] = sorted(payload["factors"])
+        # ★ 同一条原则的反方向（§8 闸 1「分家」）：空的 / 打不中任何因子的 override 不构成
+        #   一次新实验 —— 回测逐位相同，却各自造一个指纹，闸 1 会把重放读成新实验，
+        #   于是【又发一次样本外机会】。`{}` 与 `{"a":{}}` 就是这么分家的。
+        #   `FactorSpec.param_hash`（factors/base.py）已经合并了「override 恰好等于默认值」
+        #   那一侧，两层口径必须一致：一层说同一次实验、另一层说新实验，等于闸自己跟自己打架。
+        #   ⚠ 默认值那一侧要查因子注册表，本层不跨层导入（会把回测层拴在注册表上）——
+        #      改成 Task 13 的调用契约：【只传与注册默认值不同的 override】。
+        #   ⚠「键不在 factors 里 = 死参数」成立于当前设计：override 只喂给 cfg.factors 列出的
+        #      因子，中性化的回归元（risk.log_mv / risk.industry）是写死的、且没有可调参数。
+        #      哪天 override 能影响 factors 之外的东西，这一行就从"分家"变成"撞车"，必须重裁。
+        names = {n for n, _ in payload["factors"]}
+        payload["factor_param_override"] = {k: v for k, v in payload["factor_param_override"].items()
+                                            if v and k in names}
         blob = json.dumps(_hash_canon(payload), sort_keys=True, separators=(",", ":"),
                           default=_hash_reject)
         return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
@@ -196,6 +232,8 @@ class BacktestResult:
         """
         cfg = self.config
         n_warn = len(self.warnings)
+        # 满额告警（条数上限 + 单条长度上限）。兜底循环每次都从这份满额【重新】往下砍。
+        warn_full = [w[:_SUMMARY_WARNING_CHARS] for w in self.warnings[:_SUMMARY_MAX_WARNINGS]]
         out = {
             # ── D7 身份：param_hash 与 data_snapshot_id 缺一不可 ──
             "param_hash": self.param_hash,
@@ -225,17 +263,33 @@ class BacktestResult:
             "diagnostics": {"ic": self.ic is not None, "layers": self.layers is not None,
                             "attribution": self.attribution is not None},
             "warnings_total": n_warn,
-            "warnings": [w[:_SUMMARY_WARNING_CHARS] for w in self.warnings[:_SUMMARY_MAX_WARNINGS]],
+            "warnings": list(warn_full),
         }
-        if len(out["warnings"]) < n_warn:
-            out["warnings_note"] = _warnings_note(len(out["warnings"]), n_warn)
+
         # 上面的静态上限只保证【条数】有界，长度没有：metrics 是 Task 12 给的自由 dict，
         # 告警文本长度也没人管。预算保证不能建立在"它们不会太长"上 —— 真顶到 3 KB 就继续砍，
         # 顺序 = 代价从小到大：告警是诊断线索，metrics 是用户问的那个答案，最后才轮到它。
-        while _json_size(out) > _SUMMARY_MAX_BYTES and out["warnings"]:
-            out["warnings"].pop()
-            out["warnings_note"] = _warnings_note(len(out["warnings"]), n_warn)
+        def shed_warnings() -> None:
+            """从满额告警开始按需逐条下砍。note 每轮重算 —— 它自己也占字节。"""
+            out["warnings"] = list(warn_full)
+            out.pop("warnings_note", None)
+            while True:
+                if len(out["warnings"]) < n_warn:
+                    out["warnings_note"] = _warnings_note(len(out["warnings"]), n_warn)
+                if not out["warnings"] or _json_size(out) <= _SUMMARY_MAX_BYTES:
+                    return
+                out["warnings"].pop()
+
+        shed_warnings()
         if _json_size(out) > _SUMMARY_MAX_BYTES:
             out["metrics"] = {"_dropped": f"metrics 共 {len(self.metrics)} 项，超出 "
                                           f"{_SUMMARY_MAX_BYTES}B 预算，见 BacktestResult.metrics"}
+            # 元凶是 metrics 时，上面那轮告警是白砍的：砍到一条不剩预算照样不够。
+            # 换掉 metrics 后【再砍一遍】—— 否则落点是"warnings 全空 + 2.3 KB 空余"，
+            # 代价顺序名存实亡（省下的字节没人用，付出的诊断线索白丢）。
+            shed_warnings()
+        # 文档字符串把 3 KB 写成【硬预算】，那它就得能自己兜住：兜底之后仍然超，
+        # 说明有一个不受上面三层管辖的字段在撑（比如一个超长的 benchmark 代码）。
+        assert _json_size(out) <= _SUMMARY_MAX_BYTES, \
+            f"summary 兜底后仍有 {_json_size(out)} 字节，超出 {_SUMMARY_MAX_BYTES} 硬预算"
         return out

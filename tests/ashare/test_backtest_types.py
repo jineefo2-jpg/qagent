@@ -120,6 +120,34 @@ def test_factor_order_does_not_change_the_hash():
     assert dataclasses.replace(BASE, factors=(("b", 0.6), ("a", 0.4))).param_hash() != a.param_hash()
 
 
+def test_duplicate_factor_names_are_rejected_rather_than_deduped():
+    """排序把重名撞成一个指纹（§8 闸 1「撞车」那一侧）：(("a",.3),("a",.7)) 与
+    (("a",.7),("a",.3)) 同 param_hash，而下游 dict(cfg.factors) 是后者覆盖前者 ——
+    权重 0.7 与 0.3 两个不同的策略，一个 D7 指纹，闸 1 把新实验读成重放。
+    去重不行：静默留下两个权重里的哪一个，都是在跑另一个回测且无人知晓。"""
+    for factors in ((("a", 0.3), ("a", 0.7)), (("a", 0.7), ("a", 0.3)),
+                    (("a", 0.5), ("b", 0.2), ("a", 0.3))):
+        with pytest.raises(ValueError, match="重复"):
+            dataclasses.replace(BASE, factors=factors)
+    # 反向锚：不重名的照常放行（别把守卫做成"多因子一律拒"）
+    assert dataclasses.replace(BASE, factors=(("a", 0.3), ("b", 0.7))).param_hash()
+
+
+def test_a_noop_factor_param_override_does_not_mint_a_new_hash():
+    """§8 闸 1 的另一侧「分家」：同一组参数两个指纹 → 闸把重放读成新实验，
+    于是【又发一次样本外机会】。下面三种 override 的回测结果逐位相同，
+    而 FactorSpec.param_hash 对「override 等于默认值」已经是合并口径 —— 两层不能打架。"""
+    base = BASE.param_hash()                                    # BASE.factors = a, b
+    assert dataclasses.replace(BASE, factor_param_override={"a": {}}).param_hash() == base
+    assert dataclasses.replace(BASE, factor_param_override={"a": {}, "b": {}}).param_hash() == base
+    # 键不在 factors 里 = 这个 override 谁也喂不到，回测一个数都不差
+    assert dataclasses.replace(BASE,
+                               factor_param_override={"zzz": {"window": 5}}).param_hash() == base
+    # 真正打得中的 override 仍然必须分家，否则就成了另一侧的漏哈希
+    assert dataclasses.replace(BASE,
+                               factor_param_override={"a": {"window": 5}}).param_hash() != base
+
+
 def test_nested_override_key_order_does_not_change_the_hash():
     a = dataclasses.replace(BASE, factor_param_override={"a": {"x": 1, "y": 2}, "b": {}})
     b = dataclasses.replace(BASE, factor_param_override={"b": {}, "a": {"y": 2, "x": 1}})
@@ -231,6 +259,26 @@ def test_summary_of_a_realistic_multi_year_run_fits_the_rest_budget():
     assert len(json.dumps(s, ensure_ascii=False, separators=(",", ":")).encode()) < 3072
 
 
+def test_summary_field_values_are_all_pinned_to_the_result():
+    """空跑那条用例断言 n_days/n_trades/equity_final 【是】0/None，于是"把字段写死成 0"
+    与"整个字段删掉"两类改动都能全绿溜过去 —— 一个字段可以从 REST/LLM 载荷里凭空消失。
+    这条钉住键集合 + 每一项的具体值：每个数都得真的来自结果对象。"""
+    s = _realistic_result().summary()
+    assert set(s) == {"param_hash", "data_snapshot_id", "engine_version", "started_at",
+                      "elapsed_sec", "start", "end", "benchmark", "n_factors", "factors",
+                      "top_n", "weighting", "cost_multiplier", "macro_timing", "shuffle_seed",
+                      "metrics", "n_days", "equity_final", "n_rebalances", "n_trades",
+                      "n_blocked", "diagnostics", "warnings_total", "warnings", "warnings_note"}
+    assert (s["start"], s["end"]) == ("2015-01-01", "2018-12-31")
+    assert s["started_at"] == "2026-08-20T09:30:01" and s["elapsed_sec"] == 58.33
+    assert s["benchmark"] == "000985.CSI"
+    assert (s["top_n"], s["weighting"]) == (50, "equal")
+    assert s["n_factors"] == 16 and s["factors"][0] == ["factor_00", 0.0625]
+    assert (s["n_days"], s["n_rebalances"]) == (2607, 522)
+    assert (s["n_trades"], s["n_blocked"]) == (20_000, 200)
+    assert s["equity_final"] == 3.8666
+
+
 def test_summary_shows_what_it_truncated():
     """告警条数有【固定上限】，不是"能塞多少塞多少"：Agent 工具层要的是可预期的载荷大小，
     顺带把兜底循环的迭代次数摁住（10 万条告警不该导致 10 万次 json.dumps）。"""
@@ -248,6 +296,27 @@ def test_summary_sheds_warnings_before_metrics_when_both_overflow():
     assert _size(s) < 3072, f"summary 实际 {_size(s)} 字节"
     assert len(s["warnings"]) < 5 and "60" in s["warnings_note"]
     assert "_dropped" not in s["metrics"] and len(s["metrics"]) == 70
+
+
+def test_summary_restores_the_warnings_when_metrics_was_the_offender():
+    """砍价顺序写的是"先告警后 metrics"。元凶是 metrics 时，第一轮把 60 条告警砍到一条不剩
+    也救不回预算，换掉 metrics 之后却空着 2.3 KB —— 砍了个寂寞：省下的字节没人用，
+    丢掉的诊断线索是白丢的。换完必须把告警还回来再砍一遍。"""
+    s = _realistic_result(n_warnings=60,
+                          metrics={f"metric_{i:03d}": i * 1.111111 for i in range(500)}).summary()
+    assert "_dropped" in s["metrics"]                       # 元凶确实是 metrics
+    assert len(s["warnings"]) == 5 and "60" in s["warnings_note"]
+    assert _size(s) < 3072, f"summary 实际 {_size(s)} 字节"
+
+
+def test_each_warning_is_capped_at_its_own_char_limit():
+    """单条告警的长度上限一条用例都没覆盖：真实告警 61 字，够不着 90；兜底循环又会把
+    超长的整条砍掉，于是"不截断"这个改动全绿。一条 500 字的告警把它钉住。"""
+    r = _realistic_result(n_warnings=60)
+    r.warnings = ["长" * 500 for _ in r.warnings]
+    s = r.summary()
+    assert len(s["warnings"]) == 5 and len(s["warnings"][0]) == 90
+    assert _size(s) < 3072, f"summary 实际 {_size(s)} 字节"
 
 
 def test_summary_keeps_all_warnings_when_they_fit():
@@ -287,6 +356,19 @@ def test_summary_is_json_serializable_the_way_starlette_does_it():
     assert s["metrics"]["max_drawdown_start"] == "2015-06-12"
 
 
+def test_a_nonfinite_value_outside_metrics_fails_here_instead_of_500ing_in_starlette():
+    """七八个字段根本不走 `_jsonable`（elapsed_sec / cost_multiplier / 因子权重 …），
+    上一条测的 NaN 保护对它们一点用没有：summary 看起来干干净净，500 发生在 starlette 的
+    响应序列化里，traceback 指向 REST 层。预算函数照 starlette 的参数序列化 → 在这里就炸。"""
+    r = _realistic_result()
+    r.elapsed_sec = float("nan")
+    with pytest.raises(ValueError):
+        r.summary()
+    cfg = dataclasses.replace(BASE, cost=CostConfig(multiplier=math.inf))
+    with pytest.raises(ValueError):
+        _realistic_result(config=cfg).summary()
+
+
 def test_summary_stays_in_budget_against_a_pathological_result():
     """metrics 与 factors 是别的任务给的自由结构 —— 预算保证不能建立在"它们不会太大"上。"""
     s = _realistic_result(metrics={f"metric_{i:03d}": i * 1.111111 for i in range(500)},
@@ -295,6 +377,15 @@ def test_summary_stays_in_budget_against_a_pathological_result():
     assert _size(s) < 3072, f"summary 实际 {_size(s)} 字节"
     assert "500" in json.dumps(s["metrics"], ensure_ascii=False)     # 砍了多少要看得见
     assert s["n_factors"] == 200 and len(s["factors"]) == 10         # 同上：截断可见
+
+
+def test_a_field_the_shedding_cannot_reach_fails_loud_instead_of_busting_the_budget():
+    """三层兜底够不着的字段（这里是 benchmark）撑破预算时，返回一个超预算的"精简版"
+    比抛更糟 —— 它会被原样塞进 LLM 上下文，没人会发现。文档字符串把 3 KB 写成【硬预算】，
+    这条让它自己兜住：兜不住就抛。"""
+    cfg = dataclasses.replace(BASE, benchmark="X" * 5000)
+    with pytest.raises(AssertionError):
+        _realistic_result(config=cfg).summary()
 
 
 def test_summary_survives_an_empty_run():
