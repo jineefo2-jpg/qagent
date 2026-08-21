@@ -367,6 +367,14 @@ tests/ashare/
 > 只收发 DataFrame 与基础类型，绝不反向 import `ashare.backtest` / `ashare.factors`。
 > 不再包一层转发：单实现的抽象没有存在意义。详见架构 §4.3 的裁决框。
 
+> **★ 2026-08-21 追加（Task 6 评审转来）：`build` 不能无脑遍历 `FACTOR_REGISTRY`。**
+> `factor_value.raw_value` 是 `DOUBLE`（`derived_schema.sql:19`），而注册表里的
+> `industry` 返回的是 **category dtype 的字符串** —— 遍历全表落库会在它这里抛，
+> 或者更糟：静默写成 NULL，于是「行业因子存在且全是空值」。
+> `build` 只接受 `ALPHA_CATEGORIES`（Task 7 落的白名单）里的因子，
+> 其余明确拒绝并说明理由；`log_mv` / `beta_250` 是数值可以存，但它们不是 alpha，
+> 存不存由调用方显式指定，不靠遍历撞上。
+
 **Files:** Create `ashare/data/derived_store.py`; Create `tests/ashare/test_factor_store.py`
 
 **Interfaces**
@@ -503,6 +511,15 @@ tests/ashare/
 > **本期不动阈值**：只用合成蒙特卡洛就调参数，正是本项目的五道闸要防的无根据调参。
 > 这里要做的是：量出收紧 `min_coverage` 到 0.70 / 0.80 各自的 IC 与覆盖率代价，
 > 再决定。（评审也确认了不该改估计量本身：掩码掉补出来的收益会留下跨多日的那一个，更糟。）
+
+> **★ 2026-08-21 追加（Task 6 评审转来）：风格归因用 groupby 会踩 category dtype 的同一个坑。**
+> `pipeline.neutralize` 已经踩过一次：`pd.get_dummies` 对 categorical **会为零观测的
+> 类别建列**，把「哑变量只用有效样本构造」的保护无声废掉。评审在 pandas 2.3.3 上确认
+> 还有两个同族陷阱没设防：`v.groupby(ind).mean()` 会为零观测类别吐出一行
+> （`__OTHER__ → NaN`），`ind.value_counts()` 会报 `__OTHER__ → 0`。
+> **§9 的风格归因恰恰就是一次按行业 groupby** —— 一个凭空多出来的 `__OTHER__` 行
+> 会让归因表看起来多了一个行业暴露。先 `.astype(object)` 或
+> `.cat.remove_unused_categories()`，并写一条零观测行业的用例钉住。
 
 ### Task 12: 成本 cost.charge + 指标 metrics.compute
 
