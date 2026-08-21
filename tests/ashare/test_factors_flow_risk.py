@@ -158,7 +158,6 @@ def test_north_hold_chg_20_no_data_is_nan_never_zero(monkeypatch):
     _patch_money(monkeypatch, _panel({"S00001.SZ": np.arange(60) * 0.01, "S00002.SZ": dead}))
     out = ffl.north_hold_chg_20(AS_OF, CODES)
     assert np.isnan(out["S00002.SZ"]), f"无数据被填成了 {out['S00002.SZ']!r}"
-    assert out["S00002.SZ"] != 0.0 or np.isnan(out["S00002.SZ"])
     assert out.notna()["S00001.SZ"], "同一横截面里有数据的股票不应被连坐"
 
 
@@ -189,11 +188,19 @@ def test_north_hold_chg_20_needs_60pct_real_observations(monkeypatch, n_real, ex
     assert out.notna()["S00002.SZ"]
 
 
-def test_north_hold_chg_20_history_shorter_than_the_window_is_nan(monkeypatch):
-    """回测头几天取不满一个窗口 —— 全 NaN，不是 IndexError，也不是拿 5 天硬算。"""
-    _patch_money(monkeypatch, _panel({c: np.arange(5) * 0.01 for c in CODES}))
+@pytest.mark.parametrize("n_days", [5, 15])
+def test_north_hold_chg_20_history_shorter_than_the_window_is_nan(monkeypatch, n_days):
+    """回测头几天取不满一个窗口 —— 全 NaN，不是 IndexError，也不是拿 5 天硬算。
+
+    ★ 15 天这一档不是凑数：5 天时 60% 覆盖率闸门（ceil(0.6×21) = 13 天）自己就会拦下，
+      长度闸门删掉照样绿 —— 于是实现里唯一那道保护是个没被任何用例区分开的摆设。
+      15 天时覆盖率闸门放行（15 ≥ 13），删掉长度闸门会拿 14 天的差硬算出 0.14，
+      冒充一个"20 日变化"。
+    """
+    _patch_money(monkeypatch, _panel({c: np.arange(n_days) * 0.01 for c in CODES}))
     out = ffl.north_hold_chg_20(AS_OF, CODES)
     assert list(out.index) == CODES and out.isna().all()
+    assert out.dtype == float, "早退的那条路同样必须是 float —— object 会在下游静默变味"
 
 
 # ══════════════ 2 log_mv ══════════════
@@ -327,6 +334,29 @@ def test_beta_250_needs_150_valid_observations(monkeypatch, n_gap, expect_nan):
     assert out.notna()["S00002.SZ"], "同一横截面里数据完整的股票不应被连坐"
 
 
+@pytest.mark.parametrize("n_gap,expect_nan", [(99, False), (100, True)])
+def test_beta_250_index_holes_are_not_valid_observations(monkeypatch, n_gap, expect_nan):
+    """★ 指数【自己】的数据洞同样不是观测。`index_daily.close` 可空（schema 里没有
+    NOT NULL，`ingest_index_daily` 对源里缺的列整列写 None），这是与个股停牌不同的一条路。
+
+    实现靠 `rm = ...diff().dropna()` 把这些日子整个踢出 `rm.index`。少了 dropna 它们仍在
+    index 里：个股当天有收益 → `ok` 记 True，而 `mkt` 是 NaN 不进任何求和 ——
+    beta 的【数值】一点不变（去均值那一项在 Σdm = 0 处正好抵掉，所以对着数值断言测不出来），
+    变的只有覆盖率闸门数的那个数：149 个真实配对被当成 250 个放行。
+
+    n_gap 天空洞毁掉 n_gap+1 个配对（洞内 + 洞后第一天的前收）：250 − 101 = 149 → NaN。
+    """
+    r, idx = _mkt_path(300)
+    holed = idx.copy()
+    holed.iloc[-200:-200 + n_gap] = np.nan                      # index_daily.close IS NULL
+    _patch_prices(monkeypatch, _panel({c: _stock(r, 1.5) for c in CODES}))
+    _patch_index(monkeypatch, holed)
+    out = frk.beta_250(AS_OF, CODES)
+    assert bool(np.isnan(out["S00001.SZ"])) is expect_nan
+    if not expect_nan:
+        np.testing.assert_allclose(out["S00001.SZ"], 1.5, rtol=1e-9)
+
+
 def test_beta_250_flat_market_is_nan_not_infinite(monkeypatch):
     """Var(r_mkt) = 0（指数一动不动）→ NaN。±inf 连 MAD 去极值都拦不住。"""
     flat = pd.Series(np.full(300, 3000.0), index=_dates(300)).rename_axis("trade_date")
@@ -396,6 +426,7 @@ def test_index_is_exactly_universe_in_universe_order(monkeypatch, name):
     out = _FNS[name](AS_OF, unordered)
     assert isinstance(out, pd.Series)
     assert list(out.index) == unordered, f"{name} 的 index 不等于 universe（或顺序变了）"
+    assert out.name == name, "pipeline 靠 Series.name 拼设计矩阵（pipeline.py:88 的 concat）"
 
 
 @pytest.mark.parametrize("name", sorted(_FNS))
@@ -586,6 +617,38 @@ def test_beta_250_on_real_market_db_excludes_the_suspended_days(beta_db):
     got = frk.beta_250("2024-02-02", ["A00001.SZ", "B00002.SZ"], window=20)["A00001.SZ"]
     np.testing.assert_allclose(got, expect, rtol=1e-9)
     assert got != pytest.approx(wrong, rel=1e-6), "停牌日被 ffill 成了假的 0 收益"
+
+
+def test_beta_250_default_window_gate_is_an_absolute_150_days(beta_db):
+    """★ 闸门是 `ceil(0.60 × window)`，不是 `ceil(0.60 × 这次实际拿到多少行)`。
+    上面所有打桩用例都把面板切成整 251 行 → `len(r)` 恒等于 `window`，两种写法看不出差别；
+    真实库里恰恰相反：beta_db 只有 29 个交易日 → 28 个日收益。
+
+    这不是刁钻场景，是常态：一次运行的头 ~250 个交易日窗口本来就不满，`index_daily` 与
+    `daily_bar` 又是两次入库（`ashare/data/pipeline.py:128`），指数覆盖比个股窄时窗口跟着塌。
+    闸门一旦漂成相对 60%，这 28 个观测会算出 A=1.56 / B=1.00 —— 一个 28 观测的数字
+    顶着 `beta_250` 的名字进 §9 风格归因，读的人以为它是 250 日估计。
+    这条同时覆盖任务书的验收项「窗口内非空 < 150 日 → NaN」在【默认窗口】上的那一维。
+    """
+    out = frk.beta_250("2024-02-02", ["A00001.SZ", "B00002.SZ"])
+    assert out.isna().all(), f"28 个观测算出了 250 日 beta：{out.to_dict()}"
+
+
+def test_beta_250_without_any_index_rows_is_nan_not_a_crash(market_db):
+    """`index_daily` 里一行都没有（指数与个股是两次入库 —— `ashare/data/pipeline.py:128`，
+    指数那一次漏跑 / 失败是常态）→ 全 NaN 且不抛，不是 KeyError、不是空 Series。
+
+    注意这条【不区分】实现里那两道早退闸门（`px.empty or idx.empty` / `r.empty`）：
+    覆盖率闸门已经把 0 个有效观测判成 NaN，两道闸门删掉任意一道或两道都删，
+    76 条用例照样全绿（实测）。这条钉的是行为，不是闸门。
+    """
+    query.open_db(market_db)
+    try:
+        out = frk.beta_250("2024-01-25", ["A00001.SZ", "B00002.SZ"], window=20)
+    finally:
+        query.close_db()
+    assert list(out.index) == ["A00001.SZ", "B00002.SZ"] and out.isna().all()
+    assert out.dtype == float
 
 
 def test_industry_on_real_market_db(beta_db):

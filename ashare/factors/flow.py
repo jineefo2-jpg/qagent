@@ -47,16 +47,21 @@ def north_hold_chg_20(as_of_date: DateLike, universe: Sequence[str], *,
 
     ★ 取差不取比：持股比例的基数极小，0.01% → 0.02% 是"翻倍"却毫无经济含义。
       用比值会把最不被北向关注的那批股票系统性地排在最前面。
+
+    ★ 只有【一道】早退闸门。原来还有一道 `if raw.empty` 写在它前面，删掉了：
+      `get_money_flow` 把结果 reindex 到 `MultiIndex.from_product([codes, days])`
+      （`query.py:855`），行数只由日历和 lookback 决定、与库里有没有数据无关 ——
+      于是 `raw.empty` ⟺ 池为空或日历为空 ⟹ `len(panel) == 0`，被长度闸门完全覆盖。
+      两道并排时删掉任意一道都没有测试变红，那正是"让读者以为这里有两层保护"的假象。
+      剩下这道不能删：`len(panel) == 0` 时 `px.iloc[-1]` 直接 IndexError。
     """
     codes = list(universe)
     span = window + 1                       # 两个端点都要，21 天
     nan = pd.Series(np.nan, index=codes, name="north_hold_chg_20", dtype=float)
     raw = query.get_money_flow(as_of_date, codes, fields=("hk_hold_ratio",),
                                lookback=span + _BUFFER)
-    if raw.empty:
-        return nan
     panel = raw["hk_hold_ratio"].unstack("ts_code").reindex(columns=codes).astype(float)
-    if len(panel) < span:                   # 回测头几天取不满一个窗口
+    if len(panel) < span:                   # 回测头几天取不满一个窗口；空池 / 空日历也走这里
         return nan
     ok = panel.iloc[-span:].notna().sum() >= math.ceil(_MIN_COVERAGE * span)
     px = panel.ffill().iloc[-span:]
