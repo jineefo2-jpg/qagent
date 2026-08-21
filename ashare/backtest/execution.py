@@ -52,7 +52,7 @@ D6 的原文：「T 日收盘算信号，T+1 集合竞价（09:15–09:25）按�
 from __future__ import annotations
 
 import datetime as _dt
-from typing import Sequence, Union
+from typing import Union
 
 import numpy as np
 import pandas as pd
@@ -68,6 +68,11 @@ BLOCKED_COLS = ["exec_date", "ts_code", "intended_side", "intended_weight", "rea
 # 退市整理期连续跌停、几乎无流动性，按收盘价成交是系统性乐观偏差。掩码给出的
 # `close_hfq` 在 delisted 路由上恰好就是"最后一根非停牌 K 线的后复权收盘"，它位于跌停
 # 序列的末端 —— 比 B8 初稿的"整理期首日收盘"更低，与 B8 自己的"宁可低估"同向。
+#
+# 价格只是这条路由的一半，另一半是【目标一律置 0】（§5.5「强制」的定义，2026-08-20 补）：
+# 退市股不走普通 Δw 路径。走了的话，`build_targets` 的换手上限会把清仓裁成部分成交，
+# 于是一份卖不掉的资产被钉在固定价上永远留在账上 —— 下一期目标与 `prev_w` 相等、Δw=0，
+# 零成交零告警，而"退市清仓"那行 warning 照发不误，声称了一件没发生的事。
 _DELIST_HAIRCUT = 0.5
 
 # 权重容差。权重量级 1e-2，1e-12 只吞浮点噪声：没有它，再分配的舍入残差会造出
@@ -112,6 +117,9 @@ def simulate(exec_date: DateLike,
         targets: `portfolio.build_targets` 的目标权重，index = 目标持仓 ∪ 上期持仓，
             清仓的票显式写 0.0。**总仓位 π 取 `targets.sum()`** —— build_targets 在账本
             填不满时会留现金，π 因此不一定等于宏观层给的那个数，以传进来的账本为准。
+            语义是**两值的**：缺席 == 0.0 == 卖光。目标账本按定义是完整的，"没意见"
+            不是它的一个状态；`build_targets` 保留每一只 `prv != 0`（portfolio.py:226），
+            持仓不会意外缺席。**退市股是唯一例外：目标被强制改写为 0**（§5.5）。
         prev_holdings: 上期持仓【股数】（不是权重），index=ts_code。首期传空 Series。
         equity: 执行日开盘时点的组合权益（现金 + 持仓市值），用于权重 ↔ 股数换算。
         signal_date: 信号日 T。**只用于守卫 T < τ，不用于取任何数据**（见模块头 ★1）。
@@ -122,12 +130,17 @@ def simulate(exec_date: DateLike,
         - `holdings`: 成交后的持仓股数，已卖光的票不再出现。被拦下的票**逐位等于**
           `prev_holdings` 里的值（不经价格往返，浮点上也不差）。
         - `blocked`: 列 = `BLOCKED_COLS`，D6 的证据链。`intended_side` / `intended_weight`
-          描述的是**那笔没做成的交易**（方向 + |Δw| 幅值），不是目标仓位；因此
-          `Σ intended_weight` 就是这一天组合与目标之间的缺口规模。
+          描述的是**那笔没做成的交易**（方向 + |Δw| 幅值），不是目标仓位。
+          ⚠ **`Σ intended_weight` 不是组合与目标之间的缺口**，两个方向都能偏：缩量支里
+          被拦的是【缩过之后】那笔，实测 Σ|intent|=0.55 而真实缺口 0.80（低估）；
+          `L > π` 时可交易部分被夹到 0，被拦的那笔反而比缺口大，实测 0.70 vs 0.42（高估）。
+          极端情形下一只 `w^tgt == w_prev`（本不想动）的票也会因缩量进 `blocked`。
+          ⚠ 交接 Task 12：要缺口规模请用 `targets` 与成交后 `holdings` 现算，别求和这一列。
         - `warnings`: 退市折价清仓 / 锁定权重超过目标仓位。汇进 `BacktestResult.warnings`。
 
     Raises:
         ValueError: `signal_date >= exec_date`（D6 被违反）；`equity <= 0`；
+            `targets` / `prev_holdings` 含 NaN 或 inf；
             或**持仓在执行日取不到价格**。最后一条是刻意炸而不是兜底：D9 保证每只在市
             股票每个交易日都有行（停牌写占位行），`get_tradable_mask` 又把已知退市单独
             路由成 `reason='delisted'` 并附最后一根有效 K 线的收盘价。两者都不成立的持仓
@@ -155,6 +168,13 @@ def simulate(exec_date: DateLike,
 
     tgt_in = pd.Series(targets, dtype=float)
     prev_in = pd.Series(prev_holdings, dtype=float)
+    # 输入里的 NaN/inf 必须当场炸：下面的 fillna(0.0) 只该补【新出现的 label】。
+    # 目标 NaN 被填成 0 就是"卖光"，持仓 NaN 被填成 0 就是"空仓"（还顺手绕过无价守卫，
+    # 再从一个不存在的零基上把目标买满）—— 两条都不抛、不告警，只在净值上留一道疤。
+    for nm, ser in (("targets", tgt_in), ("prev_holdings", prev_in)):
+        bad = list(ser.index[~np.isfinite(ser.to_numpy())])
+        if bad:
+            raise ValueError(f"{nm} 含 NaN/inf：{bad}。缺席才读作 0，写出来的 NaN 不是 0")
     codes = tgt_in.index.union(prev_in.index)
     if len(codes) == 0:
         return _empty()
@@ -166,11 +186,19 @@ def simulate(exec_date: DateLike,
     mask = get_tradable_mask(exec_d, list(codes)).reindex(codes)
     reason = mask["reason"].astype(str)
     delisted = reason == "delisted"
+    # §5.5【强制】清仓：退市股的目标一律 0，不接受上游给的残值（上游的换手上限会把清仓
+    # 裁成部分成交，剩下的那半永远卖不掉）。改写的只是【这一只的目标】—— π 仍取调用方的
+    # 账本：强卖换回来的是真现金，把 π 跟着调小等于让一次退市静默地给整个组合降仓，
+    # 而 π 是宏观层的决策。腾出来的额度受 `_allocate` 的 min(1,·) 封顶，谁也过不了自己的
+    # 目标（★5 的上限不会被顶破），填不满的照旧留现金。
+    tgt = tgt.where(~delisted, 0.0)
     # 成交价：执行日开盘（后复权）。退市走 B8 折价 —— 它同时是【估值】价：
     # 一只只能半价卖掉的票，账上就值那么多，用开盘价标市值会先虚增权益再在成交时莫名亏掉。
     price = mask["open_hfq"].astype(float).where(
         ~delisted, mask["close_hfq"].astype(float) * _DELIST_HAIRCUT)
-    priced = pd.Series(np.isfinite(price.to_numpy()), index=codes)
+    # 价 0 与 NaN 同等对待：np.isfinite(0.0) 是 True，只挡 NaN 的守卫会放 0 过去，
+    # 于是 d*equity/price = inf 一路走进 holdings 与权益，且不抛。负价同理（数据坏了）。
+    priced = pd.Series(np.isfinite(price.to_numpy()) & (price.to_numpy() > 0), index=codes)
 
     unpriceable = (shares_prev != 0) & ~priced
     if unpriceable.any():
@@ -208,8 +236,12 @@ def simulate(exec_date: DateLike,
     d = w - prev_w                  # 锁定的票 w 逐位等于 prev_w，故 d 恰好是 0.0
     traded = d.abs() > _W_EPS
     d_shares = (d * equity / price).where(traded, 0.0)
-    holdings = (shares_prev + d_shares)
-    holdings = holdings[holdings != 0].rename("shares").rename_axis("ts_code")
+    # 留下谁按【最终权重】判，不按股数是否恰好为 0 —— `w` 就是成交后的权重（逐位
+    # `shares·price/equity == prev_w + d == w`，股数往返有舍入，`w` 没有）。两个阈值必须
+    # 同一个量、同一个 eps：卖光后剩的 −6e-11 股在 `holdings != 0` 下留得下来，而它对应的
+    # |Δw| ~ 1e-16 又永远达不到成交阈值 —— 从此每一只持过的票都赖在 codes 里，其中任何
+    # 一只日后丢了行情，`unpriceable` 守卫（判 shares_prev != 0）就会把整轮回测炸掉。
+    holdings = (shares_prev + d_shares)[w.abs() > _W_EPS].rename("shares").rename_axis("ts_code")
 
     trades = pd.DataFrame({
         "exec_date": exec_d,

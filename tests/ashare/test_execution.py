@@ -16,7 +16,13 @@
 把买不进的额度摊给幸存者会顶破 `build_targets` 刚建立的 max_single/max_industry ——
 而现金拖累会被净值曲线直接计价、超额集中度不被任何东西计价。买不进就是买不进。
 
-★ 最值钱的三条：
+还有一条 §5.5 的定义（2026-08-20 补）：退市股**强制清仓 = 目标一律置 0**，不接受上游给的
+残值。走普通 Δw 路径的话，上游的换手上限会把清仓裁成部分成交，一份卖不掉的资产就此钉在
+固定价上永远留在账上，而"退市清仓"那行 warning 照发不误 —— 声称了一件没发生的事。
+
+★ 最值钱的四条：
+  - `test_delisted_target_is_forced_to_zero`：**必须传非零目标才测得到**。用 0.0 当目标
+    等于把被测行为自己喂给了实现，"退市不强平"这个变异体因此在 27 个变异里全身而退。
   - `test_rescaling_a_buy_into_a_sell_is_caught`：缩量会把"小幅加仓"翻成"减仓"，
     若那只票正一字跌停，一次天真的实现就在跌停板上卖出了。这是本文件唯一还需要迭代求
     不动点的地方（只缩不放之后，另一支已一轮定型），也是最容易被写漏的。
@@ -272,7 +278,60 @@ def test_the_common_branch_settles_in_one_pass(masked, allocations):
     assert len(allocations) == 2
 
 
-# ══════════════ 4. 退市（B8）══════════════
+# ══════════════ 4. 退市（§5.5 强制清仓 + B8 折价）══════════════
+@pytest.mark.parametrize("tgt,shape", [
+    (0.05, "部分卖：上游换手上限把清仓裁成一半"),
+    (0.30, "买回：目标比现仓还大，退市股 can_buy=False"),
+])
+def test_delisted_target_is_forced_to_zero(masked, tgt, shape):
+    """★ §5.5「强制」的定义：退市股目标一律 0，**不接受上游给的残值**。
+
+    非零目标是【常态】不是边角料：`portfolio._execute` 按 max_turnover(0.30) 裁剪卖出，
+    清仓例行地变成部分成交；`build_targets` 的数据中断支原样返回 `prev`；`get_universe`
+    只剔 T 日已退市的票，τ 日才退的仍带满仓目标。
+
+    走普通 Δw 路径的两种死法（这两条参数各钉一条）：
+      · 目标 0.05 < w_prev 0.10 → 卖一半留一半：5 万块卖不掉的资产钉在固定价上，
+        下一期目标 0.05、`prev_w` 0.05、Δw=0 → **零成交零告警，永远**，
+        而"退市清仓"的 warning 照发不误，声称了一件没发生的事。
+      · 目标 0.30 > w_prev 0.10 → 想买，`can_buy=False` → 零成交、仓位原封不动、
+        `warnings == []`，**全程静默**。
+    """
+    masked({"A.SZ": _delisted(9.0, 10.0)})               # 清仓价 10.0 × 0.5 = 5.0
+    prev = _s({"A.SZ": 20_000.0})                        # w_prev = 20000×5/1e6 = 0.10
+    trades, holdings, blocked, warns = simulate(EXEC, _s({"A.SZ": tgt}), prev, EQ, signal_date=SIG)
+
+    assert list(trades["ts_code"]) == ["A.SZ"] and trades.loc[0, "side"] == "SELL"
+    assert trades.loc[0, "shares"] == pytest.approx(20_000.0)   # 全清，不是 tgt 允许的那部分
+    assert trades.loc[0, "price_hfq"] == pytest.approx(5.0)
+    assert "A.SZ" not in holdings.index                  # 账上不留任何卖不掉的残值
+    assert len(blocked) == 0                             # 强平不是"被拦的买入"
+    assert any("A.SZ" in w for w in warns)               # warning 说的清仓真的发生了
+
+
+def test_forced_liquidation_does_not_shrink_the_target_position(masked):
+    """强平改写的是【那一只的目标】，不是 π：π 仍取调用方账本里的那个数。
+
+    退市股被强卖出的是**真金白银的现金**，把 π 跟着调小等于让一次退市静默地把整个组合
+    降仓 —— 而 π 是宏观层的决策，成交层无权改。腾出来的额度在 `min(1,·)` 下最多把幸存者
+    补回各自的目标（永不越过 max_single），补不完的才留现金。
+
+    A 停牌锁住 0.50（目标 0.20）→ 额度 0.50 < 目标合计 0.70 → 系数 5/7。
+    D 退市（目标 0.10 被改写成 0）→ 若跟着把 π 从 1.0 改成 0.9，系数就变成 4/7。
+    """
+    masked({"A.SZ": _susp(10.0), "D.SZ": _delisted(9.0, 20.0),      # D 清仓价 20×0.5 = 10.0
+            "C.SZ": _ok(10.0), "E.SZ": _ok(10.0)})
+    prev = _s({"A.SZ": 50_000.0, "D.SZ": 10_000.0})                 # w_prev = 0.50 / 0.10
+    _, holdings, _, _ = simulate(
+        EXEC, _s({"A.SZ": 0.2, "D.SZ": 0.1, "C.SZ": 0.4, "E.SZ": 0.3}), prev, EQ, signal_date=SIG)
+
+    w = _w(holdings, {"A.SZ": 10.0, "C.SZ": 10.0, "E.SZ": 10.0})
+    assert "D.SZ" not in holdings.index
+    assert w["C.SZ"] == pytest.approx(0.4 * 5 / 7)                  # 不是 ×4/7
+    assert w["E.SZ"] == pytest.approx(0.3 * 5 / 7)
+    assert w.sum() == pytest.approx(1.0, abs=TOL)                   # π 仍是调用方的 1.0
+
+
 def test_delisted_is_liquidated_at_half_close_with_a_warning(masked):
     """§5.5 / B8：清仓价 = **最后一个有效后复权收盘价 × 0.5**。退市整理期连续跌停、
     几乎无流动性，按收盘价成交是系统性乐观偏差。
@@ -306,6 +365,21 @@ def test_tradable_but_unpriced_name_is_still_blocked(masked):
     masked({"A.SZ": _row(float("nan"))})               # can_buy/can_sell 都是 True
     trades, holdings, blocked, _ = simulate(EXEC, _s({"A.SZ": 0.3}), _s({}), EQ, signal_date=SIG)
     assert len(trades) == 0 and len(holdings) == 0
+    assert list(blocked["reason"]) == ["no_price"]
+
+
+@pytest.mark.parametrize("px", [0.0, -1.0])
+def test_nonpositive_price_is_not_a_price(masked, px):
+    """`np.isfinite(0.0)` 是 True —— 只挡 NaN 的守卫会放 0 过去，`Δw×equity/0 = inf`
+    走进 holdings 与权益且**不抛**。`validate` 根本不查价格为正，
+    `check_adj_factor_jumps` 又跳过 `prev_adj IS NULL OR prev_adj <= 0` 且只告警不阻断，
+    所以某只票首行 `adj_factor = 0` 一路无人拦。非正价与 NaN 必须同等对待。"""
+    masked({"A.SZ": _row(px)})                         # can_buy/can_sell 都是 True
+    with pytest.raises(ValueError, match="A.SZ"):       # 持仓：算不出权重 → 炸
+        simulate(EXEC, _s({"A.SZ": 0.2}), _s({"A.SZ": 1000.0}), EQ, signal_date=SIG)
+
+    trades, holdings, blocked, _ = simulate(EXEC, _s({"A.SZ": 0.2}), _s({}), EQ, signal_date=SIG)
+    assert len(trades) == 0 and len(holdings) == 0      # 未持仓：拦下，不是买 inf 股
     assert list(blocked["reason"]) == ["no_price"]
 
 
@@ -343,10 +417,48 @@ def test_empty_inputs_return_empty_frames_with_columns(masked):
     assert len(holdings) == 0 and warns == []
 
 
-def test_fully_sold_name_leaves_holdings(masked):
-    masked({"A.SZ": _ok(10.0)})
-    _, holdings, _, _ = simulate(EXEC, _s({"A.SZ": 0.0}), _s({"A.SZ": 1000.0}), EQ, signal_date=SIG)
+def test_blocked_position_is_bitwise_unchanged(masked):
+    """文档字符串承诺被拦的票"逐位等于 prev_holdings（不经价格往返）"。
+    1000 股 @ 10.0 / 权益 1e6 满足这条断言靠的是算术恰好整除 —— 换一组不整除的数字，
+    任何"用最终权重反算股数"的实现都会差出 6e-11 股，而它正是幽灵仓位的来源。"""
+    shares, price, eq = 408_082.0, 55.037188, 29_289_208.1
+    masked({"A.SZ": _down(price)})                      # 跌停卖不出 → 停在 w_prev
+    _, holdings, blocked, _ = simulate(
+        EXEC, _s({"A.SZ": 0.0}), _s({"A.SZ": shares}), eq, signal_date=SIG)
+    assert holdings["A.SZ"] == shares                   # 逐位相等，不是 approx
+    assert list(blocked["ts_code"]) == ["A.SZ"]
+
+
+@pytest.mark.parametrize("shares,price,eq", [
+    (1000.0, 10.0, EQ),                        # 整除：股数往返恰好回到 0
+    (408_082.0, 55.037188, 29_289_208.1),      # 不整除：往返留下 −5.8e-11 股
+])
+def test_fully_sold_name_leaves_holdings(masked, shares, price, eq):
+    """卖光就必须消失，**且不能靠算得干净**。`(s·p/E)·E/p` 不逐位等于 s：
+    `holdings != 0` 这种精确比较会留下一个 −5.8e-11 股的幽灵，它对应的 |Δw| ~ 1e-16
+    又永远够不到成交阈值 —— 于是它自己永远清不掉，而 holdings 会回灌成下一期的
+    prev_holdings：每一只持过的票从此赖在 codes 里，其中任何一只日后丢了行情，
+    `unpriceable`（判 shares_prev != 0）就把整轮 15 年回测炸掉。一粒 1e-9 元的舍入渣。
+
+    修法的原则是**两个阈值必须由构造保证一致**：留下谁按最终【权重】判（`|w| > _W_EPS`），
+    与成交判据同量同 eps，否则就造出"小到不能交易、又大到不能删除"的那个陷阱态。
+    """
+    masked({"A.SZ": _ok(price)})
+    _, holdings, _, _ = simulate(EXEC, _s({"A.SZ": 0.0}), _s({"A.SZ": shares}), eq, signal_date=SIG)
     assert "A.SZ" not in holdings.index
+
+
+@pytest.mark.parametrize("bad_in", ["targets", "prev_holdings"])
+def test_nan_inputs_are_rejected_not_filled(masked, bad_in):
+    """`reindex(codes).fillna(0.0)` 只该补【新出现的 label】，不该悄悄改写输入里的 NaN：
+    目标 NaN 被填成 0 = "卖光"（实测：1000 股整仓 SELL），持仓 NaN 被填成 0 = "空仓"，
+    还顺手绕过无价守卫、再从一个不存在的零基上把目标买满。两条都不抛不告警。"""
+    masked({"A.SZ": _ok(10.0)})
+    nan = float("nan")
+    tgt = _s({"A.SZ": nan}) if bad_in == "targets" else _s({"A.SZ": 0.0})
+    prev = _s({"A.SZ": nan}) if bad_in == "prev_holdings" else _s({"A.SZ": 1000.0})
+    with pytest.raises(ValueError, match=bad_in):
+        simulate(EXEC, tgt, prev, EQ, signal_date=SIG)
 
 
 @pytest.mark.parametrize("bad", [0.0, -1.0])
@@ -390,6 +502,24 @@ def test_fill_price_is_exec_day_open_end_to_end(live_db):
     assert px == pytest.approx(21.0 * adj_exec)          # ← 唯一正确的那个
     for wrong in (23.0 * adj_exec, 19.0 * adj_sig, 19.5 * adj_sig, 21.0):
         assert abs(px - wrong) > 1e-6
+
+
+def test_delisted_is_force_liquidated_end_to_end(live_db):
+    """退市强平走真库：C00003.SH 于 2024-01-24 退市，此后 daily_bar 不再有行 ——
+    掩码的 `delisted_late` 分支给出 can_sell=True + 最后一根非停牌 K 线的后复权收盘价。
+    打桩层看不到这条路由（假掩码是手写的），而它正是 §5.5 的落点：**目标给的是非零残值，
+    仍须全清**，成交价 = 最后有效后复权收盘 × 0.5。"""
+    exec_d, sig_d = dt.date(2024, 1, 26), dt.date(2024, 1, 25)
+    last_close_hfq = query.get_bars("2024-01-24", ["C00003.SH"], lookback=1)["close"].iloc[0]
+
+    trades, holdings, blocked, warns = simulate(
+        exec_d, _s({"C00003.SH": 0.02}), _s({"C00003.SH": 10_000.0}), EQ, signal_date=sig_d)
+
+    assert list(trades["ts_code"]) == ["C00003.SH"] and trades.loc[0, "side"] == "SELL"
+    assert trades.loc[0, "price_hfq"] == pytest.approx(last_close_hfq * 0.5)
+    assert trades.loc[0, "shares"] == pytest.approx(10_000.0)    # 非零目标不留残值
+    assert len(holdings) == 0 and len(blocked) == 0
+    assert any("C00003.SH" in w for w in warns)
 
 
 def test_unknown_limit_is_untradable_end_to_end(live_db):
