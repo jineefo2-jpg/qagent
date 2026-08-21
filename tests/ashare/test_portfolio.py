@@ -8,13 +8,16 @@
   2. 【硬】Σw == target_position —— 除非账本填不满（名额不够 / 行业上限拦住），此时留现金 + warning；
   3. 【软】max_turnover —— 与前两条冲突时让路，让路必须出现在 warnings 里。
 
-★ 最容易写错、也最值钱的三条：
-  - `test_all_nan_scores_holds_the_book`：全 NaN 返回 prev【原样】而不是空 Series。
-    空 Series 读作清仓；数据中断常与极端行情同期，回测里会伪装成「暴跌前防御性离场」的假净值。
+★ 最容易写错、也最值钱的四条：
+  - `test_outage_returns_none_*`：中断日返回 `None`。空 Series 读作清仓（中断常与极端
+    行情同期，回测里会伪装成「暴跌前防御性离场」的假净值）；`prev` 原样读作「这是你的
+    目标」，而它是 T 收盘度量的、simulate 会在 τ 开盘把整夜跳空当成交易做掉。
   - `test_turnover_is_measured_against_drifted_prev_weights`：换手是【实际要成交的量】，
     对着上期目标权重量会系统性错量，而换手直接进交易成本，错量直接落到净额收益上。
   - `test_partial_execution_never_leaves_*`：换手裁剪留下的未成交残余会顶破风险上限，
     此时补足那几笔并超预算告警，而不是"上限破了就破了"。
+  - `test_a_binding_turnover_budget_is_never_silent`：预算【绑定】时被裁掉的调仓不破坏
+    任何一条硬约束，所以除了那条 warning 没有第二样东西能发现账本已经不是目标账本。
 """
 from __future__ import annotations
 import numpy as np
@@ -154,6 +157,25 @@ def test_single_cap_binds_when_top_n_is_too_small_and_the_rest_is_cash():
     assert any("现金" in x for x in warns), warns
 
 
+def test_tied_scores_pick_the_same_book_however_the_index_is_ordered():
+    """分数打平时选谁，不能取决于调用方 index 的先后 —— 那样 D7 复现只是碰巧成立。
+
+    精确的平手在这里是常态：§3.3 把算不出的 z-score 填成【正好 0】，§3.1 把离群值
+    MAD 截到【正好】边界值。`get_universe` 今天返回排好序的 ts_code，但没有任何文档
+    承诺这一点，靠它等于把可复现性押在一个上游实现细节上。
+    （换手侧天生免疫：那边的 idx 出自 `Index.union`，本来就排过序 —— 正因如此这处
+    不对称肉眼看不出来。）
+    """
+    ind = pd.Series({"AAA": "X", "BBB": "Y", "CCC": "Y"})
+    cs = PortfolioConstraints(top_n=2, max_single=1.0, max_industry=0.5)
+    books = []
+    for order in (["AAA", "BBB", "CCC"], ["AAA", "CCC", "BBB"], ["CCC", "BBB", "AAA"]):
+        sc = _s({"AAA": 5.0, "BBB": 3.0, "CCC": 3.0}).reindex(order)
+        w, _ = build_targets(sc, 1.0, _s({}), ind, cs)
+        books.append(sorted(w.index))
+    assert books[0] == books[1] == books[2] == ["AAA", "BBB"]   # 平手取 ts_code 小者
+
+
 def test_max_weight_never_exceeds_max_single():
     sc = _s({"A": 2.0, "B": 1.0})
     cs = PortfolioConstraints(top_n=2, max_single=0.3, max_industry=1.0)
@@ -163,30 +185,64 @@ def test_max_weight_never_exceeds_max_single():
 
 # ── NaN / 数据中断 ────────────────────────────────────────────────────
 
-def test_all_nan_scores_holds_the_book():
-    """全 NaN 是数据中断，不是清仓信号。返回 prev【原样】—— 空 Series 读作清仓。"""
+def test_outage_returns_none_not_an_empty_book_and_not_prev():
+    """中断日交出 `None`。三版口径里只有它读不歪 ——
+
+    空 Series 读作【清仓】，而中断常与极端行情同期，回测里会长成「暴跌前防御性离场」；
+    `prev` 原样读作【这是你的目标】，但它是 T 日收盘度量的权重，`simulate` 会在 τ 开盘
+    重算漂移，于是在一个说了「今天不调仓」的日子里把整夜跳空当成交易做掉、还真扣成本。
+    `None` 不等于引擎什么都不做：`simulate(targets=None)` 是「τ 开盘持平 + 只做强制退出」。
+    """
     prev = _s({"A": 0.3, "B": 0.2})
     sc = pd.Series({"A": np.nan, "B": np.nan, "C": np.nan}, dtype=float)
     cs = PortfolioConstraints(top_n=2, max_single=0.5, max_industry=1.0)
     w, warns = build_targets(sc, 1.0, prev, _solo(sc.index), cs)
 
-    pd.testing.assert_series_equal(w, prev, check_names=False)
-    assert len(w) > 0 and abs(w.sum() - prev.sum()) < TOL
+    assert w is None                            # 不是空 Series，也不是 prev
     assert any("中断" in x for x in warns), warns
 
 
-def test_all_nan_scores_with_no_prior_book_returns_empty_without_raising():
+def test_outage_returns_none_with_no_prior_book_too_without_raising():
+    """首期就中断：仍然是 None。空 Series 在这里"看起来对"，但它与清仓无法区分。"""
     sc = pd.Series({"A": np.nan}, dtype=float)
     cs = PortfolioConstraints(top_n=2, max_single=0.5, max_industry=1.0)
     w, warns = build_targets(sc, 1.0, _s({}), _solo(sc.index), cs)
-    assert len(w) == 0 and warns
+    assert w is None and warns
 
 
-def test_empty_scores_holds_the_book():
+def test_empty_scores_is_an_outage_too():
     prev = _s({"A": 0.4})
     w, warns = build_targets(_s({}), 1.0, prev, _s({}), PortfolioConstraints())
-    pd.testing.assert_series_equal(w, prev, check_names=False)
-    assert warns
+    assert w is None and warns
+
+
+def test_the_coverage_floor_sits_at_exactly_50_percent():
+    """闸门常数本身要被钉住 —— 它挪到 42% 就是"拿 42% 的覆盖率照常下单"，正是亏钱那侧。
+
+    50/100 建仓、49/100 冻结，把常数夹在 (0.49, 0.50]，同时钉死 `<` 不能写成 `<=`。
+    （n=10 的 4 只/5 只钉不住 42%：0.42×10=4.2 与 0.5×10=5 之间没有整数，两者行为全同。）
+    """
+    cs = PortfolioConstraints(top_n=3, max_single=0.5, max_industry=1.0)
+
+    def _run(n_valid: int):
+        d = {f"S{i:03d}": (float(100 - i) if i < n_valid else np.nan) for i in range(100)}
+        sc = pd.Series(d, dtype=float)
+        return build_targets(sc, 0.6, _s({}), _solo(sc.index), cs)
+
+    w_ok, _ = _run(50)
+    assert w_ok is not None and list(w_ok.index) == ["S000", "S001", "S002"]
+    w_out, warns = _run(49)
+    assert w_out is None and any("覆盖率" in x for x in warns), warns
+
+
+def test_a_dropna_ing_caller_is_called_out_because_it_blinds_the_coverage_gate():
+    """`industry` 按完整股票池索引，`scores` 比它短 = 调用方先剔了 NaN。
+    那样覆盖率恒等于 100%，上面那道闸门再也不会响 —— 这条约定不能只写在文档里。"""
+    sc = _s({"A": 3.0, "B": 2.0})                    # 已 dropna
+    ind = _solo(["A", "B", "C", "D"])                # 完整股票池
+    cs = PortfolioConstraints(top_n=2, max_single=0.5, max_industry=1.0)
+    _, warns = build_targets(sc, 0.4, _s({}), ind, cs)
+    assert any("失明" in x for x in warns), warns
 
 
 def test_partial_nan_above_the_coverage_floor_ranks_the_survivors():
@@ -209,7 +265,7 @@ def test_coverage_below_the_floor_is_treated_as_an_outage():
     cs = PortfolioConstraints(top_n=3, max_single=0.5, max_industry=1.0)
     w, warns = build_targets(sc, 1.0, prev, _solo(sc.index), cs)
 
-    pd.testing.assert_series_equal(w, prev, check_names=False)
+    assert w is None
     assert any("覆盖率" in x for x in warns), warns
 
 
@@ -244,7 +300,30 @@ def test_turnover_is_clipped_to_the_budget_and_the_sum_still_lands_on_target():
 
     assert abs(w.sum() - 0.14) < TOL
     assert abs(_l1(w, prev) - 0.06) < TOL      # 预算用满，不是保守地少做
-    assert warns == []
+    # 用满 ≠ 做完：A/B 各差 0.02、C 一股没卖、D 只卖了 3/4。这里原本断言 `warns == []`，
+    # 那正是被评审抓到的静默 —— 见下面 test_a_binding_turnover_budget_is_never_silent。
+    assert any("拦下 4 笔" in x for x in warns), warns
+
+
+def test_a_binding_turnover_budget_is_never_silent():
+    """预算【绑定】时也必须告警，不只【超出】时 —— 否则整本账都能被换掉而无人察觉。
+
+    评审的最小复现：目标是 {A, B}，实际交出的是 {A, Z} —— 账本留着【最想卖掉的】Z
+    （分数最低），也没买进前二的 B。而 Σw = π、换手恰好等于 τ，**每一条硬约束都满足**，
+    所以除了这条 warning 之外没有第二样东西能发现账本已经不是目标账本了。
+    何况 `BacktestResult.positions.target_weight` 存的是【交出的】权重，
+    意图中的账本哪儿都没留 —— 净值曲线因此无法归因。
+    """
+    prev = _s({"Z": 0.10})
+    sc = _s({"A": 3.0, "B": 2.0, "Z": -1.0})
+    cs = PortfolioConstraints(top_n=2, max_single=0.5, max_industry=1.0, max_turnover=0.10)
+    w, warns = build_targets(sc, 0.10, prev, _solo(sc.index), cs)
+
+    assert abs(w.sum() - 0.10) < TOL                     # Σw == π
+    assert abs(_l1(w, prev) - 0.10) < TOL                # 换手恰好等于 τ，不超
+    assert abs(_wt(w, "Z") - 0.05) < TOL                 # 最想卖的那只留下了一半
+    assert abs(_wt(w, "B")) < TOL                        # 前二里的 B 一股没买
+    assert any("拦下" in x and "L1=" in x for x in warns), warns
 
 
 def test_the_largest_delta_trades_execute_first():
@@ -361,6 +440,34 @@ def test_partial_execution_never_leaves_a_position_above_max_single():
     assert any("换手" in x for x in warns), warns
 
 
+def test_a_hair_over_the_industry_cap_still_counts_as_over():
+    """行业上限的越界判定容差只吞浮点噪声（1e-12），不吞真实的超配。
+
+    X 漂到 20.05%（上限 20%）—— 0.05% 看着不值一提，但这是**检测阈值**：它一放宽，
+    整个不动点循环就当这行业合规，超配会一路留在账上。单股侧已经被 CAP_EPS 的用例钉住，
+    行业侧不能只靠"权重都是 w_unit 的整数倍"这个巧合。
+    """
+    prev = _s({"A": 0.1002, "B": 0.1003, "C": 0.0995, "D": 0.1000})   # Σ = π，ν = 0
+    sc = _s({"C": 4.0, "D": 3.0, "A": 2.0, "B": 1.0})
+    ind = _ind(("X", "A", "B"), ("Y", "C", "D"))
+    cs = PortfolioConstraints(top_n=4, max_single=0.5, max_industry=0.20, max_turnover=0.0002)
+    w, _ = build_targets(sc, 0.40, prev, ind, cs)
+
+    _assert_risk_caps(w, ind, cs)
+    assert w.groupby(ind.reindex(w.index)).sum()["X"] <= 0.20 + TOL
+
+
+def test_turnover_a_hair_over_the_budget_still_warns():
+    """告警阈值也是个可以被悄悄放宽的常数。ν = 0.32 对着 0.30 的预算只超 7% ——
+    现有用例都超到 2 倍以上，把阈值改成 1.5×budget 照样全绿。"""
+    prev = _s({"A": 0.10})
+    cs = PortfolioConstraints(top_n=1, max_single=0.5, max_industry=1.0, max_turnover=0.30)
+    w, warns = build_targets(_s({"A": 5.0}), 0.42, prev, _solo(["A"]), cs)
+
+    assert abs(_l1(w, prev) - 0.32) < TOL
+    assert any("> 上限" in x for x in warns), warns
+
+
 def test_partial_execution_never_leaves_an_industry_above_max_industry():
     """X 行业漂移到 55%（上限 50%），本期目标 50%，但换手预算只有 1%。"""
     prev = _s({"A": 0.30, "B": 0.25, "C": 0.25, "D": 0.20})
@@ -372,6 +479,58 @@ def test_partial_execution_never_leaves_an_industry_above_max_industry():
     _assert_risk_caps(w, ind, cs)
     assert abs(w.sum() - 1.0) < TOL
     assert any("换手" in x for x in warns), warns
+
+
+def test_a_forced_pin_is_charged_against_the_budget_not_added_on_top():
+    """被迫成交的那笔要**从**换手预算里扣，不是额外加在预算之上。
+
+    V 漂到 0.12（上限 0.10），补足它花掉 0.02；剩下的自由调仓只剩 0.08 可用 ——
+    买卖各 0.04（成对收缩）。总换手因此恰好 = τ = 0.10。
+    把 `left = max(0, budget − forced)` 写成 `left = budget` 的话总换手变成 0.12：
+    凭空多出的那 0.02 会被 §5.4 的成本模型如实扣进净值，是真金白银。
+    """
+    prev = _s({"V": 0.12, "C": 0.10, "D": 0.10} | {f"K{i}": 0.10 for i in range(7)})
+    sc = _s({"V": 10.0, "A": 9.0, "B": 8.0, "C": -2.0, "D": -1.0}
+            | {f"K{i}": float(7 - i) for i in range(7)})
+    ind = _solo(sc.index)
+    cs = PortfolioConstraints(top_n=10, max_single=0.10, max_industry=1.0, max_turnover=0.10)
+    w, warns = build_targets(sc, 1.0, prev, ind, cs)
+
+    _assert_risk_caps(w, ind, cs)
+    assert abs(_wt(w, "V") - 0.10) < TOL       # 越界那只被补足（成交 0.02，无条件）
+    assert abs(_l1(w, prev) - 0.10) < TOL      # 总换手 == τ，pin 不是额外配额
+    assert abs(_wt(w, "C") - 0.06) < TOL       # 自由额度 0.08 → 卖 0.04
+    assert abs(_wt(w, "A") - 0.04) < TOL       #              → 买 0.04
+    assert not any("换手 " in x for x in warns), warns   # 没超预算，只是绑定
+
+
+# 这批数字来自一次定向搜索（16 只票，见提交说明）：不动点循环要走 **13 轮**才收敛。
+# 深循环是正常运转不是异常 —— 计划初稿的「最多 10 轮」在这里会静默交出越界的仓位。
+_DEEP = {  # code: (score, prev, industry)
+    "S00": (1.28, 0.04, "X"), "S01": (-0.66, 0.15, "Y"), "S02": (-0.21, 0.11, "X"),
+    "S03": (0.87, 0.14, "X"), "S04": (1.02, 0.13, "Y"), "S05": (1.77, 0.02, "X"),
+    "S06": (0.15, 0.13, "X"), "S07": (1.13, 0.12, "Y"), "S08": (2.90, 0.01, "Y"),
+    "S09": (-0.43, 0.14, "Y"), "S10": (-1.12, 0.07, "X"), "S11": (-1.64, 0.12, "X"),
+    "S12": (1.51, 0.10, "X"), "S13": (0.29, 0.12, "Y"), "S14": (-1.10, 0.13, "X"),
+    "S15": (1.25, 0.11, "Y"),
+}
+
+
+def test_the_pin_cascade_runs_well_past_ten_rounds():
+    """补足一笔越界会吃掉换手预算，于是下一只原本刚好合规的票掉回 w_prev 又越界 ——
+    一轮解一只。实测这条链在 16 只票的账本上走满 13 轮。
+
+    所以轮次上界只能是 `len(idx)+1`：写死 10 轮时本例返回的 S01 = 0.075 对着 0.05 的
+    上限（超 50%），而其余用例全绿 —— 没有任何东西会叫。
+    """
+    sc = _s({k: v[0] for k, v in _DEEP.items()})
+    prev = _s({k: v[1] for k, v in _DEEP.items()})
+    ind = pd.Series({k: v[2] for k, v in _DEEP.items()})
+    cs = PortfolioConstraints(top_n=5, max_single=0.05, max_industry=0.5, max_turnover=0.3)
+    w, _ = build_targets(sc, 1.0, prev, ind, cs)
+
+    _assert_risk_caps(w, ind, cs)
+    assert _wt(w, "S01") <= 0.05 + TOL         # 10 轮版本在这只上交出 0.075
 
 
 @pytest.mark.parametrize("seed", range(30))
@@ -389,9 +548,8 @@ def test_all_hard_constraints_hold_jointly_on_random_books(seed):
                               max_industry=0.35, max_turnover=float(rng.choice([0.05, 0.3, 2.0])))
     w, warns = build_targets(sc, pi, prev, ind, cs)
 
-    if np.isfinite(sc).sum() < 0.5 * len(sc):          # 数据中断分支：原样返回 prev，不受约束管辖
-        pd.testing.assert_series_equal(w, prev, check_names=False)
-        assert warns
+    if np.isfinite(sc).sum() < 0.5 * len(sc):          # 数据中断分支：该日不调仓
+        assert w is None and warns
         return
     _assert_risk_caps(w, ind, cs)
     assert w.sum() <= pi + TOL
@@ -411,9 +569,31 @@ def test_risk_parity_weighting_is_refused_not_silently_equal_weighted():
         build_targets(_s({"A": 1.0, "B": 2.0}), 1.0, _s({}), _solo(["A", "B"]), cs)
 
 
+def test_nan_prev_weight_is_refused_not_read_as_zero():
+    """NaN 的上期权重是「这只票的敞口算不出来」（停牌无价的持仓在
+    `holdings × price / equity` 里就是 NaN），不是「没持有」。
+
+    填 0 的后果是三连静默：该票从返回值里整个消失（最后一行按 `prv != 0` 保留）、
+    于是永远不会被卖出、它的漂移也永远不计入换手。敞口路径上失败必须响。
+    """
+    prev = pd.Series({"HELD": 0.2, "SUSPENDED": np.nan}, dtype=float)
+    cs = PortfolioConstraints(top_n=2, max_single=0.5, max_industry=1.0)
+    with pytest.raises(ValueError, match="SUSPENDED"):
+        build_targets(_s({"HELD": 1.0, "SUSPENDED": 2.0}), 0.4, prev,
+                      _solo(["HELD", "SUSPENDED"]), cs)
+
+
 def test_negative_target_position_is_refused():
     with pytest.raises(ValueError):
         build_targets(_s({"A": 1.0}), -0.1, _s({}), _solo(["A"]), PortfolioConstraints(top_n=1))
+
+
+@pytest.mark.parametrize("top_n", [0, -1])
+def test_nonpositive_top_n_is_refused(top_n):
+    """没有这条用例时闸门是死的：拿掉它 top_n=0 也只是在 π/0 上抛 ZeroDivisionError。"""
+    with pytest.raises(ValueError, match="top_n"):
+        build_targets(_s({"A": 1.0}), 0.5, _s({}), _solo(["A"]),
+                      PortfolioConstraints(top_n=top_n))
 
 
 def test_names_without_an_industry_share_one_conservative_bucket():
