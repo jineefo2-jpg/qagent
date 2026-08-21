@@ -17,6 +17,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Sequence, Union
 
+import numpy as np
 import pandas as pd
 
 DateLike = Union[str, _dt.date]
@@ -70,10 +71,17 @@ def factor(*, name: str, direction: int, category: str, lookback_days: int,
         # ★ direction 只在这里进入系统，而每个错值都在【钱的路径】上静默失败：
         #   0 让该因子对合成分数毫无贡献；2 双倍加权；符号反了就是反向下注。
         #   三者都不报错，只产出一条看起来合理的净值曲线 —— 正是 CLAUDE.md 铁律要拦的那类。
-        #   只校验 direction：category 打错会在 list_factors 里明显缺人，min_coverage 越界会明显输出空，
-        #   唯独 direction 是"数字被悄悄改坏而外观正常"。
         if direction not in (1, -1):
             raise ValueError(f"因子 {name!r} 的 direction 必须是 +1 或 -1，实际 {direction!r}")
+        # ★ category 自 Task 7 起也在钱的路径上 —— 它是 combine 的 alpha 白名单的钥匙。
+        #   枚举闸只拦【拼写】（'pricee' / 'Price' / ''），而且拦在写错的那一行上。
+        #   它拦不住【语义】写错（一个风险因子抄成 category="price"）：拦那个的是
+        #   test_factors_flow_risk 的 _EXPECTED_COUNTS —— 那条断言按 6/8/1/3 分类计数
+        #   而不是只数总数 18，正是为了让"抄串类别"改变某一格的计数。
+        #   ★ 不加"neutralize 必须与 category 一致"的交叉校验：一个本来就中性的 alpha
+        #   因子合法地可以 neutralize=False，加了等于禁掉它。
+        if category not in CATEGORIES:
+            raise ValueError(f"因子 {name!r} 的 category={category!r} 不是 {CATEGORIES} 之一")
         old = FACTOR_REGISTRY.get(name)
         if old is not None:
             raise ValueError(
@@ -114,11 +122,22 @@ def list_factors(category: str | None = None) -> list[FactorSpec]:
 #   两个真相来源迟早会打架。
 ALPHA_CATEGORIES = ("price", "fundamental", "flow")
 
+# 注册时的 category 枚举闸（见 `factor`）。写成"ALPHA + risk"而不是第二份字面量：
+# 将来新增一类时，加进哪一边就是一次显式的"它算不算 alpha"的决定，漏一边直接注册失败。
+CATEGORIES = ALPHA_CATEGORIES + ("risk",)
+
 
 def _as_date(x: DateLike) -> _dt.date:
     """str / date / datetime / Timestamp 一律归一成 date。
     date 与 datetime 直接比较会 TypeError，而那一炸只在跑到 available_from 附近才发生。"""
-    return pd.Timestamp(x).date()
+    ts = pd.Timestamp(x)
+    # ★ None / NaN → NaT，而 NaT 的比较【看对面的类型】：NaT < date 抛 TypeError，
+    #   NaT < datetime 或 Timestamp 静默返回 False。available_from 标注是 date，
+    #   但 datetime 是 date 的子类，哪个因子这么写都合法 —— 那一天 available_from
+    #   这道短路就被静默关掉：2016 年之前照样取数、照样出一列看起来正常的值。
+    if pd.isna(ts):
+        raise ValueError(f"as_of_date={x!r} 不是日期（NaT）：它会让 available_from 短路时灵时不灵")
+    return ts.date()
 
 
 def _checked_universe(universe: Sequence[str]) -> list[str]:
@@ -179,7 +198,8 @@ def compute_factor(name: str, as_of_date: DateLike, universe: Sequence[str], *,
 
 def compute_panel(names: Sequence[str], as_of_date: DateLike, universe: Sequence[str], *,
                   processed: bool = True) -> tuple[pd.DataFrame, list[str]]:
-    """多个因子的当日横截面。返回 `(DataFrame, warnings)`；**列顺序 == 传入的 names 顺序**。
+    """多个因子的当日横截面。返回 `(DataFrame, warnings)`；**列顺序 == 传入的 names 顺序**
+    （由下面那个按 `cols` 填的 dict 决定 —— 原来还多传一个 `columns=cols`，是死参数）。
 
     逐个因子顺序算，不并行：DuckDB 的只读连接与 `query._PRELOAD` 缓存都是进程内共享
     状态，为一次能省几秒的调用引入线程是拿"回测结果可复现"换的。
@@ -198,7 +218,7 @@ def compute_panel(names: Sequence[str], as_of_date: DateLike, universe: Sequence
     for n in cols:
         data[n], w = compute_factor(n, as_of_date, universe, processed=processed)
         warns += w
-    return pd.DataFrame(data, columns=cols), warns
+    return pd.DataFrame(data), warns
 
 
 def combine(weights: Mapping[str, float], as_of_date: DateLike, universe: Sequence[str]
@@ -235,7 +255,11 @@ def combine(weights: Mapping[str, float], as_of_date: DateLike, universe: Sequen
                 f"「方向样本内冻结」（规格 §6）的后门 —— 要翻符号请改 direction")
         specs[n] = spec
 
-    codes = _checked_universe(universe)
+    # universe 守卫【不在这里再调一遍】：weights 非空（上面已拦）→ 下面的循环至少走一趟
+    # → compute_factor 一定先验一次，报的是同一条错。原来这里也调 _checked_universe，
+    # 理由写的是"全部因子不可用时还要造出正确 index 的 NaN Series"—— 那条路只在至少
+    # 成功验过一次之后才到得了，所以那次校验是纯冗余（每个调仓日多验 18 遍）。
+    codes = list(universe)
     num = pd.Series(0.0, index=codes)
     den = 0.0
     dropped: list[str] = []
@@ -243,12 +267,20 @@ def combine(weights: Mapping[str, float], as_of_date: DateLike, universe: Sequen
     for n, spec in specs.items():
         raw, w1 = compute_factor(n, as_of_date, codes, processed=False)
         warns += w1
-        cov = float(raw.notna().sum()) / len(codes)
+        # 用 isfinite 而不是 notna：±inf 也算"没有值"，与 build_targets 的覆盖率闸同一口径
+        # （portfolio.py「±inf 与 NaN 同等处理」）。notna 会把 inf 数进覆盖率，而 inf 一旦
+        # 撞上 MAD==0（稀疏因子常见，winsorize 原样返回）就是 mean=inf/std=nan → zscore 全 NaN
+        # → fillna(0) 变成一列恒 0：留在分母里把其余因子整体缩小，还一条 warning 都不出。
+        cov = float(np.isfinite(raw.to_numpy(dtype=float)).sum()) / len(codes)
         # cov == 0 与 min_coverage 无关地剔除：min_coverage=0 不等于"空因子也算数"，
         # 一列全 NaN 经 process 会变成一列 0，进了分子分母就是把其余因子整体缩小。
         if cov == 0.0 or cov < spec.min_coverage:
             dropped.append(f"{n}(覆盖率 {cov:.0%}，min_coverage {spec.min_coverage:.0%})")
             continue
+        # ★ 这是全仓第二处调 process（另一处是 compute_factor）。combine 要在 process 之前
+        #   量覆盖率，所以复用不了 compute_factor(processed=True) —— 但代价是"processed"
+        #   有了两个定义：往 compute_factor 的链上加一步而漏了这里，合成分数就悄悄少一步。
+        #   两行必须保持一模一样。
         z, w2 = pipeline.process(raw, as_of_date, codes, spec=spec)
         warns += w2
         num += float(weights[n]) * spec.direction * z

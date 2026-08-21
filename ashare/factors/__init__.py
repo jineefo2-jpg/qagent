@@ -9,8 +9,16 @@
 """
 from __future__ import annotations
 
-from .base import FACTOR_REGISTRY, FactorSpec, factor, get_factor, list_factors
+from .base import (FACTOR_REGISTRY, FactorSpec, combine, compute_factor, compute_panel,
+                   factor, get_factor, list_factors)
 from . import price, fundamental, flow, risk    # noqa: F401  —— 导入即注册，见上
 
+# ★ 三个计算入口必须出现在这里：包的公开面就是下一个人照抄的那条路。
+#   只导出 get_factor 的话，`get_factor(n).fn(as_of, universe)` 是一行合法的公开写法，
+#   而它一次绕过【四】道闸：_checked_universe（18 个因子唯一的校验点）、
+#   reindex(codes)（因子契约允许返回子集，少几行 = 落库写短行）、
+#   spec.default_params（"缓存写着 window=5、内容是 99"，而 param_hash 是 factor_value 主键）、
+#   available_from 短路。走 compute_factor 才有这四道。
 __all__ = ["FACTOR_REGISTRY", "FactorSpec", "factor", "get_factor", "list_factors",
+           "compute_factor", "compute_panel", "combine",
            "price", "fundamental", "flow", "risk"]

@@ -149,6 +149,28 @@ def test_direction_must_be_plus_or_minus_one():
     assert base.FACTOR_REGISTRY == {}, "校验失败的因子不得留在注册表里"
 
 
+def test_category_must_be_one_of_the_four():
+    """★ category 自 Task 7 起也在钱的路径上 —— 它是 combine 的 alpha 白名单的钥匙。
+    手滑写成 'pricee' / 'Price' / '' 的那一行，今天只表现为 list_factors 里少个人，
+    而白名单一旦哪天被改回黑名单，它就是静默变 alpha。枚举闸在【注册时】炸，
+    错报在写错的那一行上。
+
+    它拦不住【语义】写错（风险因子抄成 category='price'）—— 拦那个的是
+    test_factors_flow_risk 的 _EXPECTED_COUNTS：那条断言按 6/8/1/3 分类计数而不是
+    只数总数 18，正因为抄串类别只改变某一格。也【不】拿 spec.neutralize 做交叉校验：
+    一个本来就中性的 alpha 因子合法地可以 neutralize=False。"""
+    for bad in ("pricee", "Price", "", "quality", None):
+        with pytest.raises(ValueError, match="category"):
+            _register(f"c_{bad!r}", category=bad)
+    assert base.FACTOR_REGISTRY == {}, "校验失败的因子不得留在注册表里"
+
+    # 反向锚：枚举收紧过头同样静默 —— 少一类就是那一批因子集体注册失败。
+    assert base.CATEGORIES == ("price", "fundamental", "flow", "risk")
+    for ok in base.CATEGORIES:
+        _register(f"ok_{ok}", category=ok)
+    assert len(base.FACTOR_REGISTRY) == 4
+
+
 def test_unserializable_default_param_fails_at_registration_not_at_first_hash():
     """不可确定性序列化的默认参数进了 param_hash 就等于主键随进程变。
     要在【注册时】炸 —— 等到 store.build 才炸的话，traceback 里已经看不出是哪个因子模块。"""
@@ -293,6 +315,20 @@ def test_available_from_comparison_accepts_str_date_and_datetime(as_of):
     assert out.isna().all()
 
 
+@pytest.mark.parametrize("available_from", [dt.date(2016, 12, 5), dt.datetime(2016, 12, 5)])
+def test_a_nat_as_of_date_is_rejected_instead_of_silently_skipping_available_from(available_from):
+    """★ `pd.Timestamp(None)` 是 NaT，而 NaT 的比较【看对面的类型】（实测 pandas 2.3.3）：
+    `NaT < date` 抛一句看不出主语的 TypeError；`NaT < datetime` 与 `NaT < Timestamp`
+    【静默返回 False】。而 datetime 是 date 的子类，`available_from: date | None`
+    这个标注本来就允许写成 datetime —— 于是同一个坏 as_of_date，一个因子当场炸、
+    另一个因子照常取数并产出一列看起来完全正常的值。在归一那一步就拒，两种写法同一条错。"""
+    calls = []
+    _reg("north", available_from=available_from, calls=calls)
+    with pytest.raises(ValueError, match="as_of_date"):
+        base.compute_factor("north", None, U)
+    assert calls == [], "NaT 绝不能落到因子函数上"
+
+
 # ── compute_factor：参数 ──────────────────────────────────────────────
 
 def test_compute_factor_forwards_param_override_to_the_factor_fn():
@@ -381,6 +417,25 @@ def test_compute_panel_columns_follow_the_names_order_not_sorted():
     assert list(df.index) == U
 
 
+def test_compute_panel_forwards_the_processed_flag_to_every_column():
+    """★ `factor_value` 有 raw_value 与 processed_value 两列（derived_schema.sql）。
+    Task 8 的 `store.build` 用 `compute_panel(processed=False)` 填 raw_value —— 这里若把
+    flag 写死成 True，落进 raw 列的就是 z 分数。两者都是合理的浮点、共用同一个
+    param_hash，下游没有任何人分得出来，从此每一次读 raw_value 的回测读到的都是
+    处理过的面板。【列名对不上也发现不了它，必须比值】——
+    原来那条 processed=False 的用例只断言了 `list(df.columns)`，把 processed=processed
+    改成 processed=True 全量 717 个用例照样绿。"""
+    _reg("a", V1)
+    _reg("b", V2)
+    raw, _ = base.compute_panel(["a", "b"], AS_OF, U, processed=False)
+    pd.testing.assert_series_equal(raw["a"], V1, check_names=False)
+    pd.testing.assert_series_equal(raw["b"], V2, check_names=False)
+
+    done, _ = base.compute_panel(["a", "b"], AS_OF, U)
+    pd.testing.assert_series_equal(done["a"], _z("a", V1), check_names=False)
+    pd.testing.assert_series_equal(done["b"], _z("b", V2), check_names=False)
+
+
 def test_compute_panel_rejects_duplicate_names():
     """重复列名让 df['a'] 返回 DataFrame 而不是 Series —— 下游每一处取值都换了类型。"""
     _reg("a")
@@ -428,8 +483,18 @@ def test_combine_refuses_the_real_risk_factors(clean_registry, name):
 def test_combine_only_accepts_the_three_alpha_categories(category):
     """★ 白名单，不是黑名单。黑名单（category != 'risk'）对下面这些一路放行：
     将来新增的 'quality'、大小写写错的 'Price'、手滑多一个字母的 'pricee'、空串。
-    它们会安安静静穿过 process 变成合成分数的一部分。"""
-    _reg("x", category=category)
+    它们会安安静静穿过 process 变成合成分数的一部分。
+
+    只有 'risk' 走得通装饰器；另外四个已被注册时的枚举闸拦在更前面
+    （test_category_must_be_one_of_the_four），这里【直接塞进注册表】绕过那道闸。
+    它们在这一层代表的是枚举闸按定义拦不住的那一种：
+    CATEGORIES 将来多一个成员、而 ALPHA_CATEGORIES 忘了同步。"""
+    if category in base.CATEGORIES:
+        _reg("x", category=category)
+    else:
+        base.FACTOR_REGISTRY["x"] = base.FactorSpec(
+            name="x", fn=_fn(), direction=1, category=category, lookback_days=1,
+            neutralize=False)
     with pytest.raises(ValueError, match="白名单"):
         base.combine({"x": 1.0}, AS_OF, U)
 
@@ -509,6 +574,10 @@ def test_combine_rejects_empty_weights():
 
 
 def test_combine_inherits_the_universe_guard():
+    """★「继承」是字面意思：守卫只在 compute_factor 里，combine 自己【不】再验一遍。
+    weights 非空（上面那条用例）→ 循环至少走一趟 → 一定先验过。
+    原来 combine 里也调一次 _checked_universe，把它换成 list(universe) 之后全量 717 个
+    用例照样绿 —— 那是等价变异，不是被这条测住的东西，已经删掉（每个调仓日省 18 次校验）。"""
     _reg("a", V1)
     with pytest.raises(ValueError, match="重复"):
         base.combine({"a": 1.0}, AS_OF, [U[0], U[0]])
@@ -570,6 +639,27 @@ def test_combine_drops_a_factor_that_is_not_available_yet_without_rescaling():
     assert any("north" in w for w in warns)
 
 
+def test_combine_counts_inf_as_missing_when_measuring_coverage():
+    """★ ±inf 不是"有值"。`build_targets` 的覆盖率闸明写「±inf 与 NaN 同等处理」
+    （portfolio.py），这里用 notna() 就是两处口径分家：inf 被数进覆盖率、因子留在分母，
+    而 inf 撞上 MAD == 0（稀疏因子常见，winsorize_mad 此时原样返回不裁）时
+    zscore 得 mean=inf / std=NaN → 末端 fillna(0) 把整列压成恒 0 ——
+    分母多算一份权重、分子恒 0、warning 一条都没有，正是 min_coverage 要拦的那个形状。
+
+    5 个有限值 + 1 个 inf + 4 个 NaN：notna 数 6/10 == min_coverage 60%（留下），
+    isfinite 数 5/10 < 60%（剔除）—— 阈值恰好落在两者之间，这个样本量才分得开。"""
+    infy = pd.Series(np.nan, index=U)
+    infy.iloc[:5] = 2.0                                      # 全相同 → MAD == 0
+    infy.iloc[5] = np.inf
+    _reg("a", V1)
+    _reg("infy", infy)
+    assert pipeline.winsorize_mad(infy).max() == np.inf, "前提：MAD==0 时 winsorize 不裁 inf"
+
+    out, warns = base.combine({"a": 1.0, "infy": 1.0}, AS_OF, U)
+    pd.testing.assert_series_equal(out, _z("a", V1), check_names=False)
+    assert any("infy" in w and "50%" in w for w in warns)
+
+
 def test_combine_drops_an_empty_factor_even_when_min_coverage_is_zero():
     """min_coverage=0 不等于"空因子也算数"：一列全 NaN 经 process 会变成一列 0，
     进了分子分母就是把其余因子整体缩小 —— 正是 available_from 那条规则要防的形状。"""
@@ -628,11 +718,18 @@ def test_every_registered_factor_is_reachable_through_both_paths():
     或对陌生名字返回全 NaN 而不是抛），注册表空掉时它这条路仍然"正常"，
     而 `store.build` 那条已经一个因子都拿不到了。两条一起验，并拿一个不存在的名字
     做非空对照 —— 否则"名字可达"恒真。
+
+    ★「内部懒加载因子模块」这个失败模式【已经部分是真的】：`compute_factor` 里那句
+      `from . import pipeline` 会连带 `from .risk import industry, log_mv`，于是第一次
+      调用就把 risk 的三个因子现场注册进来 —— 只 import price 的话注册表在迭代途中
+      从 6 涨到 9。所以下面必须先把名字【快照】成 list 再迭代：直接迭代活字典会得到
+      `RuntimeError: dictionary changed size during iteration`，测试指着解释器报错，
+      而真正的毛病是 __init__.py 少了四行 import。
     """
     script = (
         "import json\n"
         "import ashare.factors as f\n"
-        "from ashare.factors.base import FACTOR_REGISTRY, compute_factor\n"
+        "from ashare.factors import FACTOR_REGISTRY, compute_factor\n"
         "def resolves(n):\n"
         "    try:\n"
         "        compute_factor(n, '2024-01-05', ['S00001.SZ'])\n"
@@ -641,9 +738,10 @@ def test_every_registered_factor_is_reachable_through_both_paths():
         "    except Exception:\n"
         "        return True\n"           # 取不到数（子进程里没连库）不影响"名字可达"
         "    return True\n"
-        "print(json.dumps({'direct': sorted(FACTOR_REGISTRY),\n"
+        "names = sorted(FACTOR_REGISTRY)\n"          # ★ 快照，理由见 docstring 最后一段
+        "print(json.dumps({'direct': names,\n"
         "                  'fns_callable': all(callable(s.fn) for s in FACTOR_REGISTRY.values()),\n"
-        "                  'via_compute_factor': sorted(n for n in FACTOR_REGISTRY if resolves(n)),\n"
+        "                  'via_compute_factor': sorted(n for n in names if resolves(n)),\n"
         "                  'unknown_name_is_keyerror': not resolves('__no_such_factor__')}))\n")
     root = pathlib.Path(__file__).resolve().parents[2]
     proc = subprocess.run([sys.executable, "-c", script], cwd=str(root),
@@ -655,3 +753,22 @@ def test_every_registered_factor_is_reachable_through_both_paths():
     assert got["fns_callable"]
     assert got["via_compute_factor"] == got["direct"], "compute_factor 必须经注册表解析名字"
     assert got["unknown_name_is_keyerror"], "对照项：陌生名字必须抛 KeyError，否则上一条恒真"
+
+
+def test_the_package_exports_the_guarded_compute_entrypoints():
+    """★ 包的公开面就是下一个人照抄的那条路。`__all__` 里只有 `get_factor` 的话，
+    `get_factor(n).fn(as_of, universe)` 是一行完全合法的公开写法 —— 而它一次绕过【四】道闸：
+
+      · `_checked_universe`  —— 18 个因子唯一的校验点
+      · `.reindex(codes)`    —— 因子契约允许返回子集（架构 §4.2 第 3 条），少几行就是
+                                 store.build 写短行，之后 store.read 与 combine 的
+                                 `len(codes)` 分母对不上
+      · `spec.default_params`—— "缓存写着 window=5、内容是 99"，而 param_hash 是
+                                 factor_value 的主键，两者分家永远对不出来
+      · `available_from` 短路
+
+    Task 8 的 store 正是照着这个文件找入口的，所以要让【带闸的那条】是能被找到的那条。"""
+    import ashare.factors as f
+    assert {"compute_factor", "compute_panel", "combine"} <= set(f.__all__)
+    assert (f.compute_factor, f.compute_panel, f.combine) \
+        == (base.compute_factor, base.compute_panel, base.combine)
