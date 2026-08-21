@@ -42,6 +42,16 @@ D6 的原文：「T 日收盘算信号，T+1 集合竞价（09:15–09:25）按�
   而那只票若一字跌停就卖不掉。所以 F 仍须迭代到不动点：F 单调增长，最坏情形全员入 F
   （此时无任何成交、无从违规），故必然收敛。与 `portfolio._violators` 的循环同一个套路。
 
+★ 7【`targets is None` = 数据中断日：持平，但强平照做】（计划 Task 10「2026-08-21 最终口径」）
+  `build_targets` 在全 NaN / 覆盖率不足时返回 `(None, warnings)`。**全 NaN 是数据中断，
+  不是清仓信号** —— 中断与极端行情同期，清仓在回测里会伪装成「策略在暴跌前防御性离场」。
+  `None` 之所以取代前两版候选，是因为另两个都读得歪：**空 Series 读作「清仓」**；
+  **`prev_weights` 读作「这就是你的目标」**，而它度量在 T 收盘、`simulate` 在 τ 开盘重算漂移，
+  于是一个明说「今天不调仓」的日子会把每只票的隔夜跳空当成交易做掉，还真扣成本。
+  落法是把目标取成**τ 开盘的漂移权重本身**（不是调用方给的任何数）：每只票 `Δw ≡ 0`，
+  零自主交易、零成本。**但 `None` 不等于「什么都不做」** —— `tgt.where(~delisted, 0.0)`
+  照常改写退市股，中断日撞上退市仍旧全清，否则 ★5 下面那个 §5.5 幽灵资产的洞又开回来。
+
 不做的事（都是有意的，见 `simulate` 文档字符串的"本模型的天花板"）：
   · 不建模【部分成交】—— 全有或全无。流动性只经 §5.4 的冲击成本以【价格】计价，不以
     【成交量】计价。top-N 落在微盘股上时，现实中的集合竞价深度吃不下，回测吃得下。
@@ -105,7 +115,7 @@ def _allocate(tgt: pd.Series, prev_w: pd.Series, locked: pd.Series, pi: float) -
 
 
 def simulate(exec_date: DateLike,
-             targets: pd.Series,
+             targets: pd.Series | None,
              prev_holdings: pd.Series,
              equity: float,
              *,
@@ -120,6 +130,9 @@ def simulate(exec_date: DateLike,
             语义是**两值的**：缺席 == 0.0 == 卖光。目标账本按定义是完整的，"没意见"
             不是它的一个状态；`build_targets` 保留每一只 `prv != 0`（portfolio.py:226），
             持仓不会意外缺席。**退市股是唯一例外：目标被强制改写为 0**（§5.5）。
+            **`None` 是「今天不调仓」**（`build_targets` 的数据中断支）：目标取 τ 开盘的
+            漂移权重本身 → 每只 `Δw ≡ 0`、零成交零成本，π 取 `Σ w^drift`（当前实际仓位，
+            调用方此时没有账本可给）。**强制退出不受影响**：退市股照样全清（见模块头 ★7）。
         prev_holdings: 上期持仓【股数】（不是权重），index=ts_code。首期传空 Series。
         equity: 执行日开盘时点的组合权益（现金 + 持仓市值），用于权重 ↔ 股数换算。
         signal_date: 信号日 T。**只用于守卫 T < τ，不用于取任何数据**（见模块头 ★1）。
@@ -166,7 +179,8 @@ def simulate(exec_date: DateLike,
     if not equity > 0:
         raise ValueError(f"equity={equity} 必须为正：权益非正时权重无定义")
 
-    tgt_in = pd.Series(targets, dtype=float)
+    # `None` 走空账本：codes 因此只来自持仓，真正的目标在 prev_w 算出来之后才写得下（★7）。
+    tgt_in = pd.Series(dtype=float) if targets is None else pd.Series(targets, dtype=float)
     prev_in = pd.Series(prev_holdings, dtype=float)
     # 输入里的 NaN/inf 必须当场炸：下面的 fillna(0.0) 只该补【新出现的 label】。
     # 目标 NaN 被填成 0 就是"卖光"，持仓 NaN 被填成 0 就是"空仓"（还顺手绕过无价守卫，
@@ -218,6 +232,14 @@ def simulate(exec_date: DateLike,
     can_sell = mask["can_sell"].astype(bool) & priced
     reason = reason.where(priced | (reason != ""), "no_price")   # 证据链里不留空理由
     prev_w = (shares_prev * price / equity).where(priced, 0.0)
+    if targets is None:
+        # ★7 中断日：目标 = τ 开盘的漂移权重本身 ⇒ Δw 逐位 0.0（π ≥ 分母时 min(1,·) 恰取
+        # 1.0，`0.0 + w×1.0` 逐位恒等），零成交零成本。`where(~delisted, 0.0)` 与上面 §5.5
+        # 那行同义，tgt 整个被换掉了故须重写：强平不是自主交易，中断日不豁免它。
+        # π 取【含退市】的当前总仓位，不是 `tgt.sum()`。两者在当前掩码下恒等（退市路由恒
+        # can_sell=True，无价持仓又已被 unpriceable 挡掉，退市股锁不住），选前者是防那个恒等
+        # 哪天不成立：退市股一旦入 F，π 少一块就让 π − L 缩水，把「持平」变成全员减仓。
+        tgt, pi = prev_w.where(~delisted, 0.0), float(prev_w.sum())
 
     # ── F 迭代到不动点（模块头 ★5）──
     locked = pd.Series(False, index=codes)

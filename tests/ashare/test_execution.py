@@ -20,6 +20,10 @@
 残值。走普通 Δw 路径的话，上游的换手上限会把清仓裁成部分成交，一份卖不掉的资产就此钉在
 固定价上永远留在账上，而"退市清仓"那行 warning 照发不误 —— 声称了一件没发生的事。
 
+再一条 Task 10 的最终口径（2026-08-21）：`targets=None` 是**数据中断日**，读作「按 τ 开盘的
+现有持仓持平，只执行强制退出」。两半各防一条假净值 —— 清仓那半会把数据中断画成「策略在
+暴跌前防御性离场」（中断与极端行情同期），豁免强平那半会退回 §5.5 的幽灵资产。
+
 ★ 最值钱的四条：
   - `test_delisted_target_is_forced_to_zero`：**必须传非零目标才测得到**。用 0.0 当目标
     等于把被测行为自己喂给了实现，"退市不强平"这个变异体因此在 27 个变异里全身而退。
@@ -349,6 +353,109 @@ def test_delisted_is_liquidated_at_half_close_with_a_warning(masked):
     assert trades.loc[0, "amount"] == pytest.approx(4000.0)
     assert "A.SZ" not in holdings.index
     assert any("A.SZ" in w for w in warns)
+
+
+# ══════════════ 4b. 数据中断日 targets=None（计划 Task 10「2026-08-21 最终口径」）══════════════
+#
+# `build_targets` 全 NaN / 覆盖率不足时返回 `(None, warnings)`，`simulate(targets=None)` 读作
+# 「按 τ 开盘的现有持仓持平，只执行强制退出」。两半都要钉，各自防的假净值不同：
+#   · 持平那半防的是【中断日清仓】。全 NaN 是数据中断不是清仓信号，而中断与极端行情同期 ——
+#     清仓会在回测里画成「策略在暴跌前防御性离场」。这也正是「空 Series」落选的理由。
+#   · 强平那半防的是【中断日豁免退市】。漏了它，中断撞上退市就退回 §5.5 的幽灵资产：
+#     一份卖不掉的资产钉在固定价上，此后每期 Δw=0、零成交零告警，永远。
+#
+# fixture 的股数 × 价格 / 净值一律【除不尽】（global-constraints「用除不尽的数字」）：
+# 1000 股 @ 10.0 / 100 万的往返是精确的，「按最终权重反算持仓」的实现会与真实现逐位相同。
+EQ_ODD = 29_289_208.1
+HELD = {"A.SZ": 107_393.0, "B.SZ": 61_816.0}                    # w ≈ 0.31352524 / 0.17317803
+PX = {"A.SZ": 85.507491, "B.SZ": 82.053958, "S.SZ": 52.49366, "D.SZ": 5.299618}
+SUSP_SHARES, DELISTED_SHARES = 164_399.0, 226_127.0             # w ≈ 0.29464454 / 0.04091564
+
+
+def _weights(holdings: pd.Series) -> pd.Series:
+    return pd.Series({c: n * PX[c] / EQ_ODD for c, n in holdings.items()}, dtype=float)
+
+
+def test_outage_holds_the_book_flat_while_an_empty_book_still_liquidates(masked, allocations):
+    """★ `None` ≠ 空 Series。同一批持仓、同一天，两个入参必须走向相反的结局。
+
+    这一条直接钉住候选 ①「返回空 Series」为什么落选：**空读作清仓**。今天的实现里
+    `simulate(EXEC, None, ...)` 与 `simulate(EXEC, pd.Series(), ...)` 完全同义 —— 于是
+    一天的数据中断变成一次满仓离场，而中断常与极端行情同期，净值曲线上会长出一段
+    「策略在暴跌前防御性离场」的漂亮假象。
+
+    持平那半的判据是【逐位】不是【约等于】：目标取 τ 开盘的漂移权重本身 → `min(1,·)` 恰
+    取 1.0 → `Δw` 逐位 0.0 → 持仓 `+0.0` 原样返回。任何「按最终权重反算股数」的写法都会
+    在这组除不尽的数字上差出 ~1e-11 股，而那正是幽灵仓位的来源。
+    """
+    prev = _s(HELD)
+    before = _weights(prev)
+
+    masked({c: _ok(PX[c]) for c in HELD})
+    trades, holdings, blocked, warns = simulate(EXEC, None, prev, EQ_ODD, signal_date=SIG)
+
+    assert len(trades) == 0 and len(blocked) == 0 and warns == []
+    assert dict(holdings) == HELD                                # 逐位，不是 approx
+    assert _weights(holdings).sum() == before.sum()              # Σw 分毫不动，无现金拖累
+    assert len(allocations) == 1                                 # Δw≡0 → 无人入 F → 一轮就走
+
+    masked({c: _ok(PX[c]) for c in HELD})
+    empty, _, _, _ = simulate(EXEC, _s({}), prev, EQ_ODD, signal_date=SIG)
+    assert set(empty["side"]) == {"SELL"} and len(empty) == 2    # 空账本仍然是「全卖光」
+
+
+def test_outage_still_force_liquidates_a_delisted_holding(masked):
+    """★ 本节最值钱的一条：`None` **不等于「什么都不做」**。
+
+    中断日撞上退市，退市股仍须按 `close_hfq × 0.5` 全清 —— 它不是「自主交易」，
+    是 §5.5 的强制退出。把持平实现成「目标 = 漂移权重、收工」会漏掉这一半：
+    退市股的目标变成它自己的现权重、Δw=0、零成交，一份卖不掉的资产就此永远留在账上。
+
+    「其余不动」在这里同样是逐位的：强平腾出的额度受 `min(1,·)` 封顶，谁也过不了自己
+    当前的权重，所以它只能变成现金 —— 不能顺手把幸存者加到某个「更好」的仓位上。
+    """
+    masked({"A.SZ": _ok(PX["A.SZ"]), "S.SZ": _susp(PX["S.SZ"]),
+            "D.SZ": _delisted(9.4471, PX["D.SZ"] * 2)})          # 开盘 9.4471，清仓价 5.299618
+    prev = _s({**{"A.SZ": HELD["A.SZ"]}, "S.SZ": SUSP_SHARES, "D.SZ": DELISTED_SHARES})
+    before = _weights(prev)
+
+    trades, holdings, blocked, warns = simulate(EXEC, None, prev, EQ_ODD, signal_date=SIG)
+
+    assert list(trades["ts_code"]) == ["D.SZ"] and trades.loc[0, "side"] == "SELL"
+    assert trades.loc[0, "shares"] == pytest.approx(DELISTED_SHARES)      # 全清，无残值
+    assert trades.loc[0, "price_hfq"] == pytest.approx(PX["D.SZ"])        # 折价，不是 9.4471
+    assert trades.loc[0, "amount"] == pytest.approx(DELISTED_SHARES * PX["D.SZ"])
+    assert "D.SZ" not in holdings.index
+    assert any("D.SZ" in w for w in warns)                                # 说的清仓真的发生了
+
+    assert dict(holdings) == {"A.SZ": HELD["A.SZ"], "S.SZ": SUSP_SHARES}  # 逐位，含停牌那只
+    assert len(blocked) == 0                                              # 强平不是被拦的交易
+    after = _weights(holdings)
+    assert after.sum() == pytest.approx(before.sum() - before["D.SZ"], abs=TOL)  # 差额只进现金
+
+
+@pytest.mark.parametrize("state,reason", [
+    (_susp, "suspended"), (_unknown, "limit_unknown"), (_up, "limit_up_seal"), (_down, "limit_down_seal")])
+def test_outage_leaves_untradable_holdings_alone_without_phantom_blocks(masked, state, reason):
+    """停牌 / 涨跌停算不出 / 一字封板：中断日本来就不打算交易，所以不成交是【平凡】结论 ——
+    但 `blocked` 也必须是空的。`blocked` 描述的是「那笔没做成的交易」，中断日一笔都没想做，
+    凭空记一行会让 Task 12 按它算缺口时看见一笔并不存在的意图（文档字符串已警告别求和这列）。
+    """
+    masked({"A.SZ": state(PX["A.SZ"]), "B.SZ": _ok(PX["B.SZ"])})
+    trades, holdings, blocked, warns = simulate(EXEC, None, _s(HELD), EQ_ODD, signal_date=SIG)
+
+    assert len(trades) == 0 and len(blocked) == 0 and warns == []
+    assert dict(holdings) == HELD
+    assert reason                                    # 参数只为覆盖四条路由，结局必须一致
+
+
+def test_outage_with_no_holdings_is_a_no_op(masked):
+    """首期 / 空仓遇上数据中断：没有账本也没有持仓，四个返回值都空，且不能炸。"""
+    masked({})
+    trades, holdings, blocked, warns = simulate(EXEC, None, _s({}), EQ_ODD, signal_date=SIG)
+    assert list(trades.columns) == TRADE_COLS and len(trades) == 0
+    assert list(blocked.columns) == BLOCKED_COLS and len(blocked) == 0
+    assert len(holdings) == 0 and warns == []
 
 
 # ══════════════ 5. 执行日无行情 ══════════════
