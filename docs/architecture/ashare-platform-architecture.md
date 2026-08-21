@@ -159,7 +159,8 @@
 | `ashare/factors/base.py` | `@factor` 注册表 + `FactorSpec` | §4.2 | ✗ | 量化 |
 | `ashare/factors/pipeline.py` | 去极值 → 中性化 → 标准化（顺序固定） | `process()` | ✗ | 量化 |
 | `ashare/factors/{price,fundamental,flow,risk}.py` | 因子实现（签名固定） | `@factor` 装饰的函数 | ✗ | 量化 |
-| `ashare/factors/store.py` | `factor_value` 预计算落库与读取 | `build()/read()` | ✓ derived 库 | 量化 |
+| `ashare/data/derived_store.py` | 派生库读写（**独家持 duckdb**） | `write_factor_values()/read_factor_values()/coverage_report()` | ✓ derived 库 | 量化 |
+| `ashare/factors/store.py` | 编排「算 → 写」，**不碰 duckdb** | `build()` | ✗（经 derived_store） | 量化 |
 | `ashare/backtest/engine.py` | 主循环（≤ 400 行，仅编排） | `run_backtest(config)` | ✗ | 量化 |
 | `ashare/backtest/{cost,portfolio,metrics,guards}.py` | 成本 / 组合构建 / 指标 / 五闸 | §4.3 | ✗ | 量化 |
 | `ashare/backtest/store.py` | 回测结果持久化 | `save()/load()/list_runs()` | ✓ derived 库 | 量化 |
@@ -185,7 +186,7 @@ sources ──▶ ingest ──▶ validate            [写侧，独立进程]
 
 | # | 规则 | 违反后果 |
 |---|---|---|
-| L1 | 除 `ashare/data/ingest.py`、`ashare/factors/store.py`、`ashare/backtest/store.py` 外，任何模块 `import duckdb` → fail | 绕过唯一出口 |
+| L1 | **只有 `ashare/data/**` 可以 `import duckdb`**（2026-08-21 收紧：原来给 `factors/store.py`、`backtest/store.py` 开的口子已关闭 —— 一旦这两层拿到 duckdb，它们同样能连 market.duckdb 读未掩码的原始行） | 绕过唯一出口 |
 | L2 | `ashare/data/**` 不得 import `ashare.factors` / `ashare.backtest` / `ashare.strategy` / `ashare.agent_tools` | 循环依赖 |
 | L3 | `ashare/factors/**` 只能 import `ashare.data.query`、`ashare.factors.*` | 因子直连数据库（违 D2） |
 | L4 | `ashare/agent_tools.py` 只能 import `ashare.data.query`、`ashare.factors`、`ashare.backtest.{store,metrics}`；**禁止 import `ashare.data.ingest`、`ashare.factors.store`、`ashare.backtest.store` 的写函数、`brokers.*`** | 违 D1 |
@@ -510,7 +511,11 @@ def process(s: pd.Series, as_of_date, universe, *, spec: FactorSpec) -> tuple[pd
 ```
 
 ```python
-# ashare/factors/store.py —— 唯一写 derived 库的因子模块
+# ashare/factors/store.py（L3，不 import duckdb）—— 编排「算 → 写」
+#   落库本身在 ashare/data/derived_store.py（L1）。拆两层不是为了整洁，是 L1 闸的要求。
+#   ★ read 的键是 (name, param_hash) 不是 name：PK 含 param_hash，而 L1 够不到
+#     FACTOR_REGISTRY 解析不出它；只按名字读，在闸 5 的 ±30% 参数网格下会同时命中
+#     两代值，pivot 要么抛要么静默留一个。
 def build(names: list[str], dates: list[_dt.date], *,
           overwrite: bool = False, progress=None) -> dict:
     """预计算并写入 factor_value(factor_name, param_hash, trade_date, ts_code,

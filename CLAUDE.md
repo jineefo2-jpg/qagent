@@ -247,8 +247,15 @@ Detailed design: `docs/adr/0001-broker-abstraction.md`. The constraints below ar
 3. 行业中性化前先查 `_meta.industry_source`：不是 `'sw'` 说明行业是**今天的值回填到上市日**
    （申万成分接口无权限时的降级），做行业中性化就是前视污染，必须拒绝。
    `validate.check_industry_source` 是阻断项，操作员用 `--allow-static-industry` 显式承认才放行。
-4. 回测入口用 `query.snapshot_id(pin=True)` 钉住数据：钉住后 promote 换库会抛而不是静默重连，
+4. **任何跨多个日期的循环**（回测入口、`store.build` 批量落库、批跑因子）都要用 `query.snapshot_id(pin=True)` 钉住数据：钉住后 promote 换库会抛而不是静默重连，
    否则一次运行可能横跨两个数据库却只记录一个 `data_snapshot_id`（D7 失效）。
+   注意钉住只能由 `close_db()` 解除。
+5. **写 `factor_value` 时缺失值一律写 NULL，不写 NaN。** DuckDB 的 `DOUBLE` 真的能存 NaN ——
+   `count()` 会把它算进去、`IS NULL` 判它为假，于是覆盖率指标永远是 100%，
+   而「覆盖率不足就剔除因子」这道闸从此形同虚设。
+6. **`pipeline.process` 末尾的 `fillna(0)` 会让它【下游】的任何覆盖率度量失效。**
+   已经咬过两次：`build_targets` 的 50% 闸经 `combine` 喂进来只可能是 100% 或 0%；
+   `coverage_report` 若照 `processed_value` 算则恒为 1.0。覆盖率一律从 `raw_value` 算。
 5. `ashare/agent_tools.py` 的工具**永远不进 `TRADING_TOOLS`**。
    注意 `TRADING_TOOLS` 的语义是「需要用户身份」而非「危险」——`get_user_profile` 也在其中。
    另：`TOOL_SCHEMAS.extend()` 必须插在 `quant_agent.py` 的 `_OPENAI_TOOLS` 赋值之前，
