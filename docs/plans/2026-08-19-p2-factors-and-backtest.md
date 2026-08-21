@@ -367,6 +367,20 @@ tests/ashare/
 > 只收发 DataFrame 与基础类型，绝不反向 import `ashare.backtest` / `ashare.factors`。
 > 不再包一层转发：单实现的抽象没有存在意义。详见架构 §4.3 的裁决框。
 
+> **★ 2026-08-21 修正落点：拆成两个文件。我先前那条裁决自相矛盾。**
+> 我说过「派生库读写统一归 `ashare/data/derived_store.py`，**绝不反向 import
+> `ashare.factors`**」，但 `build` 必须调 `compute_panel` —— 两句话不能同时成立。
+> 分辨清楚：要避免的是**数据层 import 高层类型**（如 `BacktestResult`）；
+> 而 `build` 是「算 → 写」的编排，本身是真逻辑，不是转发。
+>
+> · `ashare/data/derived_store.py`（L1）—— `write_factor_values(df)` /
+>   `read_factor_values(...)` / `coverage_report(...)`。独家持有 duckdb，
+>   只收发 DataFrame 与基础类型，**不 import `ashare.factors` / `ashare.backtest`**。
+> · `ashare/factors/store.py`（L3）—— `build(names, dates, ...)`：调 `compute_panel`
+>   算，调 `derived_store.write_factor_values` 写。**不 import duckdb**，所以 L1 通过。
+>
+> 我先前否掉「包一层转发」是对的 —— 但这不是转发。
+
 > **★ 2026-08-21 追加（Task 6 评审转来）：`build` 不能无脑遍历 `FACTOR_REGISTRY`。**
 > `factor_value.raw_value` 是 `DOUBLE`（`derived_schema.sql:19`），而注册表里的
 > `industry` 返回的是 **category dtype 的字符串** —— 遍历全表落库会在它这里抛，
@@ -375,7 +389,7 @@ tests/ashare/
 > 其余明确拒绝并说明理由；`log_mv` / `beta_250` 是数值可以存，但它们不是 alpha，
 > 存不存由调用方显式指定，不靠遍历撞上。
 
-**Files:** Create `ashare/data/derived_store.py`; Create `tests/ashare/test_factor_store.py`
+**Files:** Create `ashare/data/derived_store.py` 与 `ashare/factors/store.py`; Create `tests/ashare/test_factor_store.py`
 
 **Interfaces**
 - Consumes：`_derived.connect_write/read`、`compute_factor`、`query.snapshot_id`

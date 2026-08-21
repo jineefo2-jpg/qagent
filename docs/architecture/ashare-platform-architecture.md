@@ -472,7 +472,7 @@ def get_factor(name: str) -> FactorSpec: ...
 def list_factors(category: str | None = None) -> list[FactorSpec]: ...
 
 def compute_factor(name: str, as_of_date, universe: list[str], *,
-                   processed: bool = True, **param_override) -> pd.Series:
+                   processed: bool = True, **param_override) -> tuple[pd.Series, list[str]]:
     """raw → （processed=True 时）走 pipeline.process。
     available_from 之前的日期直接返回全 NaN Series（不静默填 0）。"""
 
@@ -487,7 +487,7 @@ def compute_panel(names: list[str], as_of_date, universe: list[str], *,
     · 裸返回类型没有地方放本文档自己要求记录的 warning（§4.2 通例）。
     """
 
-def combine(weights: Mapping[str, float], as_of_date, universe: list[str]) -> pd.Series:
+def combine(weights: Mapping[str, float], as_of_date, universe: list[str]) -> tuple[pd.Series, list[str]]:
     """合成分数 = Σ wᵢ × directionᵢ × processedᵢ。默认全 1.0 等权（规格 §5.2）。
     ★ 覆盖率不足（< min_coverage）或 available_from 未到的因子，
       从当日分母中【剔除】并按剩余因子重新归一，而不是当 0 参与 ——
