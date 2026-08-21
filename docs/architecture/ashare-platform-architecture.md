@@ -478,7 +478,14 @@ def compute_factor(name: str, as_of_date, universe: list[str], *,
 
 def compute_panel(names: list[str], as_of_date, universe: list[str], *,
                   processed: bool = True) -> pd.DataFrame:
-    """index=ts_code，columns=names。优先从 factor_value 表读，缺的现算。"""
+    """index=ts_code，columns=names。**一律现算**，返回 `(DataFrame, warnings)`。
+
+    **2026-08-21 修正两处（初稿两条都错）：**
+    · 「优先从 factor_value 表读，缺的现算」与 Task 8 的裁决直接矛盾 ——
+      `derived_store.read` 未命中就返回空、**不静默现算**，因为「现算与落库的口径分歧」
+      是最难查的一类 bug。读缓存还是现算由**调用方**决定，不在这一层偷偷混合。
+    · 裸返回类型没有地方放本文档自己要求记录的 warning（§4.2 通例）。
+    """
 
 def combine(weights: Mapping[str, float], as_of_date, universe: list[str]) -> pd.Series:
     """合成分数 = Σ wᵢ × directionᵢ × processedᵢ。默认全 1.0 等权（规格 §5.2）。
@@ -1325,7 +1332,7 @@ Parquet 冷备的角色**只有两个**：灾备重建、跨工具分析。
 | **B2** | 涨跌停价的**数据可得性**没有兜底方案 | D6 直接依赖 `limit_up/limit_down`。Tushare `stk_limit` 有积分门槛，拿不到就没法判定一字板 | 补 `ashare/data/limits.py` 规则兜底，并把已知规则边界硬编码 + 列出**已知不准确场景**：新股上市首日（主板无涨跌幅/科创创业前 5 日无限制）、退市整理期、ST 戴帽摘帽当日、2019-07-22 科创板开板、2020-08-24 创业板改 20%、北交所 30%。规则算不出的当日 → `limit_unknown` → **该股当日不可交易**（保守，不假设可交易） | **高（威胁 D6）** |
 | **B3** | **停牌日没有占位行** | Tushare `daily` 在停牌日**不返回该股的行**。若不补行，`get_bars(lookback=20)` 拿到的是「最近 20 条记录」而不是「最近 20 个交易日」—— 一只停牌 5 天的股票，它的 `reversal_20` 实际覆盖 25 个交易日。**横截面因子被静默污染，且完全没有报错**。这是全套设计里最隐蔽的 bug 源 | ingest 的 normalize 阶段补行：`在市 AND 日历交易日 AND daily 无行 → 插入 OHLC=NULL, is_suspended=TRUE`。`get_bars` 的 lookback 一律按**日历交易日**计数而非记录数 | **高（静默数据污染）** |
 | **B4** | 因子值没有落库表 | 五闸的闸 3（200 次 shuffle）与闸 5（±30% 参数网格）都要反复用同一批因子值。每次现算 16 因子 × 780 日 = 全量回测最贵的部分，60 s 目标不可能达成 | 补 `factor_value(factor_name, param_hash, trade_date, ts_code, raw_value, processed_value, snapshot_id)` 与 `ashare/factors/store.py`（§4.2）。缓存 key 必须含 `param_hash` + `snapshot_id`，否则会用旧数据算出的因子跑新回测 | 中高（威胁 60 s 指标） |
-| **B5** | 因子的**数据可得起始日**没有表达方式 | `north_hold_chg_20` 依赖北向持股，2016-12 陆股通才有数据。等权合成时若把缺失当 0 参与，2010–2016 年的合成分数会被静默降权（分母算了它，分子恒 0），回测结果失真且难察觉 | `FactorSpec.available_from` + `combine()` 在覆盖率不足或未到起始日时**把该因子从当日分母中剔除并重新归一**（§4.2） | 中高 |
+| **B5** | 因子的**数据可得起始日**没有表达方式 | `north_hold_chg_20` 依赖北向持股，2016-12 陆股通才有数据。**2026-08-21 修正：本栏原来的「后果」说错了危险在哪。** 一个因子【整体】缺失时，「填 0」与「剔除后重新归一」只差一个逐日常数，而 §7.2 只拿分数做排序 —— 300 只票实测目标权重**逐位相同**，B5 原本描述的那种失真不存在。真正的损害在【部分】覆盖：`process` 末尾的 `fillna(0)` 会把缺失的那 40% 判成「行业内平均水平」，同一测试下 50 只选中的票**换掉 13 只**。规则不变（仍是剔除+归一），但理由要改对，否则下一个人会去防错的东西 | `FactorSpec.available_from` + `combine()` 在覆盖率不足或未到起始日时**把该因子从当日分母中剔除并重新归一**（§4.2） | 中高 |
 | **B6** | `stock_status`（ST 历史）**没有数据来源** | 规格 §4.2 凭空定义了这张表，但 Tushare 没有「ST 状态历史区间」接口。没有它，D5 的 ST 剔除只能用「今天是不是 ST」→ 又一个幸存者偏差 | 由 `namechange`（历史名称变更）反推：名称含 `ST`/`*ST` 的区间即 ST 区间。**必须写明边界**：用变更**生效日**而非公告日；名称里的 `S`（未股改）、`退` 单独归类；反推结果与当前 `stock_basic.name` 交叉校验，不一致的进人工清单 | 中高（威胁 D5） |
 | **B7** | 中性化 OLS 的**退化情形**没有规定 | 申万一级 31 个行业里，早年部分行业成分股 < 5 只；某些日期整个池子 < 100 只。设计矩阵秩亏 → OLS 抛异常或返回全 NaN | `get_industry` 把成分 < 5 的行业并入 `__OTHER__`；`neutralize()` 在有效样本 < 30 或秩亏时**返回原始 Series 并记 warning**，而不是静默返回 NaN（§4.2） | 中 |
 | **B8** | 退市清仓的成交价假设**过于乐观** | 规格 §5.3 说「`delist_date` 前最后一个交易日按收盘价强制清仓」。退市整理期股票连续跌停、几乎无流动性，按收盘价成交是系统性乐观偏差 | ① `get_universe` 剔除 `DELIST_PERIOD` 状态（大部分已被 ST 规则覆盖）；② 若持仓中仍出现，按**最后一个有效后复权收盘价 × 0.5** 清仓入账，并在 `BacktestResult.warnings` 记录。宁可低估也不能高估。**2026-08-20 修正**：初稿写「整理期首日收盘价」，但掩码只看得到当前 bar、不知道整理期哪天开始 —— 拿不到那个值。末日收盘价在连续跌停序列的末端，因此比首日方案更保守，与本行自己的「宁可低估」同向 | 中 |
