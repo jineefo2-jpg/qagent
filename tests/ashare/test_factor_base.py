@@ -605,7 +605,10 @@ def test_an_all_nan_composite_reaches_the_build_targets_outage_gate():
 
     w, warns = build_targets(scores, 0.8, prev, pd.Series("IND", index=U),
                              PortfolioConstraints())
-    pd.testing.assert_series_equal(w, prev, check_names=False)
+    # ★ 2026-08-21：中断日的返回值是 None，不是 prev（计划 Task 10「最终口径」）。
+    #   prev 是【T 日收盘】度量的，而 simulate 在 τ 开盘重算漂移 —— 把它当目标传下去
+    #   会在一个明确说了「今天不调仓」的日子里，把每只票的隔夜跳空当成交易做掉。
+    assert w is None
     assert any("中断" in x for x in warns)
 
 
