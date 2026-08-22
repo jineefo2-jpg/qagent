@@ -34,16 +34,27 @@ def build(names: Sequence[str], dates: Sequence[_dt.date], *,
       因子未到 `available_from` 都会照常落库，而落下的行**没有任何列**记着那一天是降级
       算出来的。吞掉 warning，后面从库里读因子跑出来的净值曲线看起来完全正常。
 
-    ★ 幂等判据是 `snapshot_id`，不是「主键下有行」：`param_hash` 只哈希
-      `name + default_params`，`neutralize` / `direction` / **因子函数体**都不在里面
-      （函数体本来也没法哈希）。所以同一个主键下完全可能存着另一种语义的值 ——
-      `overwrite=False` 只保证「这一代是当前这批数据算的」，**不保证它与当前 spec 一致**。
-      改了函数体或 `neutralize` 想重算，必须显式 `overwrite=True`，库里不会自己发现。
+    ★ 幂等判据是 `snapshot_id`，不是「主键下有行」：`param_hash` 哈希
+      `name + default_params + neutralize + available_from`（2026-08-22 评审 I5 把后两个
+      折了进去 —— 它们都改变落库的值），但 **因子函数体不在里面**（也没法哈希）。
+      所以同一个主键下仍然可能存着另一种语义的值 —— `overwrite=False` 只保证
+      「这一代是当前这批数据算的」，**不保证它与当前实现一致**。
+      改了函数体想重算，必须显式 `overwrite=True`，库里不会自己发现。
 
     ★ `snapshot_id(pin=True)`：全程一个快照写进所有行。不钉住的话，跑到一半撞上 promote
       会静默重连，于是半数行是另一个数据库算的、却统一盖着开跑时那个指纹（D7 失效）。
+      ⚠ **钉子的生命周期长过本函数**：正常返回后 `query` 仍然钉着这个 inode，
+      只有 `query.close_db()` 解得开。长驻进程（server.py）里跑完 build 不 close，
+      下一次 nightly promote 之后每一个 A 股工具都会抛「请重跑」。
+      `open_db()` **不是解药**：它只把连接指到新文件上，那一次检查于是静默通过 ——
+      钉子还举着，而你已经在读另一个数据库了（再 promote 一次照样抛）。
+      **解钉是调用方的事**：批处理脚本跑完 `close_db()`，测试放进 fixture。
     """
     cols = list(names)
+    if not cols:
+        # 与 compute_panel 同口径（「没有因子的面板没有意义」）。静默返回 {} 会让
+        # 「名字列表算错成空」的调用方看到一次成功的空跑，还顺手钉住了快照。
+        raise ValueError("names 为空：没有因子要预计算")
     specs = {n: get_factor(n) for n in cols}            # 名字拼错在这里 KeyError，不是空结果
 
     # ★ alpha 白名单，且**在算任何一个因子之前**全部验完 —— 边算边验会让前半张表已经落库。
@@ -59,7 +70,9 @@ def build(names: Sequence[str], dates: Sequence[_dt.date], *,
             f"不能靠遍历 FACTOR_REGISTRY 撞上。")
 
     hashes = {n: s.param_hash() for n, s in specs.items()}
-    ds = [query.norm_date(d, name="trade_date") for d in dates]
+    # 去重：`done` 在循环外算一次，重复日期会走两遍 todo 分支，把同一批行写两遍
+    # （UPSERT 幂等，所以库是对的）而 written 报双倍 —— 一份对不上库的进度数字。
+    ds = list(dict.fromkeys(query.norm_date(d, name="trade_date") for d in dates))
     written = {n: 0 for n in cols}
     warns: List[str] = []
 
@@ -79,6 +92,12 @@ def build(names: Sequence[str], dates: Sequence[_dt.date], *,
             # compute_factor 直接 `return raw, []`，只有 available_from 短路会出声）。
             warns += w
             derived_store.write_factor_values(_long_frame(todo, hashes, d, codes, raw, proc, snap))
+            # 池子缩了就把旧成员的行删掉：留着 `current_factor_dates` 的 bool_and 对这一天
+            # 永远为假 —— 每次跑都重算，overwrite=False 的跳过永久失效（评审 I1）。
+            gone = derived_store.drop_out_of_universe({n: hashes[n] for n in todo}, d, codes)
+            if gone:
+                warns.append(f"{d} 删除 {gone} 行不在当前股票池里的旧因子值："
+                             f"该日的池子随数据修正变了（这些行 read 本来就读不到）")
             for n in todo:
                 written[n] += len(codes)
         if progress is not None:

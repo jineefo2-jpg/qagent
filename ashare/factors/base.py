@@ -14,7 +14,7 @@ import datetime as _dt
 import hashlib
 import json
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from typing import Any, Callable, Mapping, Sequence, Union
 
 import numpy as np
@@ -30,6 +30,21 @@ def _json_default(o: Any) -> str:
     raise TypeError(f"因子参数类型 {type(o).__name__} 无法确定性序列化，不能进 param_hash")
 
 
+def _canon(d: Mapping[str, Any]) -> str:
+    """canonical JSON：键排序 + 紧凑分隔符（见模块头 —— 换个书写顺序不能变成两代缓存）。"""
+    return json.dumps(d, sort_keys=True, separators=(",", ":"), default=_json_default)
+
+
+# ★ 除 default_params 之外还要进 param_hash 的 FactorSpec 字段（2026-08-22 评审 I5）。
+#   判据是「它改不改【落库的值】」：
+#     · neutralize —— 决定 pipeline 做不做中性化，processed_value 直接不同；
+#     · available_from —— 把它之前的整段历史短路成全 NaN，raw/processed 两列都不同。
+#   不收 direction / min_coverage：那两个由 `combine` 在读出【之后】施加，库里的值一模一样，
+#   进哈希只会凭空多算一代缓存（同一份数据存两份）。
+#   函数体仍然哈希不到 —— 那是 `overwrite=True` 存在的理由，见 `store.build`。
+_HASHED_SPEC_FIELDS = ("neutralize", "available_from")
+
+
 @dataclass(frozen=True)
 class FactorSpec:
     name: str
@@ -43,14 +58,25 @@ class FactorSpec:
     default_params: Mapping[str, Any] = field(default_factory=dict)
 
     def param_hash(self, **override) -> str:
-        """`sha256(name + canonical_json(default_params | override))[:12]`。
+        """`sha256(name + canonical_json(default_params | override) + canonical_json(非默认的
+        _HASHED_SPEC_FIELDS))[:12]`。
 
         override 里恰好等于默认值的参数不会产生新哈希 —— 否则显式写出默认值
         就凭空多一代缓存，同一份数据算两遍存两份。
+
+        ★ `neutralize` / `available_from` 也在里面（2026-08-22 评审 I5）：两者都**改变
+          落库的值**，却曾经不进哈希 —— 于是把 `neutralize` 从 False 改成 True，`build`
+          看到「主键命中 + 快照是当前的」直接跳过（返回 0 行），`read` 拿回的是中性化
+          **之前**的 z-score。一次静默的假缓存命中，而它长得跟缓存正常工作一模一样。
+          进了哈希，同一件事变成一次真正的未命中。
+        ★ 只哈希【偏离 dataclass 默认值】的字段：一个从没写过这两个字段的因子，哈希与
+          加这段之前**逐位相同**。否则「多哈希一个字段」这个动作本身，就会让全库历史
+          因子值集体失联（主键变了），而它们其实一个都没变。
         """
-        params = {**self.default_params, **override}
-        payload = self.name + json.dumps(params, sort_keys=True, separators=(",", ":"),
-                                         default=_json_default)
+        extra = {f.name: getattr(self, f.name) for f in fields(self)
+                 if f.name in _HASHED_SPEC_FIELDS and getattr(self, f.name) != f.default}
+        payload = self.name + _canon({**self.default_params, **override}) \
+            + (_canon(extra) if extra else "")
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12]
 
 

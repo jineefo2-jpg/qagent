@@ -53,6 +53,38 @@ def _num(x) -> Optional[float]:
     return None if pd.isna(x) else float(x)
 
 
+def _checked_universe(universe: Sequence[str]) -> list[str]:
+    """`factors.base._checked_universe` 的两条**真正会静默出错**的检查，在这里重写一遍。
+
+    不是复用 —— 本模块绝不 import `ashare.factors`（模块头第一条）。代价是两份代码，
+    换来的是缓存路径不再是一道绕过唯一校验点的旁门：
+      · 重复代码经 `reindex` 会静默复制出重复行，下游把同一只股票加权两次；
+      · 空池的返回值是「空表」，与未命中【逐位相同】，于是调用方的 bug 变成一次静默重算。
+    """
+    codes = list(universe)
+    if not codes:
+        raise ValueError("universe 为空：空横截面返回的空表与未命中长得一样，"
+                         "调用方会把自己的 bug 读成「这一天没算过」")
+    if len(set(codes)) != len(codes):
+        dup = sorted({c for c in codes if codes.count(c) > 1})
+        raise ValueError(f"universe 含重复代码 {dup[:5]}：reindex 会复制出重复行，"
+                         f"横截面回归会把它当两只股票加权两次")
+    return codes
+
+
+def _missing(param_hashes: Mapping[str, str], hit: set, d: _dt.date) -> list[str]:
+    """当前快照下一行都没有的因子，一个一条 warning。
+
+    ★ 判据是「有没有行」而不是「值是不是全 NaN」：一个合法地整天全 NULL 的因子
+      （`available_from` 未到）与一个陈旧/没算过的因子，在返回的帧里【逐位相同】——
+      都是一列 NaN；而只要还有别的因子命中，帧就不是 `.empty`，调用方分不出来。
+      那正是 `combine`「静默剔除 + 按剩余权重重新归一」那条路的入口，
+      所以这一层的降级必须自己出声（global-constraints ★）。
+    """
+    return [f"{d} {n}@{h}: 当前快照下没有任何行（没算过、或快照已过期），该列全 NaN"
+            for n, h in param_hashes.items() if n not in hit]
+
+
 # ══════════════ 写 ══════════════
 
 def write_factor_values(df: pd.DataFrame) -> int:
@@ -84,8 +116,8 @@ def write_factor_values(df: pd.DataFrame) -> int:
 # ══════════════ 读 ══════════════
 
 def read_factor_values(param_hashes: Mapping[str, str], date, universe: Sequence[str], *,
-                       processed: bool = True) -> pd.DataFrame:
-    """某一天的因子横截面。`index = universe`（顺序一致），`columns = param_hashes` 的键序。
+                       processed: bool = True) -> tuple[pd.DataFrame, list[str]]:
+    """某一天的因子横截面 + warnings。`index = universe`（顺序一致），`columns = param_hashes` 的键序。
 
     `param_hashes` 是 `{factor_name: param_hash}`：主键含 param_hash，只按名字读会在
     闸 5 的参数高原（同一因子的 ±30% 网格）下同时命中两代，pivot 要么炸要么静默留一代。
@@ -94,18 +126,23 @@ def read_factor_values(param_hashes: Mapping[str, str], date, universe: Sequence
       一类 bug；要不要补算由调用方决定（`ashare.factors.store.build`）。
     ★ 命中的行里，快照与当前不符的**当未命中**（见模块头）。
     ★ 部分命中 → 按 universe 对齐，池里有而库里没有的票记 NaN（因子缺值本来就长这样）。
+    ★ **逐因子**未命中会出一条 warning（2026-08-22 评审 C1）：三个因子里有一个陈旧时，
+      它会被 `reindex(columns=names)` 物化成一列 NaN，而帧不是 `.empty` ——
+      与「这个因子那天本来就没数据」逐位相同。本函数整件事就是判命中，
+      它自己降级却不出声，等于把 D7 的破绽藏进一列看起来很正常的 NaN 里。
     """
     names = list(param_hashes)
     empty = pd.DataFrame(columns=names, index=pd.Index([], name="ts_code", dtype=object),
                          dtype=float)
     if not names:
-        return empty
+        return empty, []
 
     d = query.norm_date(date, name="date")
+    codes = _checked_universe(universe)
     snap = query.snapshot_id()
     conn = _read_conn()
     if conn is None:
-        return empty
+        return empty, _missing(param_hashes, set(), d)
     try:
         # 列名是本模块的字面量二选一，不是外部输入；日期/代码/哈希全部参数化（Q1）
         col = "processed_value" if processed else "raw_value"
@@ -117,11 +154,40 @@ def read_factor_values(param_hashes: Mapping[str, str], date, universe: Sequence
     finally:
         conn.close()
 
+    warns = _missing(param_hashes, set(got["factor_name"]), d)
     if got.empty:
-        return empty
+        return empty, warns
     return (got.pivot(index="ts_code", columns="factor_name", values="value")
-               .reindex(index=list(universe), columns=names)
-               .rename_axis(columns=None))
+               .reindex(index=codes, columns=names)
+               .rename_axis(columns=None)), warns
+
+
+def drop_out_of_universe(param_hashes: Mapping[str, str], date, universe: Sequence[str]) -> int:
+    """删掉这一天**不在当前股票池里**的旧因子值，返回删除行数。
+
+    ★ 为什么必须删（2026-08-22 评审 I1）：`factor_value` 的行只增不减，而股票池是按
+      `as_of_date` 动态生成的（D5）—— 数据一修正（改一个上市日 / 一段 ST 区间），
+      某只票就可能退出某个历史日期的池子，它那行却留在库里、盖着上一个快照。
+      于是 `current_factor_dates` 的 `bool_and` 对这一天**永远为假**：
+      每次跑都重算、`overwrite=False` 的跳过从此永久失效，而 `read` 那边一切正常
+      （它按 universe 对齐，根本看不见这行）—— 一个只表现为"缓存莫名其妙不生效"的状态。
+    ★ 只删「这一批 (因子, 参数哈希) + 这一天」范围内的孤儿行：闸 5 的参数高原下
+      同一因子并存多代是**正常的**，不能顺手清掉别的 param_hash。
+    """
+    codes = _checked_universe(universe)
+    if not param_hashes:
+        return 0
+    conn = _derived.connect_write()
+    try:
+        _derived.init_schema(conn)
+        return conn.execute(
+            f"DELETE FROM factor_value WHERE trade_date = ? "
+            f"AND (factor_name, param_hash) IN ({_pairs_clause(param_hashes)}) "
+            f"AND ts_code NOT IN ({', '.join(['?'] * len(codes))})",
+            [query.norm_date(date, name="trade_date"),
+             *_pairs_params(param_hashes), *codes]).fetchall()[0][0]
+    finally:
+        conn.close()
 
 
 def current_factor_dates(param_hashes: Mapping[str, str],
@@ -161,13 +227,23 @@ def coverage_report(names: Optional[Sequence[str]] = None) -> pd.DataFrame:
       那也是逐日判的），不是总行数占比：股票池逐日变化，两者不等。
     ★ `n_stale_dates`：快照与当前不符的日期数。没有它，报告会说「2010–2024、覆盖率 92%」
       而 `read` 一行都不给 —— 这一层最容易被当成灵异事件的状态，得在同一张表上看得见。
+    ★ 覆盖率**只数当前快照的行**（2026-08-22 评审 I1）：`read` 只服务当前快照，而
+      `factor_value` 只增不减，混代统计出来的数**比实际能读到的高**。实测 3 行当前
+      （1 行非空）+ 2 行非空孤儿 → 报 0.60、实际服务 0.333，而 0.60 恰是
+      `min_coverage` 的默认值 —— 报告刚好过闸，能读到的横截面只有它的一半。
+      整天都陈旧的日期 cov 记 NULL（`avg` 会跳过它），它由 `n_stale_dates` 那一列报，
+      不混进覆盖率：一个是「没有当前数据」，一个是「当前数据很稀」。
     """
+    if names is not None and not names:
+        # 空列表 = 什么都没问（与 read_factor_values({}) / current_factor_dates({}) 同口径）。
+        # 不挡的话 `IN ()` 会抛 duckdb.ParserException —— 一句调用方读不懂的 SQL 语法错。
+        return pd.DataFrame(columns=COVERAGE_COLUMNS)
     snap = query.snapshot_id()
     conn = _read_conn()
     if conn is None:
         return pd.DataFrame(columns=COVERAGE_COLUMNS)
     try:
-        where, params = "", [snap]
+        where, params = "", [snap, snap, snap]
         if names is not None:
             where = f"WHERE factor_name IN ({', '.join(['?'] * len(names))})"
             params += list(names)
@@ -175,8 +251,9 @@ def coverage_report(names: Optional[Sequence[str]] = None) -> pd.DataFrame:
             f"""
             WITH per_date AS (
                 SELECT factor_name, param_hash, trade_date,
-                       count(raw_value)::DOUBLE / count(*) AS cov,
-                       bool_and(snapshot_id = ?)           AS is_current
+                       (count(raw_value) FILTER (WHERE snapshot_id = ?))::DOUBLE
+                           / nullif(count(*) FILTER (WHERE snapshot_id = ?), 0) AS cov,
+                       bool_and(snapshot_id = ?)                                AS is_current
                 FROM factor_value {where}
                 GROUP BY factor_name, param_hash, trade_date)
             SELECT factor_name, param_hash,

@@ -6,9 +6,10 @@
   · `read` 按 `snapshot_id` 校验命中，不等的行【当未命中】—— Task 1 把 snapshot_id 定为
     列而非主键的直接代价。不校验就会把另一批数据算出的因子值静默喂进回测，
     产出一条好看的假净值曲线（架构 B4）。这是本文件最吃重的一条断言。
-  · 主键命中 ≠ 缓存有效：`param_hash` 只哈希 `default_params`，`neutralize` / `direction` /
-    **因子函数体**都不在里面（函数体本来也没法哈希）。所以判定有效性只能靠
-    `snapshot_id` + `overwrite`，不能靠「这个主键下有行」。
+  · 主键命中 ≠ 缓存有效：`param_hash` 哈希 `default_params` + `neutralize` + `available_from`
+    （后两个是 2026-08-22 评审 I5 折进去的 —— 它们都改变落库的值），但**因子函数体**
+    不在里面（也没法哈希）。所以判定有效性只能靠 `snapshot_id` + `overwrite`，
+    不能靠「这个主键下有行」。
   · `read` 未命中返回空，**不静默现算** —— 现算与落库的口径分歧是最难查的一类 bug。
   · `build` 不遍历 `FACTOR_REGISTRY`：`raw_value` 是 DOUBLE，而 `industry` 返回字符串。
 
@@ -17,6 +18,7 @@ fixture 的数值一律取除不尽的值（global-constraints ★）：整齐�
 """
 from __future__ import annotations
 import ast
+import dataclasses
 import datetime as dt
 import os
 import pathlib
@@ -68,7 +70,7 @@ def store_env(market_db, tmp_path, monkeypatch):
 
 
 def _fn(bump: float = 0.0):
-    def compute(as_of_date, universe):
+    def compute(as_of_date, universe, **params):    # 收下 default_params：参数高原的用例要传
         return pd.Series([_RAW[c] + bump for c in universe], index=list(universe))
     return compute
 
@@ -111,12 +113,22 @@ def test_write_then_read_roundtrip_keeps_raw_and_processed_apart(store_env):
         ("f1", "ph1", D1, "B00002.SZ", -1.7320508076, 1.4142135624, snap)))
     assert n == 2
 
-    raw = derived_store.read_factor_values({"f1": "ph1"}, D1, ["A00001.SZ", "B00002.SZ"],
-                                           processed=False)
-    proc = derived_store.read_factor_values({"f1": "ph1"}, D1, ["A00001.SZ", "B00002.SZ"])
+    raw, w1 = derived_store.read_factor_values({"f1": "ph1"}, D1, ["A00001.SZ", "B00002.SZ"],
+                                               processed=False)
+    proc, w2 = derived_store.read_factor_values({"f1": "ph1"}, D1, ["A00001.SZ", "B00002.SZ"])
     assert list(raw.columns) == ["f1"] and raw.index.tolist() == ["A00001.SZ", "B00002.SZ"]
     assert raw["f1"].tolist() == [0.4142135624, -1.7320508076]
     assert proc["f1"].tolist() == [-0.7071067812, 1.4142135624]
+    assert (w1, w2) == ([], []), "全部命中不该有 warning —— 会响的东西必须平时不响"
+
+
+def test_write_normalizes_the_trade_date(store_env):
+    """`write` 收 str 日期（`norm_date` 的契约）。直接把 '20240105' 塞进 DATE 列，
+    DuckDB 抛 ConversionException（它只认 YYYY-MM-DD）—— 归一化不是装饰。"""
+    derived_store.write_factor_values(_rows(
+        ("f1", "ph1", "20240105", "A00001.SZ", 0.4142135624, 0.1, query.snapshot_id())))
+    out, _ = derived_store.read_factor_values({"f1": "ph1"}, D1, ["A00001.SZ"], processed=False)
+    assert out["f1"].tolist() == [0.4142135624]
 
 
 def test_read_returns_an_empty_frame_with_the_requested_columns_on_a_miss(store_env):
@@ -125,9 +137,10 @@ def test_read_returns_an_empty_frame_with_the_requested_columns_on_a_miss(store_
     derived_store.write_factor_values(_rows(
         ("f1", "ph1", D1, "A00001.SZ", 0.4142135624, 0.0, query.snapshot_id())))
 
-    out = derived_store.read_factor_values({"f1": "ph1"}, D2, ["A00001.SZ", "C00003.SH"])
+    out, warns = derived_store.read_factor_values({"f1": "ph1"}, D2, ["A00001.SZ", "C00003.SH"])
     assert out.empty, "另一个交易日没落过库，必须返回空而不是就地算一份"
     assert list(out.columns) == ["f1"]
+    assert len(warns) == 1 and "f1" in warns[0]
 
 
 def test_read_treats_a_snapshot_mismatch_as_a_miss(store_env):
@@ -139,15 +152,68 @@ def test_read_treats_a_snapshot_mismatch_as_a_miss(store_env):
         ("f1", "ph1", D1, "A00001.SZ", 0.4142135624, -0.7071067812, stale),
         ("f1", "ph1", D1, "B00002.SZ", -1.7320508076, 1.4142135624, stale)))
     assert not derived_store.read_factor_values({"f1": "ph1"}, D1,
-                                                ["A00001.SZ", "B00002.SZ"]).empty
+                                                ["A00001.SZ", "B00002.SZ"])[0].empty
 
     _bump_snapshot(store_env)
     assert query.snapshot_id() != stale, "前提没成立：这次改动没有改变数据指纹"
 
-    out = derived_store.read_factor_values({"f1": "ph1"}, D1, ["A00001.SZ", "B00002.SZ"])
+    out, warns = derived_store.read_factor_values({"f1": "ph1"}, D1, ["A00001.SZ", "B00002.SZ"])
     assert out.empty, "陈旧快照的因子值必须当未命中，而不是照样返回"
     assert list(out.columns) == ["f1"]
+    assert len(warns) == 1 and "f1" in warns[0]
     assert len(_table()) == 2, "read 不负责删行 —— 陈旧行留在库里等 build 覆盖"
+
+
+def test_read_warns_for_each_factor_that_is_not_current(store_env):
+    """★ 评审 C1：**逐因子**判命中。三个因子里只有一个陈旧时，帧【不是】`.empty` ——
+    那一列被 `reindex(columns=names)` 物化成全 NaN，与 f3（行在、值合法地全 NULL）
+    逐位相同，调用方分不出来。而它下游正是 `combine` 的「静默剔除 + 按剩余权重
+    重新归一」。走到这里只需要公开调用：build f1 → promote → build f2，
+    也就是「给系统新增一个因子」的正常做法。"""
+    stale = query.snapshot_id()
+    derived_store.write_factor_values(_rows(
+        ("f1", "ph1", D1, "A00001.SZ", 0.4142135624, -0.7071067812, stale),
+        ("f1", "ph1", D1, "B00002.SZ", -1.7320508076, 1.4142135624, stale)))
+    _bump_snapshot(store_env)
+    snap = query.snapshot_id()
+    derived_store.write_factor_values(_rows(
+        ("f2", "ph1", D1, "A00001.SZ", 2.2360679775, 0.3010299957, snap),
+        ("f2", "ph1", D1, "B00002.SZ", 0.5772156649, 0.6931471806, snap),
+        ("f3", "ph1", D1, "A00001.SZ", None, None, snap),
+        ("f3", "ph1", D1, "B00002.SZ", None, None, snap)))
+
+    out, warns = derived_store.read_factor_values(
+        {"f1": "ph1", "f2": "ph1", "f3": "ph1"}, D1, ["A00001.SZ", "B00002.SZ"], processed=False)
+
+    assert not out.empty, "前提：部分命中的帧非空 —— 陈旧那一列只是静默变成 NaN"
+    assert list(out.columns) == ["f1", "f2", "f3"]
+    assert out["f1"].isna().all() and out["f3"].isna().all()
+    assert out["f2"].tolist() == [2.2360679775, 0.5772156649]
+    assert len(warns) == 1 and "f1" in warns[0], warns
+    assert "f3" not in warns[0], "f3 的行【在当前快照】，全 NULL 是合法缺值，不是降级"
+
+
+def test_read_with_nothing_asked_returns_an_empty_frame_and_no_warnings(store_env):
+    """先落一行：库不存在的话根本走不到那道空 mapping 的闸（前面就 return 了），
+    而没有它 `IN ()` 会抛 duckdb.ParserException。"""
+    derived_store.write_factor_values(_rows(
+        ("f1", "ph1", D1, "A00001.SZ", 0.4142135624, 0.1, query.snapshot_id())))
+    out, warns = derived_store.read_factor_values({}, D1, ["A00001.SZ"])
+    assert out.empty and list(out.columns) == []
+    assert warns == [], "什么都没问 ≠ 什么都没命中"
+
+
+def test_read_rejects_a_universe_that_base_would_reject(store_env):
+    """`base._checked_universe` 自称「18 个因子的唯一校验点」，而缓存这条路是第二个入口。
+    重复代码经 reindex 会静默复制出重复行（下游把同一只股票加权两次），
+    空池返回的空表与「未命中」逐位相同（调用方把自己的 bug 读成"这天没算过"）。
+    L1 不许本模块 import ashare.factors，所以这两条只能在 derived_store 里再写一遍。"""
+    derived_store.write_factor_values(_rows(
+        ("f1", "ph1", D1, "A00001.SZ", 0.4142135624, 0.1, query.snapshot_id())))
+    with pytest.raises(ValueError, match="重复"):
+        derived_store.read_factor_values({"f1": "ph1"}, D1, ["A00001.SZ", "A00001.SZ"])
+    with pytest.raises(ValueError, match="为空"):
+        derived_store.read_factor_values({"f1": "ph1"}, D1, [])
 
 
 def test_read_matches_param_hash_not_just_the_factor_name(store_env):
@@ -158,9 +224,11 @@ def test_read_matches_param_hash_not_just_the_factor_name(store_env):
         ("f1", "ph20", D1, "A00001.SZ", 0.4142135624, -0.7071067812, snap),
         ("f1", "ph26", D1, "A00001.SZ", 2.2360679775, 1.7320508076, snap)))
 
-    out = derived_store.read_factor_values({"f1": "ph26"}, D1, ["A00001.SZ"], processed=False)
+    out, warns = derived_store.read_factor_values({"f1": "ph26"}, D1, ["A00001.SZ"],
+                                                  processed=False)
     assert out["f1"].tolist() == [2.2360679775]
     assert len(out) == 1
+    assert warns == []
 
 
 def test_read_reindexes_onto_the_requested_universe(store_env):
@@ -171,8 +239,8 @@ def test_read_reindexes_onto_the_requested_universe(store_env):
         ("f1", "ph1", D1, "A00001.SZ", 0.4142135624, 0.1, snap),
         ("f1", "ph1", D1, "D00004.SZ", 0.5772156649, 0.2, snap)))
 
-    out = derived_store.read_factor_values({"f1": "ph1"}, D1,
-                                           ["C00003.SH", "A00001.SZ"], processed=False)
+    out, _ = derived_store.read_factor_values({"f1": "ph1"}, D1,
+                                              ["C00003.SH", "A00001.SZ"], processed=False)
     assert out.index.tolist() == ["C00003.SH", "A00001.SZ"]
     assert pd.isna(out.loc["C00003.SH", "f1"])          # 池里有、库里没有 → NaN
     assert out.loc["A00001.SZ", "f1"] == 0.4142135624
@@ -209,10 +277,20 @@ def test_write_upserts_and_carries_the_new_snapshot_id(store_env):
 
 def test_write_rejects_a_frame_that_is_missing_columns(store_env):
     """少了 snapshot_id 会撞 NOT NULL，少了 factor_name 只会在深处炸出一个 KeyError。
-    七列一起在入口验，报缺哪一列。"""
-    bad = _rows(("f1", "ph1", D1, "A00001.SZ", 1.0, 2.0, "s")).drop(columns=["snapshot_id"])
-    with pytest.raises(ValueError, match="snapshot_id"):
-        derived_store.write_factor_values(bad)
+    七列一起在入口验，报缺哪一列 —— 逐列删一遍：只测 snapshot_id 那一列的话，
+    另外六列从检查里删掉也没有人会发现（而且报错文本里恰好也写着 snapshot_id，
+    所以断言必须匹配那个列表本身）。"""
+    full = _rows(("f1", "ph1", D1, "A00001.SZ", 1.0, 2.0, "s"))
+    for col in COLS:
+        with pytest.raises(ValueError, match=re.escape(f"缺列 ['{col}']")):
+            derived_store.write_factor_values(full.drop(columns=[col]))
+
+
+def test_write_of_an_empty_frame_writes_nothing_and_creates_no_db(store_env):
+    """列齐但没有行 = 没什么可写，不是错误；也不该顺手把库建出来 ——
+    `current_factor_dates` / `read` 靠「库不存在」判「第一次跑」。"""
+    assert derived_store.write_factor_values(_rows()) == 0
+    assert not pathlib.Path(_derived.DEFAULT_DERIVED_PATH).exists()
 
 
 # ══════════════ 2 · 已算日期（build 的跳过判据）══════════════
@@ -241,7 +319,9 @@ def test_current_factor_dates_without_a_derived_db_is_empty(store_env):
     """第一次跑时派生库还不存在 —— 「什么都没算过」，不是异常。"""
     assert not pathlib.Path(_derived.DEFAULT_DERIVED_PATH).exists()
     assert derived_store.current_factor_dates({"f1": "ph1"}, [D1]) == set()
-    assert derived_store.read_factor_values({"f1": "ph1"}, D1, ["A00001.SZ"]).empty
+    out, warns = derived_store.read_factor_values({"f1": "ph1"}, D1, ["A00001.SZ"])
+    assert out.empty
+    assert len(warns) == 1, "派生库不存在 = 每个因子都没命中，同样要出声"
 
 
 # ══════════════ 3 · coverage_report ══════════════
@@ -291,11 +371,71 @@ def test_coverage_report_flags_stale_dates(store_env):
     assert rep.iloc[0]["n_stale_dates"] == 2
 
 
+def test_coverage_report_counts_only_the_current_snapshot(store_env):
+    """★ 评审 I1：`read` 只服务当前快照，而 `factor_value` 只增不减 —— 混代统计报出来的
+    覆盖率**比实际能读到的高**。这里 3 行当前（1 行非空）+ 2 行非空的孤儿：
+    不加快照过滤报 0.60，实际能服务的是 0.333，而 0.60 恰好是 `min_coverage` 的默认值 ——
+    报告刚好过闸，能读到的横截面只有它的一半。"""
+    snap = query.snapshot_id()
+    derived_store.write_factor_values(_rows(
+        ("f1", "ph1", D1, "A00001.SZ", 0.4142135624, 0.1, snap),
+        ("f1", "ph1", D1, "B00002.SZ", None, 0.2, snap),
+        ("f1", "ph1", D1, "C00003.SH", None, 0.3, snap),
+        ("f1", "ph1", D1, "D00004.SZ", 2.2360679775, 0.4, "snap_orphan"),
+        ("f1", "ph1", D1, "E00005.SZ", 0.5772156649, 0.5, "snap_orphan")))
+
+    rep = derived_store.coverage_report(["f1"])
+    assert rep.iloc[0]["mean_coverage"] == pytest.approx(1 / 3)
+    assert rep.iloc[0]["n_stale_dates"] == 1, "这一天混着别的快照的行 → 不是「整天都当前」"
+
+
+def test_coverage_report_flags_a_date_whose_rows_are_only_partly_current(store_env):
+    """★ 评审 I2：`_coverage_fixture` 里一天的所有行共享同一个快照，而在同质分组上
+    `bool_and ≡ bool_or` —— 那条用例根本分辨不出这个谓词（`current_factor_dates`
+    有混代 fixture，`coverage_report` 带的是同一个谓词的第二份拷贝）。
+    换成 bool_or：一个 build 认为没算完的日期，报告说「0 个陈旧日」，两个答案静默打架。"""
+    snap = query.snapshot_id()
+    derived_store.write_factor_values(_rows(
+        ("f1", "ph1", D1, "A00001.SZ", 0.4142135624, 0.1, snap),
+        ("f1", "ph1", D1, "B00002.SZ", 2.2360679775, 0.2, "snap_stale"),
+        ("f1", "ph1", D2, "A00001.SZ", 0.5772156649, 0.3, snap)))
+
+    rep = derived_store.coverage_report(["f1"])
+    assert rep.iloc[0]["n_dates"] == 2
+    assert rep.iloc[0]["n_stale_dates"] == 1
+    assert derived_store.current_factor_dates({"f1": "ph1"}, [D1, D2]) == {("f1", D2)}, \
+        "同一个谓词的两份拷贝必须给出同一个答案"
+
+
+def test_coverage_report_ignores_a_fully_stale_date_instead_of_poisoning_the_mean(store_env):
+    """整天都陈旧 → 那天的覆盖率记 NULL（`avg` 会跳过），由 `n_stale_dates` 那一列去报：
+    一个是「没有当前数据」，一个是「当前数据很稀」。不记 NULL 的话分母是 0，
+    而 DuckDB 的 0/0 是 **NaN 不是 NULL**（同一个坑第三次）—— avg 把 NaN 传染给整个因子，
+    99 天好数据配 1 天陈旧，报出来的覆盖率是 NaN。"""
+    derived_store.write_factor_values(_rows(
+        ("f1", "ph1", D1, "A00001.SZ", 0.4142135624, 0.1, "snap_stale"),
+        ("f1", "ph1", D2, "A00001.SZ", 2.2360679775, 0.2, query.snapshot_id())))
+
+    rep = derived_store.coverage_report(["f1"])
+    assert rep.iloc[0]["mean_coverage"] == 1.0, "只有 D2 有当前数据，覆盖率就该是 D2 的"
+    assert rep.iloc[0]["n_stale_dates"] == 1
+
+
 def test_coverage_report_on_an_empty_store_has_the_columns(store_env):
     rep = derived_store.coverage_report()
     assert rep.empty
     assert list(rep.columns) == ["factor_name", "param_hash", "first_date", "last_date",
                                  "n_dates", "mean_coverage", "n_stale_dates"]
+
+
+def test_coverage_report_with_no_names_or_no_matching_rows_has_the_columns(store_env):
+    """`coverage_report([])` 曾经抛 `duckdb.ParserException`（`IN ()`）——
+    两个姊妹函数都把空输入当「什么都没问」。「库里有行但没有一行是问的那个因子」
+    是另一条路：空报告同样要带列名，否则调用方拿到一个没有形状的空表。"""
+    _coverage_fixture(query.snapshot_id())
+    for rep in (derived_store.coverage_report([]), derived_store.coverage_report(["nope"])):
+        assert rep.empty
+        assert list(rep.columns) == derived_store.COVERAGE_COLUMNS
 
 
 # ══════════════ 4 · store.build ══════════════
@@ -368,9 +508,81 @@ def test_build_overwrite_recomputes_a_date_that_is_already_current(store_env):
     assert len(_table()) == 3
 
 
+def test_build_deletes_rows_that_left_the_universe_and_keeps_its_skip(store_env):
+    """★ 评审 I1 的第二个症状：股票池按 as_of_date 动态生成（D5），数据一修正
+    （改一个上市日 / 一段 ST 区间）就可能有票退出某个**历史日期**的池子 ——
+    它那行留在库里盖着旧快照，于是 `current_factor_dates` 的 bool_and 对这一天
+    **永远为假**：每次跑都重算，`overwrite=False` 的跳过永久失效。
+    而 read 那边一切正常（它按 universe 对齐，根本看不见那行）——
+    症状只有「缓存莫名其妙不生效」，是最难往这上面想的一种。"""
+    _register("f1")
+    ph = base.get_factor("f1").param_hash()
+    derived_store.write_factor_values(_rows(
+        ("f1", ph, D1, "ZZ99999.SZ", 0.4142135624, 0.1, "snap_orphan"),
+        # 另一代参数的同一只票：闸 5 的 ±30% 网格下并存多代是【正常的】，不许顺手清掉
+        ("f1", "ph_other", D1, "ZZ99999.SZ", 2.2360679775, 0.2, "snap_orphan")))
+
+    written, warns = store.build(["f1"], [D1])
+    assert written == {"f1": 3}
+    assert any("不在当前股票池" in w for w in warns), warns
+    left = _table().set_index(["factor_name", "param_hash", "ts_code"])
+    assert ("f1", ph, "ZZ99999.SZ") not in left.index
+    assert ("f1", "ph_other", "ZZ99999.SZ") in left.index, "只删这次要写的那一代"
+    assert store.build(["f1"], [D1])[0] == {"f1": 0}, "孤儿行清掉之后，跳过必须回来"
+
+
+def test_drop_out_of_universe_refuses_an_empty_universe(store_env):
+    """空池在 SQL 里是 `NOT IN ()`（删掉这一天的全部行），是这条**破坏性**路径上
+    blast radius 最大的一种输入 —— 靠 DuckDB 的语法错兜底太薄。"""
+    with pytest.raises(ValueError, match="为空"):
+        derived_store.drop_out_of_universe({"f1": "ph1"}, D1, [])
+
+
+def test_build_recomputes_when_only_the_param_hash_changed(store_env):
+    """★ 评审 I3：`current_factor_dates` 按 **(factor_name, param_hash) 成对**过滤。
+    只按名字过滤的话，旧参数那一代（行都在、快照是当前的）会让新参数的 build 整段跳过：
+    build 说算完了 `{"f1": 0}`，read 按新哈希一行都读不到，而且**永远**停在这个状态
+    （跳过 → 不写 → 还是跳过）。闸 5 的 ±30% 参数网格每换一个参数都走这条路。"""
+    _register("f1", window=20)
+    store.build(["f1"], [D1])
+    old = base.get_factor("f1").param_hash()
+
+    base.FACTOR_REGISTRY.pop("f1")
+    _register("f1", window=26)
+    new = base.get_factor("f1").param_hash()
+    assert new != old, "前提：default_params 进 param_hash"
+
+    assert store.build(["f1"], [D1])[0] == {"f1": 3}
+    assert not derived_store.read_factor_values({"f1": new}, D1, ["A00001.SZ"])[0].empty
+    assert len(_table()) == 6, "两代并存：闸 5 的参数高原本来就要两代都在"
+
+
+def test_param_hash_covers_exactly_what_changes_the_stored_values(store_env):
+    """★ 评审 I5：`neutralize` 与 `available_from` 都**改变落库的值** —— 前者决定做不做
+    中性化，后者把整段历史短路成全 NaN —— 却曾经不进 `param_hash`。于是改了它们，
+    build 看到「主键命中 + 快照是当前的」就跳过（0 行），read 拿回改动**之前**的值：
+    一次静默的假缓存命中，长得跟缓存正常工作一模一样。
+    `direction` / `min_coverage` 不进：那两个由 `combine` 在读出**之后**施加，
+    库里的值一个字都不变，进哈希只会凭空多算一代缓存。
+
+    住在本文件而不是 test_factor_base：这里守的是**缓存键的语义**（Task 8 的主键），
+    哈希的书写格式（canonical JSON / isoformat）那两颗钉子在 test_factor_base 里。"""
+    _register("f1")                                  # _register 默认 neutralize=False
+    spec = base.get_factor("f1")
+    h = spec.param_hash()
+    assert dataclasses.replace(spec, neutralize=True).param_hash() != h
+    assert dataclasses.replace(spec, available_from=dt.date(2030, 1, 1)).param_hash() != h
+    assert dataclasses.replace(spec, direction=-1).param_hash() == h
+    assert dataclasses.replace(spec, min_coverage=0.99).param_hash() == h
+
+    store.build(["f1"], [D1])
+    base.FACTOR_REGISTRY["f1"] = dataclasses.replace(spec, neutralize=True)
+    assert store.build(["f1"], [D1])[0] == {"f1": 3}, "改了 neutralize 必须是真未命中，不是跳过"
+
+
 def test_a_pk_hit_is_not_a_valid_cache(store_env):
-    """★ `param_hash` 只哈希 name + default_params。函数体、`neutralize`、`direction`
-    都不在里面（函数体本来也没法哈希）—— 同一个主键下存的可以是另一种语义的值。
+    """★ 剩下唯一哈希不到的东西是**因子函数体**（本来也没法哈希）——
+    同一个主键下存的可以是另一种语义的值。
 
     所以 build 只把主键命中当成「存在某一代」：语义变了要靠 `overwrite=True` 说出来，
     库里不会自己发现。这条用例把这个代价钉住，免得下一个人以为跳过 == 已是最新。"""
@@ -443,8 +655,8 @@ def test_read_after_a_partial_build_does_not_fill_in_the_missing_date(store_env)
     store.build(["f1"], [D1])
     ph = base.get_factor("f1").param_hash()
 
-    assert not derived_store.read_factor_values({"f1": ph}, D1, ["A00001.SZ"]).empty
-    assert derived_store.read_factor_values({"f1": ph}, D2, ["A00001.SZ"]).empty
+    assert not derived_store.read_factor_values({"f1": ph}, D1, ["A00001.SZ"])[0].empty
+    assert derived_store.read_factor_values({"f1": ph}, D2, ["A00001.SZ"])[0].empty
 
 
 def test_build_refuses_to_straddle_two_databases(store_env, tmp_path):
@@ -472,10 +684,64 @@ def test_build_refuses_to_straddle_two_databases(store_env, tmp_path):
 
 
 def test_build_reports_progress_per_date(store_env):
+    """先把 D1 算掉：跳过的日期**同样**要报进度，否则把 progress 挪进 `if todo:`
+    没有任何用例会红 —— 而一次「大部分日期都命中缓存」的重跑，进度条会卡住不动。"""
     _register("f1")
+    store.build(["f1"], [D1])
     seen: list[tuple[int, int]] = []
     store.build(["f1"], [D1, D2, D3], progress=lambda done, total: seen.append((done, total)))
     assert seen == [(1, 3), (2, 3), (3, 3)]
+
+
+def test_build_refuses_an_empty_factor_list(store_env):
+    """与 `compute_panel`（「没有因子的面板没有意义」）同口径。静默返回 `{}` 会让
+    「名字列表算错成空」的调用方看到一次成功的空跑 —— 而且顺手钉住了快照。"""
+    with pytest.raises(ValueError, match="names 为空"):
+        store.build([], [D1])
+
+
+def test_build_over_an_empty_date_range_is_a_no_op(store_env):
+    """区间里一个交易日都没有（放假一周的日历切片）是正常输入，不是错误。
+    没有 `current_factor_dates` 的空输入闸，这里是 `trade_date IN ()` → ParserException。"""
+    _register("f1")
+    store.build(["f1"], [D1])                      # 先建库：库不存在时那句 SQL 根本不会发
+    assert store.build(["f1"], [])[0] == {"f1": 0}
+
+
+def test_build_counts_a_repeated_date_once(store_env):
+    """`done` 在循环外算一次，所以重复日期会走两遍 todo 分支：库是对的（UPSERT 幂等），
+    但 written 报双倍 —— 一个对不上库的进度数字。"""
+    _register("f1")
+    written, _ = store.build(["f1"], [D1, D1])
+    assert written == {"f1": 3}
+    assert len(_table()) == 3
+
+
+def test_build_leaves_the_snapshot_pinned_until_close_db(store_env, tmp_path):
+    """★ 评审 I4：正常返回之后钉子**还在**，只有 `query.close_db()` 解得开。
+    长驻进程里跑完 build 不 close，下一次 nightly promote 之后每一个 A 股工具都会抛
+    「请重跑」。而 `open_db()` **不是解药**：它把连接指到新文件上，于是那一次检查
+    静默通过 —— 钉子还举着，你却已经在读另一个数据库了（下一次 promote 照样抛）。
+    解钉是调用方的事 —— 这条用例把这个契约写下来给 Task 13 的引擎作者看。"""
+    def promote():
+        shutil.copyfile(store_env, str(tmp_path / "promoted.duckdb"))
+        os.replace(str(tmp_path / "promoted.duckdb"), store_env)  # 路径不变，inode 变
+
+    _register("f1")
+    store.build(["f1"], [D1])
+
+    promote()
+    with pytest.raises(query.QueryError, match="钉住"):
+        query.get_universe(D1)
+
+    query.open_db(store_env)
+    assert query.get_universe(D1), "open_db 把连接指到新文件 → 这一次静默放行"
+    promote()
+    with pytest.raises(query.QueryError, match="钉住"):
+        query.get_universe(D1)                                    # 钉子并没有被解开
+
+    query.close_db()
+    assert query.get_universe(D1)                                 # 只有 close_db() 解钉
 
 
 # ══════════════ 5 · 分层方向 ══════════════
