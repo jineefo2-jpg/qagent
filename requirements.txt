@@ -48,8 +48,5 @@ baostock>=0.8.8
 # A 股回测的统计检验（P2 / 算法说明书 §4.2）
 # 可选：ICIR 的 t 检验 p 值（scipy.stats.t）。缺席时 p=None，t 值照常给出。
 scipy>=1.10
-# 可选：Newey-West HAC 标准误的【参照实现】。生产路径在 ashare/backtest/metrics.py 里
-# 用 numpy 直接算 Bartlett 核（6 行），不挂在这个依赖上 —— 否则 statsmodels 缺席时
-# 「NW 钉子」那条测试会静默 skip，而朴素标准误正是把噪声因子判成有效因子的头号原因。
-# 测试用 cov_type='HAC' 交叉验证两者逐位一致，防止两份实现各自演化。
-statsmodels>=0.14
+# statsmodels 只是 Newey-West 的【参照实现】，生产路径一行都不 import 它
+# （metrics.py 用 numpy 直接算 Bartlett 核），故它在 requirements-dev.txt 里，不在这里。

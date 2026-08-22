@@ -14,15 +14,25 @@
   而它看起来完全正常。引擎侧的口径：
     · `adv20` = 信号日 T 往前 20 个交易日 `amount` 的均值，
       **剔除停牌日**（D9 的占位行 `vol=0`/`amount=0`，算进去会系统性低估流动性→高估冲击）；
-    · `range` = 执行日掩码的 `amplitude` = (high − low) / pre_close。
+    · `range` = 信号日 T 往前 20 个交易日 `(high − low)/pre_close` 的**均值**，同样剔停牌
+      （占位行 `high==low==pre_close` 振幅为 0，算进去会把均值压低 → 低估成本；
+      经 `query.get_bars` 取时这些行的价格是 NaN，`dropna()` 即可）。
+      ★ 2026-08-22 修正：原口径是**执行日当天**的振幅 —— 在 τ 开盘成交的那一刻，
+        当天的 high/low 还没走出来，那是前视。它只抬高成本、不改信号，所以不会直接画出
+        假净值；但拿净额收益调参时这条路径可被利用（波动大的日子成本算得更准 =
+        泄露了一点未来）。20 日均值是同一个量的可得估计，且更平滑：靠近 30bp 封顶的那批
+        交易形态不变（均值单调平滑、恒 ≥ 0），换口径不动 `charge` 一行代码。
   为什么不在本文件里取数：computation 模块一旦 import query，`charge` 就再也不能
   被单测、被批量向量化、被闸 4 用不同费率重放同一批成交。
 
-★【ADV20 / range 缺失一律按封顶收费，不按 0】
+★【ADV20 / range 缺失或为 0 一律按封顶收费，不按 0 冲击】
   缺失的方向不是中性的：按 0 收 = "流动性未知 ⇒ 免费成交"，恰好错在把净值画好看那一侧；
   按上限收只会让结果更差，而且一定看得见（同 `get_tradable_mask` 的
   `limit_unknown → 两侧不可交易`：宁可保守，不可假设）。抛异常在这里是错的 ——
   一只上市不足 20 天、或长期停牌的票会炸掉整个 15 年的运行。
+  `range == 0` 走的是**同一条**路：20 日振幅全为 0 意味着这 20 天每天 high==low，
+  即连续一字板（或整段停牌被剔干净后无样本）—— 那是"根本成交不了"，不是"零波动
+  所以零冲击"。旧实现的 `rng >= 0` 把它读成后者，恰好又倒向把净值画好看那一侧。
 
 ★【过户费双边，与 §5.4 的 c^b 表格不一致，是表格旧了】
   §5.4 把 c^b 写成 0.00025（只有佣金）、c^s 写成 0.00025+0.0005+0.00001，
@@ -59,27 +69,38 @@ def charge(trade_rows: pd.DataFrame, cost_cfg: CostConfig) -> "tuple[pd.DataFram
 
     Args:
         trade_rows: `execution.simulate` 的 `trades`，**外加引擎附的 `adv20` / `range`**。
-            必需列：`side`（'BUY'|'SELL'）、`amount`（成交金额，正数）、`adv20`、`range`。
+            必需列：`side`（'BUY'|'SELL'）、`amount`（成交金额，正数）、`adv20`、
+            `range`（**信号日往前 20 日的平均振幅**，不是执行日当天的，见模块头）。
             其余列原样带过。
         cost_cfg: 费率。`multiplier` 是闸 4 的成本敏感倍数，乘在每一个分量上。
 
     Returns:
         `(DataFrame, warnings)` —— 与 `pipeline.process` / `build_targets` / `simulate`
         同惯例（global-constraints：返回类型必须留 warning 通道）。本函数唯一的降级是
-        「ADV20/振幅缺失 → 按 30bp 封顶收费」，那一条必须汇进 `BacktestResult.warnings`。
+        「ADV20/振幅缺失或为 0 → 按 30bp 封顶收费」，那一条必须汇进 `BacktestResult.warnings`。
 
     Raises:
-        ValueError: 缺必需列、`side` 不是 BUY/SELL、`amount` 非正或非有限。
-            三者都是**引擎契约被破坏**，不是数据缺口：静默跳过任何一条都会让
+        ValueError: 缺必需列、`side` 不是 BUY/SELL、`amount` 非正或非有限、`cost_cfg` 不合法。
+            四者都是**契约被破坏**，不是数据缺口：静默跳过任何一条都会让
             成本系统性偏低，而净值曲线看起来毫无异常。
     """
+    m = float(cost_cfg.multiplier)
+    _rates = (cost_cfg.commission_bps, cost_cfg.stamp_duty_bps, cost_cfg.transfer_bps,
+              cost_cfg.impact_coef, cost_cfg.impact_cap_bps)
+    if not (m > 0 and min(_rates) >= 0):
+        raise ValueError(
+            f"CostConfig 不合法（multiplier={m!r}, 费率={_rates}）：`CostConfig` 是 frozen "
+            f"dataclass 但不做任何校验，这道闸只能在这里补。multiplier=0 产出一张全零费用表 —— "
+            f"一次「零成本」的回测在报告上只表现为「策略特别好」；负费率则变成交易返现，"
+            f"同样不会抛、不会告警、只会把净值画得更漂亮")
     df = pd.DataFrame(trade_rows).copy()
     missing = [c for c in ("side", "amount", *IMPACT_COLS) if c not in df.columns]
     if missing:
         raise ValueError(
             f"trade_rows 缺列 {missing}：`charge` 是纯函数，冲击成本要的 "
-            f"{list(IMPACT_COLS)} 由引擎附上（adv20 = 信号日往前 20 个交易日的成交额均值、"
-            f"剔停牌；range = 执行日掩码的 amplitude）。缺列时按 0 计冲击会让整条净值曲线"
+            f"{list(IMPACT_COLS)} 由引擎附上（adv20 = 信号日往前 20 个交易日的成交额均值；"
+            f"range = 同一窗口 (high−low)/pre_close 的均值，**不是执行日当天的振幅**；"
+            f"两者都剔停牌占位行）。缺列时按 0 计冲击会让整条净值曲线"
             f"少掉全部冲击成本，且看起来完全正常")
 
     if df.empty:                       # 无交易日也要带着列出去，下游 groupby 不该 KeyError
@@ -103,23 +124,28 @@ def charge(trade_rows: pd.DataFrame, cost_cfg: CostConfig) -> "tuple[pd.DataFram
     rng = df["range"].astype(float).to_numpy()
 
     # ── 冲击：min(coef × 委托额/ADV20 × 振幅, cap)，缺料按 cap（模块头 ★2）──
+    #    `rng > 0` 而非 `>= 0`：振幅恰为 0 是「20 天连续一字板 / 无有效样本」，是不可成交，
+    #    不是零波动零冲击。它和 NaN 走同一条封顶路径。
     cap = cost_cfg.impact_cap_bps * _BPS
-    usable = np.isfinite(adv20) & (adv20 > 0) & np.isfinite(rng) & (rng >= 0)
+    usable = np.isfinite(adv20) & (adv20 > 0) & np.isfinite(rng) & (rng > 0)
     with np.errstate(divide="ignore", invalid="ignore"):
         rate = cost_cfg.impact_coef * (amount / np.where(usable, adv20, 1.0)) * np.where(usable, rng, 0.0)
     impact_rate = np.where(usable, np.minimum(rate, cap), cap)
 
-    m = float(cost_cfg.multiplier)
     df["commission"] = amount * (cost_cfg.commission_bps * _BPS) * m
     df["stamp_duty"] = np.where(is_sell, amount * (cost_cfg.stamp_duty_bps * _BPS), 0.0) * m
     df["transfer_fee"] = amount * (cost_cfg.transfer_bps * _BPS) * m
     df["impact"] = amount * impact_rate * m
-    df["total_cost"] = df[COST_COLS[:-1]].sum(axis=1)
+    # ★ skipna=False：默认的 sum 会把 NaN 分量当 0 加，于是「某一项算不出来」在总额上
+    #   表现为「那一项恰好免费」。分量全由本函数产出，出现 NaN 一定是上面某处出了事，
+    #   让它传染到 total_cost 才看得见。
+    df["total_cost"] = df[COST_COLS[:-1]].sum(axis=1, skipna=False)
 
     warns: list = []
     if not usable.all():
         n = int((~usable).sum())
         warns.append(
-            f"{n} 笔成交缺 ADV20 或振幅，冲击成本按封顶 {cost_cfg.impact_cap_bps:.0f}bp 计"
-            f"（不按 0：流动性未知不等于免费成交）：{list(df.index[~usable][:5])}")
+            f"{n} 笔成交缺 ADV20 或 20 日平均振幅（或其为 0），冲击成本按封顶 "
+            f"{cost_cfg.impact_cap_bps:.0f}bp 计（不按 0：流动性未知不等于免费成交）："
+            f"{list(df.index[~usable][:5])}")
     return df, warns

@@ -19,7 +19,8 @@
   头号统计错误。滞后阶数 `floor(4(T/100)^{2/9})`，Bartlett 核。
   本文件用 numpy 直接算（6 行），不把它挂在 `statsmodels` 上：那个依赖在 CI 里可选，
   而"依赖缺席 → NW 钉子测试静默 skip → 朴素 SE 的变异逃逸"正是这条铁律要防的事。
-  `statsmodels` 仍列在 requirements 里作**参照实现**，测试用 `cov_type='HAC'` 交叉验证。
+  `statsmodels` 只作**参照实现**列在 `requirements-dev.txt`（生产路径一行都不 import 它，
+  所以它是测试依赖不是运行依赖），测试用 `cov_type='HAC'` 交叉验证。
 
 ★ 3【单调性是秩相关，不是 Pearson】（§4.3）
   真实因子的分层几乎从不线性。单调但凸的一组年化收益 Pearson 只有 0.887、Spearman 是 1.0。
@@ -63,6 +64,12 @@ _IC_PERIODS = 52
 # n=5 是"秩相关有可能显著"的最小横截面，故取 5。
 _MIN_IC_OBS = 5
 
+# §4.2「声称 RankIC > 0.15 的，先去查前视偏差」。这条不是品味问题：A 股全市场单因子
+# 周频 RankIC 的现实量级是 0.02–0.06，0.15 以上基本只出现在对齐错了的时候。
+# ★ 它是 `ic_series` 结构上看不见的那一类错的唯一探测器 —— 调用方若把 R_t 标成 t 日
+#   （而不是 t→t+1），索引照样对得齐、每期横截面照样够，算出来的是"当期收益解释当期因子"。
+_IC_SUSPICIOUS = 0.15
+
 # 横截面风格回归的最小样本（架构 B7，与 `pipeline.MIN_OBS` 同值同理由：再少的横截面
 # 回归不出可信的规模暴露）。不 import factors —— 本层不该被拴在因子注册表上。
 _MIN_STYLE_OBS = 30
@@ -98,38 +105,58 @@ def _nw_se(x: np.ndarray, lag: int) -> float:
     return math.sqrt(s / n) if s > 0 else 0.0
 
 
-def icir(ic: pd.Series) -> "tuple[dict, list[str]]":
+def icir(ic: pd.Series, *, periods_per_year: int = _IC_PERIODS) -> "tuple[dict, list[str]]":
     """§4.2：ICIR 与显著性。返回 `(dict, warnings)`。
 
     dict: `n / mean / std / icir / icir_ann / nw_lag / t_naive / t_newey_west / p`。
     `t_naive` 一并报出**不是给人用的**，是让 NW 的收缩幅度在报告里看得见 ——
     两个 t 差一倍时，"这个因子显著"这句话该由谁来说是很清楚的。
+    ★ `t_naive` 的分母是 `std(ddof=1)/√n`，而 `_nw_se` 的 γ₀ 除的是 n（ddof=0）。
+      两者相差 √(n/(n−1))，n 大时可忽略、n=10 时 5%。这个差**不是** bug，也别去"对齐"：
+      NW 那半必须与 statsmodels 的 `use_correction=False` 逐位一致（有测试守着），
+      而 t_naive 那半要的是"人们通常怎么算"，两者本来就是两个口径。
+
+    Args:
+        periods_per_year: `icir_ann` 的年化口径。IC 是调仓频（周）故默认 52。
+            ★ 与 `layer_monotonicity` 同一个参数名同一个默认值 —— 写死 52 而邻居可配，
+              正是任务报告里挑 §9 毛病的那种自相矛盾，不该在自己文件里重演。
     """
-    s = pd.Series(ic, dtype=float)
-    s = s[np.isfinite(s.to_numpy())]
+    s0 = pd.Series(ic, dtype=float)
+    s = s0[np.isfinite(s0.to_numpy())]
     n = int(s.size)
+    warns: list = []
+    n_drop = int(s0.size - n)
+    if n_drop:
+        # 真实运行里 780 周掉 300 周是常态（横截面不足 / 全常数），而报告只写一个 n=480。
+        warns.append(f"IC 序列 {int(s0.size)} 期里有 {n_drop} 期非有限（多半是 ic_series 因"
+                     f"横截面不足或全常数置的 NaN），已剔除，下面所有统计量按 {n} 期算")
     out: dict = {"n": n, "mean": float("nan"), "std": float("nan"), "icir": float("nan"),
                  "icir_ann": float("nan"), "nw_lag": 0, "t_naive": float("nan"),
                  "t_newey_west": float("nan"), "p": None}
     if n < 2:
-        return out, [f"IC 序列只有 {n} 个有效观测，算不出标准差与显著性"]
+        return out, warns + [f"IC 序列只有 {n} 个有效观测，算不出标准差与显著性"]
 
-    warns: list = []
     arr = s.to_numpy(dtype=float)
+    mean = float(arr.mean())
+    if abs(mean) > _IC_SUSPICIOUS:
+        warns.append(f"|IC 均值| = {abs(mean):.4f} > {_IC_SUSPICIOUS}：§4.2「声称 RankIC > "
+                     f"{_IC_SUSPICIOUS} 的，先去查前视偏差」。全市场单因子周频的现实量级是 "
+                     f"0.02–0.06；把 R_t 标成 t 日（而不是 t→t+1）时索引对得齐、"
+                     f"横截面也够，`ic_series` 结构上看不出来，只有这个量级能报警")
     # ★ 恒定序列判在【原始值】上，不判在 std 上：29 个相同的 float 减掉自己的均值仍会剩
     #   ~1e-18 的噪声，std 与 NW 标准误因此都是 1e-18 而不是 0 —— t 值会给出 2e16，
     #   一个"无限显著"的因子。这不是数值毛病，是「没有变化的序列不可检验」被算成了确定性。
     if float(np.ptp(arr)) == 0.0:
         out.update(mean=float(arr[0]), std=0.0)
-        return out, [f"IC 序列 {n} 期恒为 {arr[0]:.6g}，无变异 —— ICIR 与 t 值都无定义，"
-                     f"不是「无限显著」"]
+        return out, warns + [f"IC 序列 {n} 期恒为 {arr[0]:.6g}，无变异 —— ICIR 与 t 值都无定义，"
+                             f"不是「无限显著」"]
 
-    mean, std = float(s.mean()), float(s.std(ddof=1))
+    std = float(s.std(ddof=1))
     lag = newey_west_lag(n)
-    se_nw = _nw_se(s.to_numpy(dtype=float), lag)
+    se_nw = _nw_se(arr, lag)
     out.update(mean=mean, std=std, nw_lag=lag,
                icir=mean / std if std > 0 else float("nan"),
-               icir_ann=mean / std * math.sqrt(_IC_PERIODS) if std > 0 else float("nan"),
+               icir_ann=mean / std * math.sqrt(periods_per_year) if std > 0 else float("nan"),
                t_naive=mean / (std / math.sqrt(n)) if std > 0 else float("nan"))
     if not se_nw > 0:
         warns.append(f"IC 序列的 Newey-West 标准误为 0（{n} 期几乎恒定），"
@@ -332,7 +359,12 @@ def attribution(positions: pd.DataFrame, forward_returns: pd.Series, scores: pd.
     w = pos["filled_weight"].astype(float)
     R = pd.Series(forward_returns, dtype=float).reindex(w.index)
     if R.isna().any():
-        warns.append(f"{int(R.isna().sum())} 个持仓没有持有期收益，行业贡献按缺失计")
+        # ★ 措辞不能写「按缺失计」：`(w*R).groupby().sum()` 跳过 NaN，等价于**按 0 贡献计**。
+        #   差别是方向性的 —— 缺失读作"不知道"，0 读作"这只票这一期不赚不亏"，
+        #   后者会把该行业的 contribution 往 0 拉，而 exposure 一分不少。
+        warns.append(f"{int(R.isna().sum())} 个持仓没有持有期收益：它们的贡献【按 0 计入】"
+                     f"所属行业（sum 跳过 NaN），该行业 contribution 被拉向 0，"
+                     f"而 exposure 照算 —— 两列的口径在这些行上不一致")
     # ★ .astype(object) 不可省：category dtype 下 groupby 会为【零观测的类别】发一行
     #   （pandas 2.3.3 实测 `__OTHER__ → NaN`，`value_counts` 同样报 `__OTHER__ → 0`）。
     #   `pipeline.neutralize` 已经被 `get_dummies` 的同一个行为咬过一次。
@@ -346,7 +378,17 @@ def attribution(positions: pd.DataFrame, forward_returns: pd.Series, scores: pd.
     # ── 风格块：逐期横截面回归 score ~ 1 + z + z²，再对系数序列做 Fama-MacBeth ──
     #    z 是**期内标准化**的 log_mv：不标准化的话 size² 与 size 高度共线，
     #    非线性项的系数就没法读；标准化后 z 与 z² 在对称分布上正交。
-    df = pd.DataFrame({"y": pd.Series(scores, dtype=float),
+    #    ★ scores 必须是【全股票池】。只传账本的话，这一块量到的是账本自己的规模倾斜，
+    #      而不是"残差在整个横截面上还不还是规模的代理" —— §3.2 的证伪仪器就指向了错的东西，
+    #      而且指错之后它照样出一个漂亮的小数字。`portfolio.build_targets` 有一模一样的一道闸
+    #      （scores 短于 industry ⇒ 调用方先 dropna 过了，覆盖率闸失明）。
+    sc_all = pd.Series(scores, dtype=float)
+    if len(sc_all) <= len(pos):
+        warns.append(f"scores 只有 {len(sc_all)} 行、positions 有 {len(pos)} 行：scores 疑似"
+                     f"传的是【账本】而不是全股票池（top_n=50 对全池 5000 只，两者不该同量级）。"
+                     f"那样 style/size 量的是账本的规模倾斜，§3.2「OLS 而非 WLS」的裁决"
+                     f"就无从证伪 —— 它照样会给出一个看起来正常的暴露值")
+    df = pd.DataFrame({"y": sc_all,
                        "x": pd.Series(size, dtype=float)}).dropna()
     df = df[np.isfinite(df.to_numpy()).all(axis=1)]
     b1: list = []
@@ -409,13 +451,15 @@ def compute(equity: pd.Series,
             benchmark_series: Optional[pd.Series],
             *,
             full: bool,
+            initial_capital: float,
             periods_per_year: int = _TRADING_DAYS,
             risk_free: float = 0.0,
-            factors_used: Optional[pd.Series] = None) -> "tuple[dict, list[str]]":
+            factors_used: Optional[pd.Series] = None,
+            n_factors_configured: Optional[int] = None) -> "tuple[dict, list[str]]":
     """§9 的净值 / 相对 / 交易三类指标。返回 `(metrics, warnings)`。
 
     Args:
-        equity: 日频净值（初始 1.0），index = trade_date。
+        equity: 日频**净值指数**（初始 1.0），index = trade_date。
         trades: `execution.simulate` 的成交表**经 `cost.charge` 补过费用列**。
         positions: MultiIndex `(rebalance_date, ts_code)`，需要 `filled_weight` /
             `target_weight` / `price_hfq`（`full=True` 时）。
@@ -426,6 +470,13 @@ def compute(equity: pd.Series,
         benchmark_series: 基准净值，index 与 `equity` 对齐。`None` → 相对指标缺失 + 告警。
         full: `False` 只算净值类（架构 §4.3 的 8s 档）；`True` 追加换手 / 成本拖累 /
             D6 缺口 / 因子存活数。
+        initial_capital: `BacktestConfig.initial_capital`（货币）。**没有默认值是有意的**：
+            架构 §4.3 的 2026-08-21 裁决 —— `equity` 在本系统里是两个量，`simulate` 收的是
+            **货币**权益（它要做 `shares = Δw·equity/price`），本函数收的是**净值指数**
+            （初始 1.0）。`charge` 的 `total_cost` 跟着前者。两者直接相除得到的是钱不是比例，
+            实测 `cost_drag_annual = 98502.98` 而 §5.4 说 3%–6%。给这个参数配一个默认值，
+            就等于把那个单位错误变成静默的默认行为。定额本金下
+            `组合权益_t = net_value_t × initial_capital` 是精确换算。
         periods_per_year: 年化口径。equity 是日频故默认 252。
             ★ §9 的表格自身不自洽：年化收益写 `252/D`（日频）而年化波动写 `σ_weekly·√52`
               （周频），同一条曲线上混用两个频率算出的 Sharpe 没有定义。本函数一律按
@@ -435,18 +486,36 @@ def compute(equity: pd.Series,
             ★ 不给就告警：`build_targets` 的 50% 覆盖率闸经 `combine` 喂进来是【二值】的
               （`process` 末尾 fillna(0) 让每只票都有数），探测不到部分降级。
               「12 个因子失效、拿剩下 2 个把整个账本调了一遍」只能靠这一项发现。
+        n_factors_configured: `len(BacktestConfig.factors)`，即**配置了几个**因子。
+            ★ 不给就只能拿【观测到的】最大值当分母，于是「14 个配置的因子每一期都只活下来
+              2 个」看起来完全健康（max=2、没有任何一期低于 max/2）—— 而齐步降级恰恰是
+              最常见的形态：一个因子少一列就是每期都少，不是个别期数据缺口。
     """
     warns: list = []
-    eq = pd.Series(equity, dtype=float).dropna()
+    eq_in = pd.Series(equity, dtype=float)
+    eq = eq_in.dropna()
+    n_blank = int(eq_in.size - eq.size)
+    if n_blank:
+        # 「降级必须可见」（模块头）。年化的分母 steps/periods_per_year 跟着变小，
+        # 等于把缺的那些天当作没发生过 —— 实测 21 天里挖掉 5 天：0.1259 → 0.1713。
+        warns.append(f"净值序列 {int(eq_in.size)} 个交易日里有 {n_blank} 个缺值，已剔除后"
+                     f"按 {int(eq.size)} 个点计算：年化的分母（走过的步数/{periods_per_year}）"
+                     f"跟着变小，等于把缺的那些天当作没发生过，年化收益会被系统性高估")
     out: dict = {"n_days": int(len(eq))}
     if len(eq) < 2:
         return {**out, "annual_return": float("nan"), "annual_vol": float("nan"),
                 "sharpe": float("nan"), "max_drawdown": float("nan"),
                 "calmar": float("nan"), "information_ratio": None}, \
-               ["净值序列不足两个点，所有绩效指标无定义"]
+               warns + ["净值序列不足两个点，所有绩效指标无定义"]
 
     v = eq.to_numpy(dtype=float)
     steps = len(v) - 1
+    # ★ 下面两处 `if years > 0 else nan`（换手年化 / 成本拖累）今天走不到：上面那个
+    #   `len(eq) < 2` 早返回保证 steps ≥ 1。按 2026-08-21 的等价变异裁决它们**留着** ——
+    #   判据是「删了之后下一个人会不会看错」而不是「变异能不能杀」，而这里要走两步推理
+    #   （len ≥ 2 ⇒ steps ≥ 1 ⇒ years > 0）、跨着三四十行，没有读者会自己走完。
+    #   钉住的是那个早返回本身（test_a_single_point_equity_curve_has_no_metrics_at_all）：
+    #   它一旦被挪走，这两处就从死代码变成承重件。
     years = steps / float(periods_per_year)
     rp = pd.Series(v[1:] / v[:-1] - 1.0, index=eq.index[1:])
 
@@ -493,6 +562,10 @@ def compute(equity: pd.Series,
             to, w_to = turnover_series(w, px.pct_change(fill_method=None))
             warns += w_to
             out["turnover_mean"] = float(to.mean())
+            # ★ 年化 = 总换手 / 年数，**不是** 每期均值 × periods_per_year。后者要求调仓频
+            #   与 periods_per_year 同频，而这里 periods_per_year 是净值的日频 252、
+            #   换手是周频 —— 乘 252 会把年化换手放大 4.8 倍，而这正是读者拿去对
+            #   `PortfolioConstraints.max_turnover = 0.30`（周频双边）的那个数。
             out["turnover_annual"] = float(to.sum() / years) if years > 0 else float("nan")
         else:
             warns.append("positions 缺 filled_weight / price_hfq，换手无法扣持仓漂移（§5.4）")
@@ -504,6 +577,9 @@ def compute(equity: pd.Series,
                 .abs().groupby(level=0).sum()
             out["d6_slippage_mean"] = float(gap.mean())
             out["d6_slippage_max"] = float(gap.max())
+    else:
+        warns.append("positions 为空：full=True 却没有换手（§5.4）与 D6 缺口这两组数。"
+                     "报告上少两行看不出是「整段没有调仓」还是「账本没传进来」")
 
     tr = pd.DataFrame(trades)
     if len(tr) and {"exec_date", "total_cost"} <= set(tr.columns):
@@ -512,9 +588,20 @@ def compute(equity: pd.Series,
         off = list(by_day.index[aligned.isna()])
         if off:
             warns.append(f"{len(off)} 个成交日不在净值曲线上，其成本未计入拖累：{[str(d) for d in off[:3]]}")
-        ct = (by_day / aligned).dropna()
+        # ★ 量纲（架构 §4.3，2026-08-21 裁决）：`total_cost` 是**货币**（跟着 `simulate`
+        #   的组合权益走，那边要用 shares = Δw·equity/price），`eq` 是**净值指数**（初始 1.0）。
+        #   直接相除得到的是钱不是比例 —— 实测 98502.98，而 §5.4 说 3%–6%。
+        #   定额本金回测下 t 日的组合权益 = net_value_t × initial_capital，换算是精确的。
+        ct = (by_day / (aligned * float(initial_capital))).dropna()
         out["cost_drag_annual"] = float(ct.sum() / years) if years > 0 else float("nan")
         out["cost_total"] = float(by_day.sum())
+        # 量纲守卫：年化成本拖累超过 100%/年永远不是真结果。两条曲线不在同一量纲上时，
+        # 这是唯一的信号 —— 成本模型接没接对，本来就只有这一个便宜的体检指标。
+        if out["cost_drag_annual"] > 1.0:
+            warns.append(
+                f"年化成本拖累 {out['cost_drag_annual']:.4g}（>100%/年）不可能是真结果："
+                f"§5.4 的量级是 3%–6%。多半是 equity 与 total_cost 不在同一量纲上"
+                f"（净值指数 vs 货币），或 initial_capital={initial_capital!r} 传错")
     elif len(tr):
         warns.append("trades 没有 total_cost 列（未经 cost.charge），成本拖累缺失")
 
@@ -526,9 +613,24 @@ def compute(equity: pd.Series,
     else:
         fu = pd.Series(factors_used).dropna().astype(int)
         if len(fu):
-            top = int(fu.max())
+            observed = int(fu.max())
+            # ★ 分母必须是【配置了几个】，不是【观测到的最多几个】。拿 observed 当分母时，
+            #   fu = [2,2,2,2] 的 max 就是 2、没有任何一期低于 1，报告干干净净 ——
+            #   而真相是 14 个因子废了 12 个、整个账本靠剩下 2 个调。齐步降级还是更常见的
+            #   那一种：一个因子少一列就是每期都少。
+            if n_factors_configured is None:
+                top = observed
+                warns.append("未提供 n_factors_configured：只能拿观测到的最大值当分母，"
+                             "于是「配置的因子每一期都只活下来一两个」这种【齐步降级】"
+                             "在本次报告里永远看不见（max 就是那个降级后的数）")
+            else:
+                top = int(n_factors_configured)
+                out["n_factors_configured"] = top
+                if observed < top:
+                    warns.append(f"配置了 {top} 个因子，全期最多只用上 {observed} 个 —— "
+                                 f"这是【每一期都在降级】，不是个别期的数据缺口")
             low = fu[fu < top / 2.0]
-            out.update(factors_used_min=int(fu.min()), factors_used_max=top,
+            out.update(factors_used_min=int(fu.min()), factors_used_max=observed,
                        factors_used_median=float(fu.median()),
                        n_periods_below_half=int(len(low)))
             if len(low):
