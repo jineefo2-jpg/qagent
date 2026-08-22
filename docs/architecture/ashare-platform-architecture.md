@@ -540,6 +540,31 @@ def coverage_report(name_to_hash: dict[str, str]) -> pd.DataFrame:
 
 ### 4.3 回测引擎输入输出
 
+> **★ 引擎侧五条裁决（2026-08-21，Task 13 落地后）**
+>
+> **① `BacktestResult.equity` 必须是【日频】，不是调仓频率。** 周频采样会**低估最大回撤**
+> （看不见周内的低点），而 MDD 喂 Calmar —— 这是朝着好看方向的偏差。
+> 策略周频调仓，但账本每个交易日盯市；成本是稀疏序列，对齐到日频索引上即可。
+> 年化按各自频率：净值 252、IC 52（§9 的「按入参序列自己的频率」）。
+>
+> **② `compute_diagnostics=True` 时 `ic` / `layers` / `attribution` 必须真的产出。**
+> 尤其 `attribution` —— §3.2 的 OLS-vs-WLS 裁决**只能靠它被证伪**，不接等于那条裁决
+> 永远说不清对错。不产出而只发一条 warning，是把一个可检验的断言变成一句空话。
+>
+> **③ `build_targets` 返回三元组 `(final, intended, warnings)`。** 现在引擎为了拿到裁剪前的
+> 意图账本，用 `max_turnover=inf` **再调一次** —— 既多做一遍功，又必须**丢弃第二次的
+> warnings**（否则每条降级报两遍）。丢弃 warning 这件事本身就违反「降级必须可见」。
+>
+> **④ `compute_diagnostics` 只闸住那三个【新增】块；`metrics.compute(full=True)` 恒真。**
+> 这解开了 `types.py` 与 `metrics.compute(full=)` 的矛盾：豁免条件写的是
+> 「只能新增、不得改动 metrics 里的任何一个数」，而 `full=False` 会**删掉**
+> turnover / cost-drag / D6-gap —— 同一个 `param_hash` 产出不同的 metrics 键集。
+> `full=False` 只留给临时分析，绝不由 `compute_diagnostics` 驱动。
+>
+> **⑤ `backtest_run` 的读写归 `derived_store`，`backtest/store.py` 只做转发。**
+> 表在 schema 里躺着却没有写入方，比没有这张表更糟。pickle 是权宜之计
+> （L1 不许 backtest 层碰 duckdb，而当时 `derived_store` 只覆盖了 `factor_value`）。
+
 > **★ `equity` 在本系统里是两个不同的量，必须分清（2026-08-21 裁决）**
 >
 > · `simulate(equity=...)` —— **货币**口径的组合权益（现金 + 持仓市值），

@@ -713,6 +713,16 @@ tests/ashare/
 
 ---
 
+> **★ 2026-08-21 追加（Task 13 转来）：闸 3 的 200 次置换要先决定「因子算几遍」。**
+> 计划里 `combine` 那句「优先 store.read」**没有实现** —— `factors/store.py` 没有 `read`，
+> `combine` 也不碰派生库。Task 13 拒绝在 engine 里加这条快路，理由成立：
+> 白名单 + 覆盖率闸 + 重新归一都是**策略**，挪进编排层就把 money path 分了叉，违反 A5。
+> 正确的落点是 `factors.base.combine(..., use_store=True)`。
+>
+> **但要不要做，取决于闸 3 的形状**：置换只打乱**同一天横截面内**的分数，因子值本身不变。
+> 若闸 3 按「算一次因子、置换 200 次分数」实现，store 快路对它就不重要；
+> 若每次置换都重跑整条链，那是 200 × 15 因子 × 780 天。**先定闸 3 怎么跑，再回答要不要做。**
+
 ### Task 14: 防自欺五闸 guards
 
 **Files:** Create `ashare/backtest/guards.py`; Create `tests/ashare/test_guards.py`
