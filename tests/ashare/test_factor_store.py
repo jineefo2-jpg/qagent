@@ -734,11 +734,14 @@ def test_build_leaves_the_snapshot_pinned_until_close_db(store_env, tmp_path):
     with pytest.raises(query.QueryError, match="钉住"):
         query.get_universe(D1)
 
-    query.open_db(store_env)
-    assert query.get_universe(D1), "open_db 把连接指到新文件 → 这一次静默放行"
-    promote()
+    # ★ open_db 曾是这个钉子的后门：它把 _conn_ident 指到新 inode，于是 _conn() 的
+    #   「磁盘 ident != _conn_ident」又相等了，钉住检查永远不再触发 —— 查询【静默】
+    #   落到另一个数据库上而 _pinned_ident 还宣称钉着。那正是 D7 要挡的东西，
+    #   且比抛错更坏（抛出来的错是特性）。现在 open_db 自己先抛。
     with pytest.raises(query.QueryError, match="钉住"):
-        query.get_universe(D1)                                    # 钉子并没有被解开
+        query.open_db(store_env)
+    with pytest.raises(query.QueryError, match="钉住"):
+        query.get_universe(D1)                                    # 钉子仍在
 
     query.close_db()
     assert query.get_universe(D1)                                 # 只有 close_db() 解钉

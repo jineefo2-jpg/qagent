@@ -69,6 +69,15 @@ def open_db(market_path: str | None = None, derived_path: str | None = None) -> 
     if not pathlib.Path(path).exists():
         raise QueryError(f"market 库不存在: {path}（先跑 python -m ashare.data.pipeline full）")
     ident = _file_ident(path)
+    # ★ 钉住期间不许换库（2026-08-21）：本函数会把 _conn_ident 指到新 inode，
+    #   于是 _conn() 的「磁盘 ident != _conn_ident」比较又相等了，钉住检查【永远不再触发】——
+    #   查询静默落到另一个数据库上，而 _pinned_ident 还宣称钉着。
+    #   那正是 D7 要挡的「一次运行横跨两份数据只记一个 data_snapshot_id」，
+    #   且比直接抛更坏：抛出来的错是特性，静默成功不是。要换库先 close_db()。
+    if _pinned_ident is not None and ident != _pinned_ident:
+        raise QueryError(
+            f"当前快照已钉住（snapshot_id(pin=True)），不能在运行途中 open_db 到另一份数据库。"
+            f"钉住只由 close_db() 解除。路径: {path}")
     if _conn_obj is not None and _conn_ident == ident:
         return
     if _conn_obj is not None:

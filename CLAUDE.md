@@ -253,6 +253,9 @@ Detailed design: `docs/adr/0001-broker-abstraction.md`. The constraints below ar
 5. **写 `factor_value` 时缺失值一律写 NULL，不写 NaN。** DuckDB 的 `DOUBLE` 真的能存 NaN ——
    `count()` 会把它算进去、`IS NULL` 判它为假，于是覆盖率指标永远是 100%，
    而「覆盖率不足就剔除因子」这道闸从此形同虚设。
+   **同一个坑在 SQL 侧也有**：DuckDB 的 `0/0` 给的是 **NaN 不是 NULL**（`1/0` 给 `inf`）。
+   所以算覆盖率这类比值时 `nullif` 是承重的 —— 少了它，一个全过期的日期会把
+   整个因子的 `avg(cov)` 变成 NaN。这一层已经踩到三次。
 6. **`pipeline.process` 末尾的 `fillna(0)` 会让它【下游】的任何覆盖率度量失效。**
    已经咬过两次：`build_targets` 的 50% 闸经 `combine` 喂进来只可能是 100% 或 0%；
    `coverage_report` 若照 `processed_value` 算则恒为 1.0。覆盖率一律从 `raw_value` 算。
