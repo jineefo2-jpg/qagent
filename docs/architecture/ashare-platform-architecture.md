@@ -540,6 +540,22 @@ def coverage_report(name_to_hash: dict[str, str]) -> pd.DataFrame:
 
 ### 4.3 回测引擎输入输出
 
+> **★ `equity` 在本系统里是两个不同的量，必须分清（2026-08-21 裁决）**
+>
+> · `simulate(equity=...)` —— **货币**口径的组合权益（现金 + 持仓市值），
+>   因为它要做 `shares = Δw × equity / price` 的权重↔股数换算。
+> · `BacktestResult.equity` —— **净值**指数，初始 1.0。
+>
+> `charge` 产出的 `total_cost` 跟着前者，是**货币**；而 `metrics.compute` 收到的是后者。
+> 两者相除得到的不是比例而是钱 —— 实测 `cost_drag_annual = 98502.98`，
+> 而 §5.4 说这个数应该落在 **3%–6%**。**成本模型是否接对了，本来只有这一个便宜的体检指标，
+> 单位一错它就废了。**
+>
+> **落法**：`metrics.compute(..., initial_capital: float)`，
+> `cost_frac_t = cost_t / (net_value_t × initial_capital)`。定额本金回测下这个换算是精确的。
+> 并加一条量纲守卫：`cost_drag_annual > 1.0` 就告警 ——
+> 年化成本拖累超过 100% 永远不是真结果，而这是「两条曲线不在同一量纲上」唯一的信号。
+
 > **派生库的写入口在数据层，不在 backtest / factors 层（2026-08-20 裁决）。**
 >
 > `BacktestResult.save()/load()` 与 Task 8 的因子落库都要写 `derived.duckdb`，

@@ -651,6 +651,22 @@ tests/ashare/
 > §9 归因用这一列算约束拖累（意图账本的反事实收益 − 实际收益）——
 > **不在 P2 建那套归因，只把列留出来**，否则 Task 12 拿不到原料。
 
+> **★ 2026-08-21 追加（Task 12 评审转来，四条引擎侧的落点）：**
+>
+> **① `metrics.compute(..., initial_capital)`** —— 见架构 §4.3 的 `equity` 口径裁决。
+> **② `metrics.compute(..., n_factors_configured)`** —— 「每期用了几个因子」的分母必须是
+> **配置的**因子数，不能用观测到的最大值。评审实测：`factors_used = [2,2,2,2]` 时
+> 观测最大值就是 2，于是「低于半数的期数 = 0」，**一句告警都没有** ——
+> 而「12 个因子失效、拿剩下 2 个把账本调了一遍」正是这个诊断要抓的东西，
+> 且**均匀降级才是更常见的那种**（一个因子因为缺列而挂掉，是每期都掉，不是掉一期）。
+> **③ 引擎给 `trades` 附 `adv20` 与 `range` 两列。** `range` 取**滞后 20 日平均振幅**
+> （§5.4 裁决，不是执行日当天）。`query.get_bars(signal_date, codes, lookback=20,
+> fields=("high","low","pre_close"))` 直接支持，并顺带给出 `is_suspended` ——
+> D9 占位行的 `high==low==pre_close` 振幅为 0，会把均值拖低从而**低估**成本，必须剔掉，
+> 与 ADV20 已有的「剔停牌占位行」规则同源。
+> **④ `derived_store.read_factor_values` 在冷库上会对每个因子各发一条告警**，
+> 所以 `build` 之前的预热读会一次吐 N 条。不要无条件汇进 `BacktestResult.warnings`。
+
 ### Task 13: 引擎 engine.run_backtest
 
 > **★ 调仓频率不设 config 字段，但也不许当函数参数（2026-08-20 裁决）。**
