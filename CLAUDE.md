@@ -235,7 +235,7 @@ Detailed design: `docs/adr/0001-broker-abstraction.md`. The constraints below ar
 | D8 | 后复权价是唯一真值，**禁止前复权** | 历史回测结果随新数据变动 |
 | D9 | 日线按交易日历补齐，停牌日写占位行（`vol=0`，OHLC=前收）；源给出 `vol=0` 的行同样算停牌 | `rolling(20)` 拿到 25 个交易日，因子静默污染；没成交的日子被按前收成交 |
 
-补充三条工程约束：
+补充六条工程约束：
 
 1. `ashare/data/query.py` 是唯一数据出口。`scripts/check_ashare_layering.py`（AST 静态检查，由 pytest 调用）
    守六条：L1 只有 `ashare/data/**` 可 `import duckdb`；L2 query 公开取数函数首参 `as_of_date`
@@ -256,7 +256,7 @@ Detailed design: `docs/adr/0001-broker-abstraction.md`. The constraints below ar
 6. **`pipeline.process` 末尾的 `fillna(0)` 会让它【下游】的任何覆盖率度量失效。**
    已经咬过两次：`build_targets` 的 50% 闸经 `combine` 喂进来只可能是 100% 或 0%；
    `coverage_report` 若照 `processed_value` 算则恒为 1.0。覆盖率一律从 `raw_value` 算。
-5. `ashare/agent_tools.py` 的工具**永远不进 `TRADING_TOOLS`**。
+7. `ashare/agent_tools.py` 的工具**永远不进 `TRADING_TOOLS`**。
    注意 `TRADING_TOOLS` 的语义是「需要用户身份」而非「危险」——`get_user_profile` 也在其中。
    另：`TOOL_SCHEMAS.extend()` 必须插在 `quant_agent.py` 的 `_OPENAI_TOOLS` 赋值之前，
    否则模块加载时已固化，新工具静默失效。

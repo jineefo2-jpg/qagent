@@ -20,10 +20,14 @@ DUCKDB_ALLOWED_PREFIX = ("data/",)
 #                       调用方拿数据仍必须经 get_*(as_of_date, ...)
 #   industry_source —— 零参，返回的是建库元数据（_meta.industry_source）而非随时点变化的行情，
 #                       as_of_date 对它无意义。零参函数本来就绕过这条检查，列进来是为了让豁免可见。
-QUERY_FIRST_PARAM_WHITELIST = {"get_tradable_mask", "open_db", "preload", "industry_source"}
+#   norm_date —— 纯日期归一，不返回行情。公开是因为 data 层之外要用（L6 挡私有名）
+QUERY_FIRST_PARAM_WHITELIST = {"get_tradable_mask", "open_db", "preload", "industry_source",
+                               "norm_date"}
 READONLY_LAYERS = ("report/", "agent_tools.py")
 DML = ("INSERT ", "UPDATE ", "DELETE ", "CREATE ", "DROP ", "ALTER ", "REPLACE ")
 FACTOR_FILES = {"price.py", "fundamental.py", "flow.py", "risk.py"}
+# L6 的属性访问检查认这些模块名（`from ashare.data import query` 之后的绑定名）
+_DATA_MODULE_ALIASES = {"query", "validate", "ingest", "promote", "limits", "derived_store"}
 
 
 def _rel(path: pathlib.Path, root: pathlib.Path) -> str:
@@ -98,6 +102,14 @@ def check(root: str = "ashare") -> list[str]:
                             violations.append(
                                 f"{rel}:{node.lineno}: L6 从 {node.module} 导入私有名 {a.name} —— "
                                 f"绕过 get_bars/get_tradable_mask 的掩码保护（D2/D8）")
+                # ★ 属性访问同样算（2026-08-21 补：原来只查 ImportFrom，于是
+                #   `query._norm_date(...)` 一路畅通，`query._PRELOAD` 也会同样隐形 ——
+                #   而 _PRELOAD 里正是未掩码的原始行，L6 要挡的就是它）
+                if isinstance(node, ast.Attribute) and node.attr.startswith("_") \
+                        and isinstance(node.value, ast.Name) and node.value.id in _DATA_MODULE_ALIASES:
+                    violations.append(
+                        f"{rel}:{node.lineno}: L6 访问 {node.value.id}.{node.attr} —— "
+                        f"data 层之外不得碰 ashare.data.* 的私有名（D2/D8）")
 
         # L4 只读层不得有 DML
         if rel.startswith(READONLY_LAYERS):

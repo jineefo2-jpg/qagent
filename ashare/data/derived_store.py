@@ -69,7 +69,7 @@ def write_factor_values(df: pd.DataFrame) -> int:
     if df.empty:
         return 0
 
-    rows = [(fn, ph, query._norm_date(td, name="trade_date"), tc, _num(rv), _num(pv), sid)
+    rows = [(fn, ph, query.norm_date(td, name="trade_date"), tc, _num(rv), _num(pv), sid)
             for fn, ph, td, tc, rv, pv, sid
             in df[list(FACTOR_VALUE_COLUMNS)].itertuples(index=False, name=None)]
     conn = _derived.connect_write()
@@ -101,7 +101,7 @@ def read_factor_values(param_hashes: Mapping[str, str], date, universe: Sequence
     if not names:
         return empty
 
-    d = query._norm_date(date, name="date")
+    d = query.norm_date(date, name="date")
     snap = query.snapshot_id()
     conn = _read_conn()
     if conn is None:
@@ -134,7 +134,7 @@ def current_factor_dates(param_hashes: Mapping[str, str],
     """
     if not param_hashes or len(dates) == 0:
         return set()
-    ds = [query._norm_date(d, name="trade_date") for d in dates]
+    ds = [query.norm_date(d, name="trade_date") for d in dates]
     snap = query.snapshot_id()
     conn = _read_conn()
     if conn is None:

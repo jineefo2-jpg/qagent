@@ -517,15 +517,25 @@ def process(s: pd.Series, as_of_date, universe, *, spec: FactorSpec) -> tuple[pd
 #     FACTOR_REGISTRY 解析不出它；只按名字读，在闸 5 的 ±30% 参数网格下会同时命中
 #     两代值，pivot 要么抛要么静默留一个。
 def build(names: list[str], dates: list[_dt.date], *,
-          overwrite: bool = False, progress=None) -> dict:
-    """预计算并写入 factor_value(factor_name, param_hash, trade_date, ts_code,
-                                 raw_value, processed_value, snapshot_id)
+          overwrite: bool = False, progress=None) -> tuple[dict, list[str]]:
+    """算 → 写。写入本身走 derived_store.write_factor_values。
+
     PRIMARY KEY (factor_name, param_hash, trade_date, ts_code)
-    ★ snapshot_id 变化 → 该快照下的因子值视为失效，需重算（不删旧行，加新行）。"""
-def read(names: list[str], date: _dt.date, universe: list[str],
-         processed: bool = True) -> pd.DataFrame: ...
-def coverage_report(names: list[str]) -> pd.DataFrame:
-    """每个因子的已计算日期区间与覆盖率，供 /api/ashare/health 展示。"""
+    ★ snapshot_id 变化 → 该快照下的因子值失效，**原地 UPSERT 覆盖**。
+      2026-08-21 修正：本行初稿写「不删旧行，加新行」，那与上面的 PK 直接冲突
+      （PK 不含 snapshot_id，加不了新行），照着写就会退化成 DO NOTHING ——
+      留下陈旧值配陈旧快照，而 read 会把它当成当前快照放行。这是本层存在的意义所在。"""
+
+# ── ashare/data/derived_store.py（L1，独家持 duckdb）──
+def write_factor_values(df: pd.DataFrame) -> int: ...
+def read_factor_values(name_to_hash: dict[str, str], date: _dt.date,
+                       universe: list[str], processed: bool = True
+                       ) -> tuple[pd.DataFrame, list[str]]: ...
+def current_factor_dates(name_to_hash: dict[str, str]) -> pd.DataFrame: ...
+def coverage_report(name_to_hash: dict[str, str]) -> pd.DataFrame:
+    """每因子的已算日期区间、覆盖率（**从 raw_value 算**）与 n_stale_dates，
+    供 /api/ashare/health 展示。覆盖率必须只统计当前快照的行 ——
+    混代统计会让报出来的数越过 min_coverage，而 read 实际只能服务其中一部分。"""
 ```
 
 ### 4.3 回测引擎输入输出
@@ -544,7 +554,10 @@ def coverage_report(names: list[str]) -> pd.DataFrame:
 > （因子值 + 回测运行记录）。它只收发 DataFrame 与基础类型，**绝不 import
 > `ashare.backtest` 或 `ashare.factors`** —— 否则低层反向依赖高层。
 > `BacktestResult.save()` 负责把自己序列化成 dict 再交给它。
-> 不额外包一层 `factors/store.py` 转发：单实现的抽象没有存在意义。
+> **2026-08-21 修正**：本行初稿说「不额外包一层 `factors/store.py` 转发」——
+> 那句话在「转发」的前提下是对的，但 `build` 不是转发，它是「算 → 写」的编排。
+> 实际落地是两层：`derived_store`（L1，持 duckdb，收发 DataFrame）
+> + `factors/store.py`（L3，调 `compute_panel` 与 `write_factor_values`，不碰 duckdb）。
 >
 > 注意 L2（首参 `as_of_date`）**不延伸到** `derived_store`：回测引擎读因子面板天然是
 > 读一个日期区间（2010–2024 一次读完），强行套 `as_of_date` 形状就不对。

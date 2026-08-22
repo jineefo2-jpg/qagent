@@ -59,7 +59,7 @@ def build(names: Sequence[str], dates: Sequence[_dt.date], *,
             f"不能靠遍历 FACTOR_REGISTRY 撞上。")
 
     hashes = {n: s.param_hash() for n, s in specs.items()}
-    ds = [query._norm_date(d, name="trade_date") for d in dates]
+    ds = [query.norm_date(d, name="trade_date") for d in dates]
     written = {n: 0 for n in cols}
     warns: List[str] = []
 
