@@ -561,6 +561,22 @@ def coverage_report(name_to_hash: dict[str, str]) -> pd.DataFrame:
 > turnover / cost-drag / D6-gap —— 同一个 `param_hash` 产出不同的 metrics 键集。
 > `full=False` 只留给临时分析，绝不由 `compute_diagnostics` 驱动。
 >
+> **⑥ ICIR 摘要（含 Newey-West t 值）进 `ic` 诊断块，不进 `metrics`（2026-08-22 补裁）。**
+> Task 13 指出 ① 与 ④ 在这里互撞，读对了：把 ICIR 放进 `metrics` 会让
+> `compute_diagnostics` 改变 metrics 的键集，而 ④ 禁止这件事。
+> 但只放 `ic_series` 的逐日值同样不行 —— 实测 **`icir()` 在生产代码里无人调用**，
+> 只有测试在调。规格 §4.2 把 NW 调整的 t 值称作「把噪声因子判成有效因子的头号原因」的解药，
+> 而它在真实运行里一个数都不产出。
+> 落点是 `result.ic`：它本身就受 `compute_diagnostics` 闸住，加进去不动 `metrics` 的键集，
+> ④ 与 ① 同时成立。
+>
+> **⑦ 引擎不得在 `cfg.end` 之后成交（2026-08-22 裁决）。**
+> 现在最后一个周频信号日若落在区间末尾，$\tau = T{+}1$ 会掉到 `[start, end]` 之外而成交照做。
+> 那是一笔**结果永远不被度量**的交易：扣了成本却没有对应的收益，净值被低估 ——
+> 方向上保守，但一样是错的。
+> 落法：执行日落在区间外的信号**丢弃并告警**；期末账本按 `end` 收盘**盯市**，不强制清仓
+> （回测本来就不该以清仓收尾）。
+>
 > **⑤ `backtest_run` 的读写归 `derived_store`，`backtest/store.py` 只做转发。**
 > 表在 schema 里躺着却没有写入方，比没有这张表更糟。pickle 是权宜之计
 > （L1 不许 backtest 层碰 duckdb，而当时 `derived_store` 只覆盖了 `factor_value`）。
