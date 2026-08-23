@@ -10,7 +10,7 @@
   3  `simulate` 收的是**股数**，不是权重
   4/5 数据中断日（`targets is None`）仍然要调 `simulate`，退市照样强平
   6  `scores` 索引是**完整股票池**、算不出的位置留 NaN（先 dropna 会让覆盖率闸失明）
-  7  `positions.intended_weight` = 换手裁剪【之前】的目标
+  7  `positions.intended_weight` = 换手裁剪【之前】的目标（`build_targets` 的第二个返回值）
   8  `metrics.compute` 的因子分母是【配置的】个数，不是观测最大值
   9  `adv20` / `range` 由引擎附列，`range` 是**滞后 20 日**平均振幅、剔 D9 占位行
   10 （未落地，见模块尾 ★）
@@ -19,6 +19,13 @@
   13 `run_backtest()` 不接受调仓频率参数
   14 空股票池当日显式跳过并告警（`compute_factor` 对空池是抛的）
   15 `preload` 在入口调一次，起点 = start − max(lookback_days)
+
+架构 §4.3 的五条裁决（2026-08-21）各自的钉子：
+  ① `equity` 日频盯市 —— 周频采样看不见周内低点，MDD 被低估（Calmar 的分母）
+  ② `compute_diagnostics=True` 必须真的产出 ic / layers / attribution
+  ③ `build_targets` 返回三元组，引擎不再造反事实（丢那次的 warnings = 降级不可见）
+  ④ `metrics.compute(full=True)` 恒真，不由 `compute_diagnostics` 驱动
+  ⑤ `save`/`load` 一半在 `backtest_run` 表、一半在 sidecar，任一半丢字段都要红
 
 fixture 的股数 / 价格 / 净值一律取**除不尽**的值（global-constraints ★）：
 `shares × price / equity` 这一层往返换算太多，整齐的数字会让「按权重反推股数」
@@ -65,13 +72,34 @@ _IND = {"AAA.SZ": "银行", "BBB.SZ": "白酒", "CCC.SH": "钢铁", "DDD.SZ": "�
 _SCORES = {"AAA.SZ": 1.618034, "BBB.SZ": 0.577216, "CCC.SH": -0.301030, "DDD.SZ": -1.414214}
 
 
+# 逐票不同的 log_mv（风格归因的规模回归元）—— 与 `pipeline.neutralize` 减掉的同一个定义
+_LOG_MV = {"AAA.SZ": 23.417231, "BBB.SZ": 21.098344, "CCC.SH": 24.771903, "DDD.SZ": 20.334517}
+
+# 诊断要够宽的横截面：IC 至少 5 只、分层 10 层、风格回归 30 只（`metrics` 的三个下限）。
+# 默认池仍是那 4 只 —— 只有诊断用例把池换宽（`world["q"].universe` 是逐日覆盖的）。
+WIDE = [f"W{i:02d}.SZ" for i in range(32)]
+for _i, _c in enumerate(WIDE):
+    _BASE[_c] = 31.415927 + _i * 7.208710
+    _OPEN_K[_c] = 0.991037 + _i * 0.000713           # 逐票不同，不会在归一化里约掉
+    _IND[_c] = ("银行", "白酒", "钢铁", "煤炭")[_i % 4]
+    _SCORES[_c] = 2.302585 - _i * 0.057722
+    _LOG_MV[_c] = 22.026465 + _i * 0.141421
+
+# date -> 乘数。只给某一天砸个坑，用来分辨「日频盯市」与「按调仓日采样」：
+# 坑挖在非调仓、非执行日上，周频曲线上它根本不存在。
+_DIP: dict = {}
+
+
 def close_px(code: str, d: dt.date) -> float:
     i = DAYS.index(d)
-    return _BASE[code] * (1.00713 ** i) + 0.0031 * i
+    return (_BASE[code] * (1.00713 ** i) + 0.0031 * i) * _DIP.get(d, 1.0)
 
 
 def open_px(code: str, d: dt.date) -> float:
-    return close_px(code, d) * _OPEN_K[code]     # 开盘 ≠ 收盘，且比值逐票不同
+    # 开收比**逐票且逐日**都不同。只逐票不同还不够：持有期收益是 open(τ₂)/open(τ₁)，
+    # 一个只随股票变化的常数在这个比值里【整个约掉】—— 于是「拿收盘价算持有期收益」
+    # 这个变异与真实现逐位相同（global-constraints ★「会被约分的量」的时间序列版）。
+    return close_px(code, d) * (_OPEN_K[code] + 0.000317 * DAYS.index(d))
 
 
 class FakeQuery:
@@ -200,7 +228,8 @@ class _Spec:
 def world(monkeypatch):
     """装好假 query / 假 combine / 假 get_factor，并把每个接缝上的调用录下来。"""
     q = FakeQuery()
-    rec: dict = {"combine": [], "targets": [], "simulate": [], "metrics": [], "oos": []}
+    rec: dict = {"combine": [], "targets": [], "simulate": [], "metrics": [], "oos": [],
+                 "panel": [], "factor": []}
     scores_by_date: dict = {}
     # max = 251，preload 起点由它决定
     lookbacks = {"f_alpha": 66, "f_beta": 251, "f_gamma": 30}
@@ -226,8 +255,22 @@ def world(monkeypatch):
         out = real_bt(scores, target_position, prev_weights, industry, constraints)
         rec["targets"].append({"scores": scores.copy(), "pi": target_position,
                                "prev": pd.Series(prev_weights).copy(),
-                               "constraints": constraints, "out": out[0]})
+                               "constraints": constraints, "out": out[0], "intended": out[1]})
         return out
+
+    def fake_panel(names, as_of_date, universe, *, processed=True):
+        """IC 面板：逐因子一列，列间用除不尽的系数拉开（同一列会让两个因子 IC 相同）。"""
+        rec["panel"].append({"names": list(names), "date": as_of_date, "processed": processed})
+        base = scores_by_date.get(as_of_date, _SCORES)
+        return pd.DataFrame(
+            {n: [base.get(c, float("nan")) * (1.0 + j * 0.318310) - j * 0.161803
+                 for c in universe] for j, n in enumerate(names)},
+            index=list(universe)), []
+
+    def fake_factor(name, as_of_date, universe, *, processed=True, **kw):
+        rec["factor"].append({"name": name, "date": as_of_date, "processed": processed})
+        return pd.Series([_LOG_MV[c] for c in universe], index=list(universe),
+                         name=name, dtype=float), []
 
     def spy_sim(exec_date, targets, prev_holdings, equity, *, signal_date):
         out = real_sim(exec_date, targets, prev_holdings, equity, signal_date=signal_date)
@@ -245,6 +288,8 @@ def world(monkeypatch):
     monkeypatch.setattr(execution, "get_tradable_mask", q.get_tradable_mask)
     monkeypatch.setattr(engine, "combine", fake_combine)
     monkeypatch.setattr(engine, "get_factor", lambda n: _Spec(lookbacks[n]))
+    monkeypatch.setattr(engine, "compute_panel", fake_panel)
+    monkeypatch.setattr(engine, "compute_factor", fake_factor)
     monkeypatch.setattr(engine, "build_targets", spy_targets)
     monkeypatch.setattr(engine, "simulate", spy_sim)
     monkeypatch.setattr(engine.metrics, "compute", spy_metrics)
@@ -267,8 +312,8 @@ def make_cfg(**kw) -> BacktestConfig:
 
 
 def real_target_calls(rec) -> list:
-    """`intended_weight` 那次反事实调用（max_turnover=inf）不算真实调仓。"""
-    return [c for c in rec["targets"] if np.isfinite(c["constraints"].max_turnover)]
+    """裁决 ③ 之后每次 `build_targets` 都是一次真实调仓（不再有 max_turnover=inf 的反事实）。"""
+    return list(rec["targets"])
 
 
 # ══════════════ 冒烟：整段跑得通 ══════════════
@@ -281,8 +326,9 @@ def test_multi_period_run_produces_a_coherent_result(world):
     assert res.engine_version == engine.ENGINE_VERSION
     # 6 个周频日，最后一个的 next_trade_date 是 None → 5 期真正成交
     assert len(real_target_calls(world["rec"])) == 5
-    assert len(res.equity) == 6                      # 1 个起点 + 5 期
-    assert res.equity.iloc[0] == 1.0
+    # 日频（裁决 ①）：首个调仓日到日历末端，每个交易日一格 —— 不是 6 个调仓日采样点
+    assert list(res.equity.index) == [d for d in DAYS if d >= WEEKLY[0]]
+    assert res.equity.iloc[0] == 1.0                 # 建仓前全是现金
     assert len(res.trades) > 0
     assert set(res.positions.index.get_level_values(0)) == set(WEEKLY[:5])
     assert res.metrics["n_trades"] == len(res.trades)
@@ -375,7 +421,9 @@ def test_metrics_receives_initial_capital_so_cost_drag_is_a_ratio(world):
     res = run_backtest(make_cfg())
     kw = world["rec"]["metrics"][0]["kwargs"]
     assert kw["initial_capital"] == CAPITAL
-    assert kw["periods_per_year"] == engine._PERIODS_PER_YEAR
+    # 净值是日频 → 252（裁决 ①）。留着 52 的话年化收益 / Sharpe 全按周频算，
+    # 而喂进去的是一条日频曲线（§9：一律按入参序列自己的频率）。
+    assert kw["periods_per_year"] == engine._PERIODS_PER_YEAR == 252
     assert res.metrics["cost_total"] > 1.0                      # 钱
     assert 0.0 < res.metrics["cost_drag_annual"] < 1.0          # 比例
     assert not any("量纲" in w for w in res.warnings)
@@ -421,14 +469,82 @@ def test_a_delisted_holding_is_valued_at_the_b8_haircut_not_the_open(world):
     assert s["equity"] != pytest.approx(cash + float((held * naive).sum()), rel=1e-9)
 
 
-def test_the_net_value_index_tracks_the_currency_book(world):
-    """净值 = (τ 开盘权益 − 当期费用) / 本金。两条曲线错位一次，成本拖累就废了。"""
+def _cash_after(res, day: dt.date) -> float:
+    """本金 − 截至 day（含）的买入 + 卖出 − 费用。全部从公开返回值还原。"""
+    tr = res.trades[res.trades["exec_date"] <= day]
+    amt, side = tr["amount"].astype(float), tr["side"].astype(str)
+    return (CAPITAL - float(amt[side == "BUY"].sum()) + float(amt[side == "SELL"].sum())
+            - float(tr["total_cost"].sum()))
+
+
+def test_the_net_value_index_is_marked_every_trading_day_at_the_close(world):
+    """裁决 ①：净值 = (现金 + Σ 持仓 × 当日**收盘**价) / 本金，每个交易日一格。
+
+    旧口径把 `(τ 开盘权益 − 费用)/本金` 记在执行日上、其余日子干脆没有 —— 那条曲线
+    看不见任何周内波动，最大回撤系统性偏小，而 MDD 正是 Calmar 的分母。
+    """
     res = run_backtest(make_cfg())
     sims = world["rec"]["simulate"]
     for k, s in enumerate(sims):
-        cost = float(res.trades[res.trades["exec_date"] == s["exec_date"]]["total_cost"].sum())
-        assert float(res.equity.loc[s["exec_date"]]) == pytest.approx(
-            (s["equity"] - cost) / CAPITAL, rel=1e-12)
+        ex = s["exec_date"]
+        nxt = sims[k + 1]["exec_date"] if k + 1 < len(sims) else None
+        cash, held = _cash_after(res, ex), s["holdings"]
+        for d in [x for x in DAYS if x >= ex and (nxt is None or x < nxt)]:
+            px = pd.Series({c: close_px(c, d) for c in held.index})
+            assert float(res.equity.loc[d]) == pytest.approx(
+                (cash + float((held * px).sum())) / CAPITAL, rel=1e-12)
+        # 执行日那一格也是【收盘】价，不是「τ 开盘权益 − 费用」（旧口径差一个日内涨跌）
+        cost = float(res.trades[res.trades["exec_date"] == ex]["total_cost"].sum())
+        assert float(res.equity.loc[ex]) != pytest.approx((s["equity"] - cost) / CAPITAL,
+                                                          rel=1e-9)
+
+
+def test_a_sold_off_name_stops_marking_the_curve(world):
+    """持仓是阶梯函数：ffill 之前必须先 fillna(0)，否则卖掉的票会继续替净值赚钱。"""
+    _rotation(world, WEEKLY[2])          # 排名翻转 + 放开预算 → 上期那两只被卖光
+    res = run_backtest(make_cfg(constraints=PortfolioConstraints(
+        top_n=2, weighting="equal", max_single=0.6, max_industry=1.0, max_turnover=5.0)))
+    sims = world["rec"]["simulate"]
+    gone = [(k, c) for k in range(1, len(sims))
+            for c in sims[k - 1]["holdings"].index if c not in sims[k]["holdings"].index]
+    assert gone, "fixture 里没有任何一只票被卖光，这条用例什么都没钉住"
+    k, code = gone[0]
+    ex = sims[k]["exec_date"]
+    held = sims[k]["holdings"]
+    px = pd.Series({c: close_px(c, ex) for c in held.index})
+    assert code not in held.index
+    assert float(res.equity.loc[ex]) == pytest.approx(
+        (_cash_after(res, ex) + float((held * px).sum())) / CAPITAL, rel=1e-12)
+
+
+def test_the_daily_index_covers_an_exec_date_past_the_end(world):
+    """末个调仓日落在区间末尾时 τ = T+1 已经越过 `end`，而那一笔仍然成交 ——
+    日频索引不盖住它，这天的成本就「不在净值曲线上」，拖累一分都算不进去。"""
+    res = run_backtest(make_cfg(end=WEEKLY[4]))
+    last_exec = DAYS[DAYS.index(WEEKLY[4]) + 1]
+
+    assert last_exec > WEEKLY[4]
+    assert res.equity.index[-1] == last_exec
+    assert (res.trades["exec_date"] == last_exec).any()
+    assert not any("不在净值曲线上" in w for w in res.warnings)
+
+
+def test_an_intra_week_trough_shows_up_in_the_max_drawdown(world):
+    """裁决 ①：坑挖在【非调仓、非执行】日上 —— 按调仓频采样的曲线上它根本不存在。"""
+    dip = DAYS[7]
+    execs = [DAYS[DAYS.index(w) + 1] for w in WEEKLY[:5]]
+    assert dip not in WEEKLY and dip not in execs
+    _DIP[dip] = 0.791300
+    try:
+        res = run_backtest(make_cfg())
+    finally:
+        _DIP.clear()
+
+    assert float(res.equity.loc[dip]) < 0.85
+    assert res.metrics["max_drawdown"] > 0.15
+    # 同一次运行，只按执行日采样 —— 回撤几乎为 0，Calmar 因此虚高
+    weekly = res.equity.reindex(execs)
+    assert float((1.0 - weekly / weekly.cummax()).max()) < 0.02
 
 
 # ══════════════ 3 · simulate 收股数 ══════════════
@@ -529,21 +645,39 @@ def test_positions_carry_the_pre_clip_intended_weight(world):
     assert any("换手预算" in w for w in res.warnings)
 
 
-def test_intended_weight_equals_the_unclipped_build_targets_output(world):
+def test_intended_weight_is_the_second_return_value_not_a_second_call(world):
+    """裁决 ③：`build_targets` 每期只调一次。
+
+    上一版用 `max_turnover=inf` 再调一次来造反事实，代价是**必须丢掉那次的 warnings**
+    （否则每条降级报两遍）—— 丢 warning 本身就违反「降级必须可见」。
+    """
     _rotation(world, WEEKLY[2])
     res = run_backtest(make_cfg())
-    unclipped = [c for c in world["rec"]["targets"]
-                 if not np.isfinite(c["constraints"].max_turnover)]
-    assert len(unclipped) == 5
-    # 反事实那次只放开换手，其余约束逐字段一致
-    a, b = unclipped[0]["constraints"], real_target_calls(world["rec"])[0]["constraints"]
-    assert (a.top_n, a.weighting, a.max_single, a.max_industry) == \
-           (b.top_n, b.weighting, b.max_single, b.max_industry)
-    # 落进 positions 的就是那一次的返回值，不是引擎另算的一份
-    want = unclipped[2]["out"]
+    calls = world["rec"]["targets"]
+    assert len(calls) == 5, "每个调仓日恰好一次 build_targets"
+    assert all(np.isfinite(c["constraints"].max_turnover) for c in calls), \
+        "又出现了 max_turnover=inf 的反事实调用"
+
+    # 落进 positions 的就是那一次的第二个返回值，不是引擎另算的一份
+    want = calls[2]["intended"]
     got = res.positions.xs(WEEKLY[2], level=0)["intended_weight"]
     assert np.allclose(want.reindex(got.index).fillna(0.0).to_numpy(), got.to_numpy(),
-                       atol=1e-12)
+                       rtol=0.0, atol=1e-12)
+    # 「拿 final 当 intended」必须死：旋转日两者本来就不同
+    assert not np.allclose(got.to_numpy(),
+                           calls[2]["out"].reindex(got.index).fillna(0.0).to_numpy(),
+                           rtol=0.0, atol=1e-9)
+
+
+def test_a_name_the_budget_refused_entirely_still_carries_its_intent(world):
+    """被换手预算【整只】挡下的票：final == 0 且 prev == 0 —— 只按 final 筛就把它
+    从账本里裁掉，于是 `intended_weight` 恰好在它唯一有意义的那几行上整行消失。"""
+    _rotation(world, WEEKLY[2])
+    res = run_backtest(make_cfg())
+    rot = res.positions.xs(WEEKLY[2], level=0)
+    refused = rot[(rot["target_weight"].abs() < 1e-12) & (rot["intended_weight"] > 1e-12)]
+    assert len(refused) >= 1, "旋转日没有任何一只票被整只挡下，这条用例什么都没钉住"
+    assert (refused["filled_weight"].abs() < 1e-12).all()
 
 
 # ══════════════ 8 · 因子分母 = 配置数 ══════════════
@@ -693,6 +827,16 @@ def test_a_suspended_holding_still_gets_a_t_close_price(world):
     assert float(pos.loc["AAA.SZ", "price_hfq"]) == pytest.approx(close_px("AAA.SZ", WEEKLY[1]),
                                                                   rel=1e-12)
 
+    # 日频盯市同样要 ffill：不 ffill 的话停牌那几天这只票在 `sum` 里被跳过（等于一文不值），
+    # 净值曲线上凭空多出一段「跌了又涨」的假回撤，而它只是没开盘。
+    d = DAYS[DAYS.index(WEEKLY[1]) + 3]
+    assert ("AAA.SZ", d) in world["q"].suspended
+    held = world["rec"]["simulate"][1]["holdings"]
+    assert "AAA.SZ" in held.index
+    px = pd.Series({c: close_px(c, WEEKLY[1] if c == "AAA.SZ" else d) for c in held.index})
+    assert float(res.equity.loc[d]) == pytest.approx(
+        (_cash_after(res, d) + float((held * px).sum())) / CAPITAL, rel=1e-12)
+
 
 # ══════════════ D6 证据链：blocked 必须一路带出来 ══════════════
 
@@ -827,6 +971,141 @@ def test_fills_happen_at_the_next_day_open_and_ignore_the_signal_day_close(world
             assert px == pytest.approx(prices[(d, c)], rel=1e-12)
 
 
+# ══════════════ ② · 诊断三块必须真的产出 ══════════════
+
+def _diag_cfg(**kw) -> BacktestConfig:
+    return make_cfg(compute_diagnostics=True, **kw)
+
+
+def _wide(world) -> list:
+    """把股票池换成 36 只 —— 4 只横截面下 IC / 分层 / 风格回归全部退化成 NaN，
+    「三块产出了」就只剩形状，测不出里面有没有数。"""
+    pool = CODES + WIDE
+    for d in DAYS:
+        world["q"].universe[d] = pool
+    return pool
+
+
+def test_diagnostics_are_actually_produced_not_a_warning(world):
+    """裁决 ②：`compute_diagnostics=True` 返回 `None` + 一条 warning 是不合格的静止态。"""
+    _wide(world)
+    res = run_backtest(_diag_cfg())
+
+    assert res.ic is not None and res.layers is not None and res.attribution is not None
+    assert not any("不产出" in w for w in res.warnings)
+    # 5 期成交、4 期算得出持有期收益（末期没有下一个执行日）
+    assert list(res.ic.index) == list(WEEKLY[:4])
+    assert WEEKLY[4] not in res.ic.index
+    assert list(res.ic.columns) == ["f_alpha__ic", "f_alpha__rank_ic",
+                                    "f_beta__ic", "f_beta__rank_ic"]
+    assert list(res.layers.columns) == [f"L{i}" for i in range(1, 11)]
+    # 形状对而里面全是 NaN，等于「算了但什么都没算出来」——与没算只差一句话
+    assert res.ic.notna().all().all()
+    assert res.layers.notna().all().all()
+
+
+def test_attribution_always_carries_the_size_row_that_can_falsify_the_ols_ruling(world):
+    """§3.2 选 OLS 而非 √MV-WLS，**只能靠这一行被证伪** —— 它不能藏在任何开关后面，
+    样本不足也只报 NaN 不删行。"""
+    _wide(world)
+    res = run_backtest(_diag_cfg())
+    att = res.attribution.set_index(["block", "item"])
+    rows = set(att.index)
+
+    assert ("style", "size") in rows
+    assert ("style", "size_sq") in rows          # 补救方向是非线性规模项，不是换回 WLS
+    assert ("constraint", "turnover_budget") in rows
+    assert [b for b, _ in rows].count("industry") >= 1
+    # 36 只横截面 ≥ `metrics._MIN_STYLE_OBS`，所以这一行必须是【真数】不是占位 NaN
+    assert np.isfinite(float(att.loc[("style", "size"), "exposure"]))
+    assert not any("未被检验" in w for w in res.warnings)
+
+
+def test_the_turnover_drag_row_is_non_zero_when_the_budget_actually_bites(world):
+    """裁决 ②×③ 的合流：归因分得清「信号不行」与「换手把信号卡住了」，
+    前提是 `intended_weight` 真的落进了 positions（自查出的那个 index bug）。"""
+    _wide(world)
+    _rotation(world, WEEKLY[2])
+    res = run_backtest(_diag_cfg())
+    row = res.attribution[(res.attribution["block"] == "constraint")
+                          & (res.attribution["item"] == "turnover_budget")]
+
+    assert len(row) == 1
+    # 逐位钉住：Σ|intended − filled| / 期数，且**只数有持有期收益的那几期**
+    dates = list(WEEKLY[:4])
+    pos = res.positions[res.positions.index.get_level_values(0).isin(dates)]
+    want = float((pos["intended_weight"] - pos["filled_weight"]).abs().sum()) / len(dates)
+    assert float(row["exposure"].iloc[0]) == pytest.approx(want, rel=1e-12)
+    assert want > 1e-9, "换手约束拖累恒为 0 = intended_weight 没落进它唯一有意义的那几行"
+    assert not any("没有 intended_weight" in w for w in res.warnings)
+
+
+def test_the_size_regressor_is_the_raw_log_mv_the_same_one_neutralize_subtracts(world):
+    """`pipeline.neutralize` 减掉的是 `risk.log_mv` 的**原始值**。这里取 processed 的话
+    两份定义分家，归因可以报「规模暴露已清零」而账本实际带着倾斜。"""
+    run_backtest(_diag_cfg())
+    calls = world["rec"]["factor"]
+
+    assert calls and {c["name"] for c in calls} == {engine._SIZE_FACTOR} == {"log_mv"}
+    assert all(c["processed"] is False for c in calls)
+    # IC 面板反过来要【处理后】的 z 值（原始值量纲不一，秩相关也会被离群值带偏）
+    assert all(c["processed"] is True for c in world["rec"]["panel"])
+    assert all(c["names"] == ["f_alpha", "f_beta"] for c in world["rec"]["panel"])
+
+
+def test_the_holding_period_return_runs_open_to_open_between_two_exec_days(world):
+    """§5.1：持有期收益 = 下一执行日开盘 / 本执行日开盘 − 1。用收盘价算会把 T+1 那天的
+    日内涨跌算进信号的功劳里 —— 而那段行情在成交价之后才发生。"""
+    pool = _wide(world)
+    res = run_backtest(_diag_cfg())
+    t, t2 = WEEKLY[0], WEEKLY[1]
+    e1 = DAYS[DAYS.index(t) + 1]
+    e2 = DAYS[DAYS.index(t2) + 1]
+    want = pd.Series({c: open_px(c, e2) / open_px(c, e1) - 1.0 for c in pool})
+
+    # IC 是分数与持有期收益的秩相关：用同一份收益重算，必须逐位相同
+    sc = pd.Series({c: _SCORES[c] for c in pool})
+    assert float(res.ic.loc[t, "f_alpha__rank_ic"]) == pytest.approx(
+        float(sc.corr(want, method="spearman")), rel=1e-12)
+    close_based = pd.Series({c: close_px(c, e2) / close_px(c, e1) - 1.0 for c in pool})
+    assert not np.allclose(want.to_numpy(), close_based.to_numpy(), rtol=0.0, atol=1e-9)
+    assert float(res.ic.loc[t, "f_alpha__rank_ic"]) != pytest.approx(
+        float(sc.corr(close_based, method="spearman")), rel=1e-9)
+
+
+def test_a_single_rebalance_period_says_it_could_not_diagnose(world):
+    """一期算不出持有期收益。`None` 必须配一条 warning —— 「没算」与「算出来是空的」
+    在返回值上长得一模一样。"""
+    res = run_backtest(_diag_cfg(start=DAYS[0], end=WEEKLY[0]))
+
+    assert (res.ic, res.layers, res.attribution) == (None, None, None)
+    assert any("不足两个执行日" in w for w in res.warnings)
+
+
+def test_diagnostics_off_costs_nothing_and_computes_nothing(world):
+    res = run_backtest(make_cfg())                 # compute_diagnostics=False
+    assert (res.ic, res.layers, res.attribution) == (None, None, None)
+    assert world["rec"]["panel"] == [] and world["rec"]["factor"] == []
+
+
+# ══════════════ ④ · metrics.compute(full=True) 恒真 ══════════════
+
+def test_metrics_is_always_full_regardless_of_compute_diagnostics(world):
+    """裁决 ④：`compute_diagnostics` 不进 `param_hash` 的前提是它**只能新增**三块诊断。
+    接到 `full=` 上，`full=False` 会删掉换手 / 成本拖累 / D6 缺口 ——
+    同一个 D7 指纹映到两套 metrics 键集。"""
+    off = run_backtest(make_cfg())
+    n = len(world["rec"]["metrics"])
+    on = run_backtest(_diag_cfg())
+
+    assert all(c["kwargs"]["full"] is True for c in world["rec"]["metrics"])
+    assert set(off.metrics) == set(on.metrics)
+    assert {"turnover_annual", "cost_drag_annual", "d6_slippage_max"} <= set(off.metrics)
+    assert off.param_hash == on.param_hash          # 两次运行共用一个指纹，所以数必须一样
+    assert off.metrics == on.metrics
+    assert len(world["rec"]["metrics"]) == n + 1
+
+
 # ══════════════ 结构 ══════════════
 
 def test_engine_is_orchestration_sized():
@@ -858,29 +1137,122 @@ def test_run_id_carries_both_halves_of_the_d7_fingerprint(world):
     assert res.started_at.strftime("%Y%m%dT%H%M%S") in run_id
 
 
-def test_save_load_round_trips(world, tmp_path, monkeypatch):
+@pytest.fixture
+def saved_env(tmp_path, monkeypatch):
+    """派生库路径是相对的 —— chdir 到 tmp，`backtest_run` 表才落在 tmp 里。"""
+    pytest.importorskip("duckdb")
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(bt_store, "RUNS_DIR", tmp_path / "runs")
-    res = run_backtest(make_cfg())
+    return tmp_path
+
+
+def test_save_load_round_trips_every_field(world, saved_env):
+    """裁决 ⑤：标量在 `backtest_run` 表、帧在 sidecar，**任一半漏一个字段都要红**。
+
+    `ic` / `layers` / `attribution` / `warnings` 都有默认值 —— 少存一个不会抛，
+    只会安静地读回 None，所以这条用例逐字段比。
+    """
+    _wide(world)
+    res = run_backtest(make_cfg(compute_diagnostics=True))
     run_id = bt_store.make_run_id(res)
     bt_store.save(res, run_id)
     back = bt_store.load(run_id)
 
-    assert back.param_hash == res.param_hash
-    assert back.data_snapshot_id == res.data_snapshot_id
-    assert back.engine_version == res.engine_version
-    assert back.config == res.config
-    assert back.metrics == res.metrics
-    assert back.warnings == res.warnings
+    for f in ("param_hash", "data_snapshot_id", "engine_version", "started_at",
+              "elapsed_sec", "config", "warnings"):
+        assert getattr(back, f) == getattr(res, f), f
+    # metrics 里有 NaN（MDD=0 时的 Calmar），`nan == nan` 是 False —— 逐键比
+    assert set(back.metrics) == set(res.metrics)
+    for k, v in res.metrics.items():
+        got = back.metrics[k]
+        assert got == v or (isinstance(v, float) and np.isnan(v) and np.isnan(got)), k
     pd.testing.assert_series_equal(back.equity, res.equity)
-    pd.testing.assert_frame_equal(back.positions, res.positions)
-    pd.testing.assert_frame_equal(back.trades, res.trades)
-    pd.testing.assert_frame_equal(back.blocked, res.blocked)
+    for f in ("positions", "trades", "blocked", "ic", "layers", "attribution"):
+        assert getattr(back, f) is not None, f
+        pd.testing.assert_frame_equal(getattr(back, f), getattr(res, f))
+
+
+def test_the_backtest_run_table_actually_gets_a_row(world, saved_env):
+    """schema 里躺着一张没有写入方的表，比没有这张表更糟：「按 run_id 查历史运行」
+    看起来可用，实际永远查不到。"""
+    from ashare.data import derived_store
+
+    res = run_backtest(make_cfg())
+    run_id = bt_store.make_run_id(res)
+    bt_store.save(res, run_id)
+    row = derived_store.read_backtest_run(run_id)
+
+    assert row is not None
+    assert (row["param_hash"], row["data_snapshot_id"]) == (res.param_hash,
+                                                            res.data_snapshot_id)
+    assert row["engine_version"] == res.engine_version
+    assert row["started_at"] == res.started_at
+    assert row["elapsed_sec"] == pytest.approx(res.elapsed_sec, rel=1e-12)
+    assert res.param_hash in row["config_json"] or str(res.config.start) in row["config_json"]
+    assert "sharpe" in row["metrics_json"]
+    # `is_oos` 与 `append_oos_run` 共用 `OOS_CUTOFF`：两处各写一个「样本外」的定义，
+    # 台账与库表就会各说各话。
+    assert res.config.end > bt_store.OOS_CUTOFF and row["is_oos"] is True
+
+
+def test_write_backtest_run_refuses_a_row_missing_a_d7_fingerprint(saved_env):
+    """`param_hash` / `data_snapshot_id` 撞 NOT NULL，其余缺键会在写入深处炸出一个
+    没有上下文的错误 —— 两种都比「在调用点说清楚缺了什么」难查。"""
+    from ashare.data import derived_store
+
+    row = {c: "x" for c in derived_store.BACKTEST_RUN_COLUMNS}
+    del row["data_snapshot_id"]
+    with pytest.raises(ValueError, match="data_snapshot_id"):
+        derived_store.write_backtest_run(row)
+
+
+def test_saving_the_same_run_id_twice_replaces_the_row(world, saved_env):
+    """`run_id` 里含 `started_at`，撞主键只可能是同一次运行重存 —— DO NOTHING 会让
+    第二次 save 静默无效。"""
+    from ashare.data import derived_store
+
+    res = run_backtest(make_cfg())
+    run_id = bt_store.make_run_id(res)
+    bt_store.save(res, run_id)
+    res.metrics = {**res.metrics, "sharpe": 42.0}
+    bt_store.save(res, run_id)
+
+    assert "42.0" in derived_store.read_backtest_run(run_id)["metrics_json"]
+    assert bt_store.load(run_id).metrics["sharpe"] == 42.0
+
+
+def test_load_refuses_a_half_written_run(world, saved_env):
+    """两半各存各的 —— 只剩一半时必须抛，不能拿默认值把另一半补出来。"""
+    res = run_backtest(make_cfg())
+    run_id = bt_store.make_run_id(res)
+    bt_store.save(res, run_id)
+    (saved_env / "runs" / f"{run_id}.pkl").unlink()
+
+    with pytest.raises(FileNotFoundError):
+        bt_store.load(run_id)
+    with pytest.raises(FileNotFoundError):
+        bt_store.load(run_id + "-never-saved")
+
+
+def test_load_refuses_a_run_whose_table_row_is_gone(world, saved_env):
+    """另一半：sidecar 还在、`backtest_run` 行没了。拿默认值把 param_hash 补成空串，
+    读回来的就是一次【无法溯源】的运行 —— D7 的两个指纹正是从这一行来的。"""
+    from ashare.data import _db
+
+    res = run_backtest(make_cfg())
+    run_id = bt_store.make_run_id(res)
+    bt_store.save(res, run_id)
+    (saved_env / _db.DEFAULT_DERIVED_PATH).unlink()
+
+    assert (saved_env / "runs" / f"{run_id}.pkl").exists()
+    with pytest.raises(FileNotFoundError):
+        bt_store.load(run_id)
 
 
 def test_load_refuses_a_run_id_that_walks_out_of_the_runs_directory(tmp_path, monkeypatch):
     monkeypatch.setattr(bt_store, "RUNS_DIR", tmp_path / "runs")
     with pytest.raises(ValueError, match="run_id"):
-        bt_store.load("../../etc/passwd")
+        bt_store.load("../../etc/passwd")      # 验在碰库之前 —— 否则先拼一次 SQL 再拒
 
 
 # ══════════════ store：样本外台账（D7）══════════════
@@ -946,7 +1318,7 @@ def test_shuffle_seed_actually_permutes_the_cross_section(world):
     permuted = 0
     for c in got:
         sc = c["scores"]
-        assert sorted(sc.dropna().tolist()) == sorted(_SCORES.values())   # 同日内置换
+        assert sorted(sc.dropna().tolist()) == sorted(_SCORES[c] for c in CODES)
         same_multiset += 1
         if not np.allclose(sc.to_numpy(), [_SCORES[x] for x in sc.index]):
             permuted += 1

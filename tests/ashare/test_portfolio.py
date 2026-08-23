@@ -18,6 +18,9 @@
     此时补足那几笔并超预算告警，而不是"上限破了就破了"。
   - `test_a_binding_turnover_budget_is_never_silent`：预算【绑定】时被裁掉的调仓不破坏
     任何一条硬约束，所以除了那条 warning 没有第二样东西能发现账本已经不是目标账本。
+  - `test_intended_*`（架构 §4.3 裁决 ③）：返回值第二项是**换手裁剪之前**的目标账本。
+    上一版让调用方用 `max_turnover=inf` 再调一次来造它，代价是多做一遍功 + **必须丢掉
+    那次的 warnings**（否则每条降级报两遍）—— 丢 warning 本身就违反「降级必须可见」。
 """
 from __future__ import annotations
 import numpy as np
@@ -68,7 +71,7 @@ def _assert_risk_caps(w: pd.Series, ind: pd.Series, cs: PortfolioConstraints) ->
 def test_takes_the_top_n_by_score_and_weights_them_equally():
     sc = _s({"A": 5.0, "B": 4.0, "C": 3.0, "D": 2.0, "E": 1.0})
     cs = PortfolioConstraints(top_n=3, max_single=0.5, max_industry=1.0)
-    w, warns = build_targets(sc, 0.6, _s({}), _solo(sc.index), cs)
+    w, _int, warns = build_targets(sc, 0.6, _s({}), _solo(sc.index), cs)
 
     assert list(w.index) == ["A", "B", "C"]
     assert (w - 0.2).abs().max() < TOL          # 0.6/3 在二进制里不是 0.2，容差不能省
@@ -79,7 +82,7 @@ def test_takes_the_top_n_by_score_and_weights_them_equally():
 def test_sum_equals_target_position_to_1e_9():
     sc = _s({f"S{i}": float(i) for i in range(7)})
     cs = PortfolioConstraints(top_n=7, max_single=0.5, max_industry=1.0)
-    w, _ = build_targets(sc, 0.65, _s({}), _solo(sc.index), cs)
+    w, _int, _ = build_targets(sc, 0.65, _s({}), _solo(sc.index), cs)
     assert abs(w.sum() - 0.65) < TOL          # 0.65/7 除不尽，1e-9 容差不是摆设
 
 
@@ -87,7 +90,7 @@ def test_top_n_larger_than_the_pool_scales_the_survivors_up():
     """名额 50 只有 3 只可投：按 π/3 建仓（仍在单股上限内），不是按 π/50 留 94% 现金。"""
     sc = _s({"A": 3.0, "B": 2.0, "C": 1.0})
     cs = PortfolioConstraints(top_n=50, max_single=0.05, max_industry=1.0)
-    w, warns = build_targets(sc, 0.12, _s({}), _solo(sc.index), cs)
+    w, _int, warns = build_targets(sc, 0.12, _s({}), _solo(sc.index), cs)
 
     assert w.eq(0.04).all()
     assert abs(w.sum() - 0.12) < TOL
@@ -101,7 +104,7 @@ def test_industry_cap_evicts_the_lowest_scoring_name_in_that_industry():
     sc = _s({"A": 9.0, "B": 8.0, "C": 7.0, "D": 6.0, "E": 5.0, "F": 4.0})
     ind = _ind(("X", "A", "B", "C"), ("Y", "D", "E"), ("Z", "F"))
     cs = PortfolioConstraints(top_n=4, max_single=0.5, max_industry=0.5)
-    w, warns = build_targets(sc, 1.0, _s({}), ind, cs)
+    w, _int, warns = build_targets(sc, 1.0, _s({}), ind, cs)
 
     assert sorted(w.index) == ["A", "B", "D", "E"]     # C 被删（X 里最低），E 替补
     assert w.eq(0.25).all()
@@ -115,7 +118,7 @@ def test_industry_cap_stops_backfilling_when_every_industry_is_full():
     sc = _s({f"S{i:02d}": float(20 - i) for i in range(20)})
     ind = pd.Series({c: ("X" if i < 12 else "Y") for i, c in enumerate(sc.index)})
     cs = PortfolioConstraints(top_n=10, max_single=0.5, max_industry=0.3)
-    w, warns = build_targets(sc, 1.0, _s({}), ind, cs)
+    w, _int, warns = build_targets(sc, 1.0, _s({}), ind, cs)
 
     assert sorted(w.index) == ["S00", "S01", "S02", "S12", "S13", "S14"]
     assert abs(w.sum() - 0.6) < TOL
@@ -132,7 +135,7 @@ def test_single_industry_universe_holds_cash_instead_of_breaking_the_cap():
     sc = _s({"A": 3.0, "B": 2.0, "C": 1.0})
     ind = _ind(("X", "A", "B", "C"))
     cs = PortfolioConstraints(top_n=3, max_single=1.0, max_industry=0.4)
-    w, warns = build_targets(sc, 0.9, _s({}), ind, cs)
+    w, _int, warns = build_targets(sc, 0.9, _s({}), ind, cs)
 
     assert list(w.index) == ["A"]              # π/N = 0.3，行业只容得下 1 只
     assert abs(w.sum() - 0.3) < TOL
@@ -150,7 +153,7 @@ def test_single_cap_binds_when_top_n_is_too_small_and_the_rest_is_cash():
     """
     sc = _s({f"S{i}": float(i) for i in range(10)})
     cs = PortfolioConstraints(top_n=10, max_single=0.05, max_industry=1.0)
-    w, warns = build_targets(sc, 1.0, _s({}), _solo(sc.index), cs)
+    w, _int, warns = build_targets(sc, 1.0, _s({}), _solo(sc.index), cs)
 
     assert w.eq(0.05).all()
     assert abs(w.sum() - 0.5) < TOL            # 0.5 现金 —— Σw == π 在填不满时让位于单股上限
@@ -171,7 +174,7 @@ def test_tied_scores_pick_the_same_book_however_the_index_is_ordered():
     books = []
     for order in (["AAA", "BBB", "CCC"], ["AAA", "CCC", "BBB"], ["CCC", "BBB", "AAA"]):
         sc = _s({"AAA": 5.0, "BBB": 3.0, "CCC": 3.0}).reindex(order)
-        w, _ = build_targets(sc, 1.0, _s({}), ind, cs)
+        w, _int, _ = build_targets(sc, 1.0, _s({}), ind, cs)
         books.append(sorted(w.index))
     assert books[0] == books[1] == books[2] == ["AAA", "BBB"]   # 平手取 ts_code 小者
 
@@ -179,7 +182,7 @@ def test_tied_scores_pick_the_same_book_however_the_index_is_ordered():
 def test_max_weight_never_exceeds_max_single():
     sc = _s({"A": 2.0, "B": 1.0})
     cs = PortfolioConstraints(top_n=2, max_single=0.3, max_industry=1.0)
-    w, _ = build_targets(sc, 1.0, _s({}), _solo(sc.index), cs)
+    w, _int, _ = build_targets(sc, 1.0, _s({}), _solo(sc.index), cs)
     assert w.max() <= 0.3 + TOL
 
 
@@ -196,7 +199,7 @@ def test_outage_returns_none_not_an_empty_book_and_not_prev():
     prev = _s({"A": 0.3, "B": 0.2})
     sc = pd.Series({"A": np.nan, "B": np.nan, "C": np.nan}, dtype=float)
     cs = PortfolioConstraints(top_n=2, max_single=0.5, max_industry=1.0)
-    w, warns = build_targets(sc, 1.0, prev, _solo(sc.index), cs)
+    w, _int, warns = build_targets(sc, 1.0, prev, _solo(sc.index), cs)
 
     assert w is None                            # 不是空 Series，也不是 prev
     assert any("中断" in x for x in warns), warns
@@ -206,13 +209,13 @@ def test_outage_returns_none_with_no_prior_book_too_without_raising():
     """首期就中断：仍然是 None。空 Series 在这里"看起来对"，但它与清仓无法区分。"""
     sc = pd.Series({"A": np.nan}, dtype=float)
     cs = PortfolioConstraints(top_n=2, max_single=0.5, max_industry=1.0)
-    w, warns = build_targets(sc, 1.0, _s({}), _solo(sc.index), cs)
+    w, _int, warns = build_targets(sc, 1.0, _s({}), _solo(sc.index), cs)
     assert w is None and warns
 
 
 def test_empty_scores_is_an_outage_too():
     prev = _s({"A": 0.4})
-    w, warns = build_targets(_s({}), 1.0, prev, _s({}), PortfolioConstraints())
+    w, _int, warns = build_targets(_s({}), 1.0, prev, _s({}), PortfolioConstraints())
     assert w is None and warns
 
 
@@ -229,9 +232,9 @@ def test_the_coverage_floor_sits_at_exactly_50_percent():
         sc = pd.Series(d, dtype=float)
         return build_targets(sc, 0.6, _s({}), _solo(sc.index), cs)
 
-    w_ok, _ = _run(50)
+    w_ok, _int, _ = _run(50)
     assert w_ok is not None and list(w_ok.index) == ["S000", "S001", "S002"]
-    w_out, warns = _run(49)
+    w_out, _int, warns = _run(49)
     assert w_out is None and any("覆盖率" in x for x in warns), warns
 
 
@@ -241,7 +244,7 @@ def test_a_dropna_ing_caller_is_called_out_because_it_blinds_the_coverage_gate()
     sc = _s({"A": 3.0, "B": 2.0})                    # 已 dropna
     ind = _solo(["A", "B", "C", "D"])                # 完整股票池
     cs = PortfolioConstraints(top_n=2, max_single=0.5, max_industry=1.0)
-    _, warns = build_targets(sc, 0.4, _s({}), ind, cs)
+    _, _int, warns = build_targets(sc, 0.4, _s({}), ind, cs)
     assert any("失明" in x for x in warns), warns
 
 
@@ -250,7 +253,7 @@ def test_partial_nan_above_the_coverage_floor_ranks_the_survivors():
     sc = pd.Series({"A": 5.0, "B": 4.0, "C": 3.0, "D": 2.0, "E": 1.0, "F": 0.5, "G": 0.1,
                     "H": np.nan, "I": np.nan, "J": np.nan}, dtype=float)
     cs = PortfolioConstraints(top_n=3, max_single=0.5, max_industry=1.0)
-    w, warns = build_targets(sc, 0.6, _s({}), _solo(sc.index), cs)
+    w, _int, warns = build_targets(sc, 0.6, _s({}), _solo(sc.index), cs)
 
     assert list(w.index) == ["A", "B", "C"]
     assert warns == []
@@ -263,7 +266,7 @@ def test_coverage_below_the_floor_is_treated_as_an_outage():
                     "E": np.nan, "F": np.nan, "G": np.nan,
                     "H": np.nan, "I": np.nan, "J": np.nan}, dtype=float)
     cs = PortfolioConstraints(top_n=3, max_single=0.5, max_industry=1.0)
-    w, warns = build_targets(sc, 1.0, prev, _solo(sc.index), cs)
+    w, _int, warns = build_targets(sc, 1.0, prev, _solo(sc.index), cs)
 
     assert w is None
     assert any("覆盖率" in x for x in warns), warns
@@ -273,7 +276,7 @@ def test_infinite_scores_are_not_scores():
     """±inf 是除零 / 空窗口的产物，不是分数。当缺失处理 —— 否则它必然排第一名。"""
     sc = pd.Series({"A": np.inf, "B": 3.0, "C": 2.0, "D": 1.0}, dtype=float)
     cs = PortfolioConstraints(top_n=2, max_single=0.5, max_industry=1.0)
-    w, _ = build_targets(sc, 1.0, _s({}), _solo(sc.index), cs)
+    w, _int, _ = build_targets(sc, 1.0, _s({}), _solo(sc.index), cs)
 
     assert list(w.index) == ["B", "C"]         # 覆盖率 3/4 ≥ 50%，正常出票；A 不在其中
     assert _wt(w, "A") == 0.0
@@ -285,7 +288,7 @@ def test_no_clipping_when_the_move_fits_the_budget():
     prev = _s({"A": 0.5, "B": 0.5})
     sc = _s({"A": 2.0, "B": 1.0})
     cs = PortfolioConstraints(top_n=2, max_single=0.6, max_industry=1.0, max_turnover=0.3)
-    w, warns = build_targets(sc, 1.0, prev, _solo(sc.index), cs)
+    w, _int, warns = build_targets(sc, 1.0, prev, _solo(sc.index), cs)
 
     pd.testing.assert_series_equal(w.sort_index(), _s({"A": 0.5, "B": 0.5}), check_names=False)
     assert warns == []
@@ -296,7 +299,7 @@ def test_turnover_is_clipped_to_the_budget_and_the_sum_still_lands_on_target():
     prev = _s({"A": 0.05, "B": 0.02, "C": 0.03, "D": 0.04})
     sc = _s({"A": 4.0, "B": 3.0, "C": 2.0, "D": 1.0})
     cs = PortfolioConstraints(top_n=2, max_single=0.5, max_industry=1.0, max_turnover=0.06)
-    w, warns = build_targets(sc, 0.14, prev, _solo(sc.index), cs)
+    w, _int, warns = build_targets(sc, 0.14, prev, _solo(sc.index), cs)
 
     assert abs(w.sum() - 0.14) < TOL
     assert abs(_l1(w, prev) - 0.06) < TOL      # 预算用满，不是保守地少做
@@ -317,7 +320,7 @@ def test_a_binding_turnover_budget_is_never_silent():
     prev = _s({"Z": 0.10})
     sc = _s({"A": 3.0, "B": 2.0, "Z": -1.0})
     cs = PortfolioConstraints(top_n=2, max_single=0.5, max_industry=1.0, max_turnover=0.10)
-    w, warns = build_targets(sc, 0.10, prev, _solo(sc.index), cs)
+    w, _int, warns = build_targets(sc, 0.10, prev, _solo(sc.index), cs)
 
     assert abs(w.sum() - 0.10) < TOL                     # Σw == π
     assert abs(_l1(w, prev) - 0.10) < TOL                # 换手恰好等于 τ，不超
@@ -331,7 +334,7 @@ def test_the_largest_delta_trades_execute_first():
     prev = _s({"A": 0.05, "B": 0.02, "C": 0.03, "D": 0.04})
     sc = _s({"A": 4.0, "B": 3.0, "C": 2.0, "D": 1.0})
     cs = PortfolioConstraints(top_n=2, max_single=0.5, max_industry=1.0, max_turnover=0.06)
-    w, _ = build_targets(sc, 0.14, prev, _solo(sc.index), cs)
+    w, _int, _ = build_targets(sc, 0.14, prev, _solo(sc.index), cs)
 
     assert abs(w["D"] - 0.01) < TOL            # |Δ|=0.04 最大 → 吃掉全部卖出预算 0.03
     assert abs(w["C"] - 0.03) < TOL            # |Δ|=0.03 次之 → 没动
@@ -345,7 +348,7 @@ def test_equal_delta_trades_break_the_tie_by_score():
     prev = _s({"Z": 0.10})
     sc = _s({"A": 3.0, "B": 2.0, "Z": -1.0})
     cs = PortfolioConstraints(top_n=2, max_single=0.5, max_industry=1.0, max_turnover=0.10)
-    w, _ = build_targets(sc, 0.10, prev, _solo(sc.index), cs)
+    w, _int, _ = build_targets(sc, 0.10, prev, _solo(sc.index), cs)
 
     assert abs(_wt(w, "A") - 0.05) < TOL       # A、B 的 Δw 都是 +0.05，预算只够一只
     assert abs(_wt(w, "B")) < TOL
@@ -357,7 +360,7 @@ def test_equal_delta_sells_break_the_tie_by_selling_the_worse_score_first():
     prev = _s({"P": 0.05, "Q": 0.05, "R": 0.05})
     sc = _s({"R": 5.0, "P": 2.0, "Q": 1.0})
     cs = PortfolioConstraints(top_n=1, max_single=0.5, max_industry=1.0, max_turnover=0.10)
-    w, _ = build_targets(sc, 0.15, prev, _solo(sc.index), cs)
+    w, _int, _ = build_targets(sc, 0.15, prev, _solo(sc.index), cs)
 
     assert abs(_wt(w, "R") - 0.10) < TOL       # 预算 0.10 拆成买 0.05 / 卖 0.05（成对收缩）
     assert abs(_wt(w, "Q")) < TOL              # P、Q 的 Δw 都是 −0.05，先卖分数低的 Q
@@ -369,7 +372,7 @@ def test_unscored_holdings_are_sold_before_equally_sized_scored_ones():
     prev = _s({"GONE": 0.05, "P": 0.05, "R": 0.05})
     sc = pd.Series({"R": 5.0, "P": 2.0, "GONE": np.nan}, dtype=float)
     cs = PortfolioConstraints(top_n=1, max_single=0.5, max_industry=1.0, max_turnover=0.10)
-    w, _ = build_targets(sc, 0.15, prev, _solo(sc.index), cs)
+    w, _int, _ = build_targets(sc, 0.15, prev, _solo(sc.index), cs)
 
     assert abs(_wt(w, "GONE")) < TOL
     assert abs(_wt(w, "P") - 0.05) < TOL
@@ -380,7 +383,7 @@ def test_empty_prev_weights_does_not_block_the_initial_build():
     也不该为此刷一条告警 —— 没有上期账本，就没有"超额换手"这回事。"""
     sc = _s({f"S{i}": float(i) for i in range(5)})
     cs = PortfolioConstraints(top_n=5, max_single=0.5, max_industry=1.0, max_turnover=0.3)
-    w, warns = build_targets(sc, 1.0, _s({}), _solo(sc.index), cs)
+    w, _int, warns = build_targets(sc, 1.0, _s({}), _solo(sc.index), cs)
 
     assert abs(w.sum() - 1.0) < TOL
     assert _l1(w, _s({})) > 0.3
@@ -393,7 +396,7 @@ def test_turnover_may_exceed_the_budget_when_the_mandate_requires_it():
     prev = _s({"A": 0.10, "B": 0.10})
     sc = _s({"A": 3.0, "B": 2.0})
     cs = PortfolioConstraints(top_n=2, max_single=0.6, max_industry=1.0, max_turnover=0.3)
-    w, warns = build_targets(sc, 1.0, prev, _solo(sc.index), cs)
+    w, _int, warns = build_targets(sc, 1.0, prev, _solo(sc.index), cs)
 
     assert abs(w.sum() - 1.0) < TOL
     assert abs(_l1(w, prev) - 0.8) < TOL       # 只超到"刚好够"，不多做一分
@@ -411,11 +414,77 @@ def test_turnover_is_measured_against_drifted_prev_weights():
     drifted = _s({"A": 0.60, "B": 0.20, "C": 0.20}) / 1.4      # 实际持仓市值 / 权益
     sc = _s({"A": 3.0, "B": 2.0, "C": 1.0})
     cs = PortfolioConstraints(top_n=3, max_single=0.5, max_industry=1.0, max_turnover=0.15)
-    w, _ = build_targets(sc, 0.60, drifted, _solo(sc.index), cs)
+    w, _int, _ = build_targets(sc, 0.60, drifted, _solo(sc.index), cs)
 
     assert abs(w.sum() - 0.60) < TOL
     assert abs(_l1(w, drifted) - 0.15) < TOL   # 预算恰好用满，且量在【漂移后】的权重上
     assert _l1(w, stale) > 0.15 + TOL          # 对着上期目标量出来的是另一个数（0.193）
+
+
+# ── intended：换手裁剪之前的目标账本（裁决 ③）────────────────────────
+
+def test_intended_is_the_book_before_the_turnover_clip():
+    """同一组入参，`final` 是交出的账本、`intended` 是没有换手预算时的那个账本。
+
+    评审那条最小复现：目标 {A, B}，实际交出 {A, Z} —— 两者相差的正是「换手预算把信号
+    卡住了」这件事，而它此前哪儿都没留。
+    """
+    prev = _s({"Z": 0.10})
+    sc = _s({"A": 3.0, "B": 2.0, "Z": -1.0})
+    cs = PortfolioConstraints(top_n=2, max_single=0.5, max_industry=1.0, max_turnover=0.10)
+    w, intended, _ = build_targets(sc, 0.10, prev, _solo(sc.index), cs)
+
+    assert abs(_wt(intended, "A") - 0.05) < TOL
+    assert abs(_wt(intended, "B") - 0.05) < TOL      # final 里 B 是 0（预算不够）
+    assert abs(_wt(intended, "Z")) < TOL             # final 里 Z 留了一半
+    assert not np.allclose(w.to_numpy(), intended.reindex(w.index).to_numpy()), \
+        "intended 与 final 逐位相同 = 这一列什么都没量到"
+    assert abs(intended.sum() - 0.10) < TOL          # 意图账本仍然 Σw == π
+
+
+def test_intended_keeps_the_names_the_budget_refused_entirely():
+    """被整只挡下的票 final == 0 **且** prev == 0 —— 只按 `final != 0 | prev != 0` 筛，
+    它就从两个返回值里一起消失，于是 `intended` 恰好在唯一有意义的那几行上整行没了。"""
+    prev = _s({"Z": 0.10})
+    sc = _s({"A": 3.0, "B": 2.0, "Z": -1.0})
+    cs = PortfolioConstraints(top_n=2, max_single=0.5, max_industry=1.0, max_turnover=0.10)
+    w, intended, _ = build_targets(sc, 0.10, prev, _solo(sc.index), cs)
+
+    assert "B" in intended.index and abs(intended["B"] - 0.05) < TOL
+    assert "B" in w.index and abs(w["B"]) < TOL
+    assert list(w.index) == list(intended.index), "两个返回值必须共用一个 index"
+
+
+def test_intended_still_obeys_the_risk_caps_it_only_drops_the_turnover_clip():
+    """「裁剪之前」只指换手那一步。单股 / 行业上限照旧 —— 否则这一列量到的是一个
+    根本不可能下的单，归因把它当成「本来能赚到的钱」。"""
+    sc = _s({f"S{i}": float(i) for i in range(10)})
+    cs = PortfolioConstraints(top_n=10, max_single=0.05, max_industry=1.0, max_turnover=0.01)
+    _, intended, _ = build_targets(sc, 1.0, _s({}), _solo(sc.index), cs)
+
+    assert intended.eq(0.05).all()                   # 不是 π/N = 0.10
+    assert abs(intended.sum() - 0.5) < TOL
+
+
+def test_intended_equals_final_when_nothing_is_clipped():
+    """预算够用时两者必须逐位相同 —— 「恒等于目标」和「恒等于成交」都是错的。"""
+    prev = _s({"A": 0.5, "B": 0.5})
+    sc = _s({"A": 2.0, "B": 1.0})
+    cs = PortfolioConstraints(top_n=2, max_single=0.6, max_industry=1.0, max_turnover=0.3)
+    w, intended, warns = build_targets(sc, 1.0, prev, _solo(sc.index), cs)
+
+    pd.testing.assert_series_equal(w, intended, check_names=False)
+    assert warns == []
+
+
+def test_intended_is_none_on_an_outage_not_an_empty_book():
+    """中断日没有「意图中的账本」。交一份空的会被归因读成「本想清仓但被换手拦住了」。"""
+    sc = pd.Series({"A": np.nan, "B": np.nan}, dtype=float)
+    cs = PortfolioConstraints(top_n=2, max_single=0.5, max_industry=1.0)
+    w, intended, warns = build_targets(sc, 1.0, _s({"A": 0.3}), _solo(sc.index), cs)
+
+    assert w is None and intended is None
+    assert any("中断" in x for x in warns), warns
 
 
 # ── 换手裁剪 × 风险上限：五步不可交换的那个交叉点 ────────────────────
@@ -431,7 +500,7 @@ def test_partial_execution_never_leaves_a_position_above_max_single():
     sc = _s({f"S{i}": float(20 - i) for i in range(12)})
     ind = _solo(sc.index)
     cs = PortfolioConstraints(top_n=10, max_single=0.10, max_industry=1.0, max_turnover=0.02)
-    w, warns = build_targets(sc, 1.0, prev, ind, cs)
+    w, _int, warns = build_targets(sc, 1.0, prev, ind, cs)
 
     _assert_risk_caps(w, ind, cs)
     assert abs(w.sum() - 1.0) < TOL
@@ -451,7 +520,7 @@ def test_a_hair_over_the_industry_cap_still_counts_as_over():
     sc = _s({"C": 4.0, "D": 3.0, "A": 2.0, "B": 1.0})
     ind = _ind(("X", "A", "B"), ("Y", "C", "D"))
     cs = PortfolioConstraints(top_n=4, max_single=0.5, max_industry=0.20, max_turnover=0.0002)
-    w, _ = build_targets(sc, 0.40, prev, ind, cs)
+    w, _int, _ = build_targets(sc, 0.40, prev, ind, cs)
 
     _assert_risk_caps(w, ind, cs)
     assert w.groupby(ind.reindex(w.index)).sum()["X"] <= 0.20 + TOL
@@ -462,7 +531,7 @@ def test_turnover_a_hair_over_the_budget_still_warns():
     现有用例都超到 2 倍以上，把阈值改成 1.5×budget 照样全绿。"""
     prev = _s({"A": 0.10})
     cs = PortfolioConstraints(top_n=1, max_single=0.5, max_industry=1.0, max_turnover=0.30)
-    w, warns = build_targets(_s({"A": 5.0}), 0.42, prev, _solo(["A"]), cs)
+    w, _int, warns = build_targets(_s({"A": 5.0}), 0.42, prev, _solo(["A"]), cs)
 
     assert abs(_l1(w, prev) - 0.32) < TOL
     assert any("> 上限" in x for x in warns), warns
@@ -474,7 +543,7 @@ def test_partial_execution_never_leaves_an_industry_above_max_industry():
     sc = _s({"A": 1.0, "B": 2.0, "C": 4.0, "D": 3.0})
     ind = _ind(("X", "A", "B"), ("Y", "C", "D"))
     cs = PortfolioConstraints(top_n=4, max_single=0.30, max_industry=0.50, max_turnover=0.01)
-    w, warns = build_targets(sc, 1.0, prev, ind, cs)
+    w, _int, warns = build_targets(sc, 1.0, prev, ind, cs)
 
     _assert_risk_caps(w, ind, cs)
     assert abs(w.sum() - 1.0) < TOL
@@ -494,7 +563,7 @@ def test_a_forced_pin_is_charged_against_the_budget_not_added_on_top():
             | {f"K{i}": float(7 - i) for i in range(7)})
     ind = _solo(sc.index)
     cs = PortfolioConstraints(top_n=10, max_single=0.10, max_industry=1.0, max_turnover=0.10)
-    w, warns = build_targets(sc, 1.0, prev, ind, cs)
+    w, _int, warns = build_targets(sc, 1.0, prev, ind, cs)
 
     _assert_risk_caps(w, ind, cs)
     assert abs(_wt(w, "V") - 0.10) < TOL       # 越界那只被补足（成交 0.02，无条件）
@@ -527,7 +596,7 @@ def test_the_pin_cascade_runs_well_past_ten_rounds():
     prev = _s({k: v[1] for k, v in _DEEP.items()})
     ind = pd.Series({k: v[2] for k, v in _DEEP.items()})
     cs = PortfolioConstraints(top_n=5, max_single=0.05, max_industry=0.5, max_turnover=0.3)
-    w, _ = build_targets(sc, 1.0, prev, ind, cs)
+    w, _int, _ = build_targets(sc, 1.0, prev, ind, cs)
 
     _assert_risk_caps(w, ind, cs)
     assert _wt(w, "S01") <= 0.05 + TOL         # 10 轮版本在这只上交出 0.075
@@ -546,7 +615,7 @@ def test_all_hard_constraints_hold_jointly_on_random_books(seed):
     pi = float(rng.choice([0.2, 0.6, 1.0]))
     cs = PortfolioConstraints(top_n=int(rng.integers(4, 12)), max_single=0.10,
                               max_industry=0.35, max_turnover=float(rng.choice([0.05, 0.3, 2.0])))
-    w, warns = build_targets(sc, pi, prev, ind, cs)
+    w, _int, warns = build_targets(sc, pi, prev, ind, cs)
 
     if np.isfinite(sc).sum() < 0.5 * len(sc):          # 数据中断分支：该日不调仓
         assert w is None and warns
@@ -602,7 +671,7 @@ def test_names_without_an_industry_share_one_conservative_bucket():
     sc = _s({"A": 4.0, "B": 3.0, "C": 2.0, "D": 1.0})
     ind = pd.Series({"A": np.nan, "B": np.nan, "C": "Y", "D": "Y"}, dtype=object)
     cs = PortfolioConstraints(top_n=4, max_single=0.5, max_industry=0.25)
-    w, _ = build_targets(sc, 1.0, _s({}), ind, cs)
+    w, _int, _ = build_targets(sc, 1.0, _s({}), ind, cs)
 
     assert w.reindex(["A", "B"]).fillna(0.0).sum() <= 0.25 + TOL
 
@@ -612,7 +681,7 @@ def test_exits_are_returned_as_explicit_zero():
     prev = _s({"OLD": 0.5, "KEEP": 0.5})
     sc = _s({"KEEP": 2.0, "OLD": 1.0})
     cs = PortfolioConstraints(top_n=1, max_single=1.0, max_industry=1.0, max_turnover=5.0)
-    w, _ = build_targets(sc, 1.0, prev, _solo(prev.index), cs)
+    w, _int, _ = build_targets(sc, 1.0, prev, _solo(prev.index), cs)
 
     assert "OLD" in w.index and abs(w["OLD"]) < TOL
     assert abs(w["KEEP"] - 1.0) < TOL

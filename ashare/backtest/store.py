@@ -1,16 +1,19 @@
 """回测产物落盘 + 样本外台账（D7）。
 
-★ 为什么不写 `backtest_run` 表（2026-08-22，Task 13 落地时的实际约束）
-  架构 §4.3 与 `derived_schema.sql` 都为回测运行留了 `backtest_run` 表，写它要走
-  `ashare/data/derived_store.py`（L1：只有 `ashare/data/**` 能 `import duckdb`）——
-  而那个模块**目前没有** `write_backtest_run` / `read_backtest_run`。本任务不许改
-  第四个文件，所以这一版落盘走文件，`backtest_run` 表暂时是空的。
-  缺口记在这里而不是悄悄绕过：D7 的台账仍然完整（`docs/oos-runs.md` 是本模块自动写的，
-  两个指纹一个不少），少的是「按 run_id 在库里查一次历史运行」这件事。
-  补法是给 `derived_store` 加一对 DataFrame 进出的函数，本模块再转调 —— 与
-  `factors/store.py` 同一个形状。
+★ 落盘分两半，两半都是承重件（架构 §4.3 裁决 ⑤，2026-08-21）
+  · **标量与两个 D7 指纹**进 `derived.duckdb` 的 `backtest_run` 表，经
+    `ashare/data/derived_store.py`（L1：只有 `ashare/data/**` 能 `import duckdb`）。
+    本模块只做转调，与 `factors/store.py` 同一个形状：L1 那层收发 DataFrame 与基础
+    类型，L3 这层负责把 `BacktestResult` 序列化成一行、再把一行装回来。
+    schema 里躺着一张没有写入方的表，比没有这张表更糟 —— 「按 run_id 查历史运行」
+    看起来可用，实际永远查不到。
+  · **DataFrame 与自由形态的 dict**（equity / positions / trades / blocked /
+    ic / layers / attribution / config / metrics / warnings）进同名的 sidecar 文件。
+  `load` 从两边各取一半拼回来：**任何一半漏掉一个字段，往返用例立刻红**，
+  而不是安静地拿默认值补上（`ic` / `layers` / `attribution` / `warnings` 都有默认值，
+  这正是「往返丢字段」最容易溜过去的地方）。
 
-★ 为什么是 pickle 而不是 parquet
+★ 为什么 sidecar 是 pickle 而不是 parquet
   架构 §4.3 写的是「derived.duckdb + parquet」，但本机没有 pyarrow / fastparquet，
   而 `BacktestResult` 里有 MultiIndex 的 `positions`、`date` 类型的索引与一个自由
   形态的 `metrics` dict。CSV 往返会把日期变字符串、把 MultiIndex 拍平 ——
@@ -32,11 +35,13 @@ from __future__ import annotations
 
 import dataclasses as _dc
 import datetime as _dt
+import json
 import pathlib
 import re
 
 import pandas as pd
 
+from ..data import derived_store
 from .types import BacktestResult
 
 # 相对路径，与 `_db.DEFAULT_*_PATH` 同惯例（跟随 CWD，测试里 monkeypatch 掉）
@@ -50,7 +55,11 @@ OOS_CUTOFF = _dt.date(2019, 12, 31)
 _UNRUN_GATES = "闸1 样本外/闸2 walk-forward/闸3 shuffle/闸4 成本敏感/闸5 参数高原"
 
 _RUN_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
-_PICKLE_FORMAT = 1
+_PICKLE_FORMAT = 2
+
+# 这几个字段住在 `backtest_run` 表里，不再进 sidecar —— 一个字段只有一个家。
+# 两处都存的话，改了一处就有两个互相矛盾的真相，而 `load` 只会读到其中一个。
+_ROW_FIELDS = ("param_hash", "data_snapshot_id", "engine_version", "started_at", "elapsed_sec")
 
 
 def make_run_id(result: BacktestResult) -> str:
@@ -71,27 +80,63 @@ def _path(run_id: str) -> pathlib.Path:
     return pathlib.Path(RUNS_DIR) / f"{run_id}.pkl"
 
 
+def _json(obj) -> str:
+    """`config_json` / `metrics_json` 用的宽松序列化（这两列是给人查的，不进任何计算）。
+
+    ponytail: `default=str` + 默认的 `allow_nan=True`。metrics 里 NaN 是常态
+    （σ=0 时的 Sharpe），`allow_nan=False` 会让 save 直接炸；代价是这两列是
+    Python 方言的 JSON（`NaN` 字面量），严格解析器读不了。真要发出去再换。
+    """
+    return json.dumps(obj, ensure_ascii=False, default=str)
+
+
 def save(result: BacktestResult, run_id: str | None = None) -> pathlib.Path:
-    """把整个 `BacktestResult` 落盘，返回文件路径。`run_id=None` 用 `make_run_id`。"""
+    """落盘：标量进 `backtest_run` 表，帧与自由 dict 进 sidecar。返回 sidecar 路径。
+
+    `run_id=None` 用 `make_run_id`。同一个 run_id 重存是整行替换（幂等）。
+    """
     rid = run_id or make_run_id(result)
     p = _path(rid)
     p.parent.mkdir(parents=True, exist_ok=True)
     # 存字段 dict 而不是对象本身：dataclass 加字段时旧文件仍读得回来（缺的走默认值），
     # 而 pickle 一个对象是把类的当时布局也钉进去。
-    payload = {f.name: getattr(result, f.name) for f in _dc.fields(result)}
+    # 用 `_dc.fields` 全量减去 `_ROW_FIELDS`，不手写白名单：以后新增字段默认进 sidecar
+    # （安全方向 —— 漏进表里只是查不到，漏进任何一边都会让往返丢字段）。
+    payload = {f.name: getattr(result, f.name)
+               for f in _dc.fields(result) if f.name not in _ROW_FIELDS}
     payload["_format"] = _PICKLE_FORMAT
     pd.to_pickle(payload, str(p))
+    derived_store.write_backtest_run({
+        "run_id": rid,
+        "param_hash": result.param_hash,
+        "data_snapshot_id": result.data_snapshot_id,
+        "engine_version": result.engine_version,
+        "started_at": result.started_at,
+        "elapsed_sec": float(result.elapsed_sec),
+        "config_json": _json(_dc.asdict(result.config)),
+        "metrics_json": _json(result.metrics),
+        # 与 `append_oos_run` 同一个判据、同一个常量：两处写着不同的「样本外」定义，
+        # 台账与库表就会各说各话。
+        "is_oos": bool(result.config.end > OOS_CUTOFF),
+    })
     return p
 
 
 def load(run_id: str) -> BacktestResult:
-    """按 `run_id` 读回。文件不在就 `FileNotFoundError` —— 不返回空结果。"""
-    p = _path(run_id)
-    if not p.exists():
-        raise FileNotFoundError(f"没有 run_id={run_id!r} 的回测产物：{p}")
+    """按 `run_id` 读回（表里一行 + sidecar 一份）。缺任一半都 `FileNotFoundError`。
+
+    不返回空结果，也不拿默认值补齐缺的那一半：`ic` / `layers` / `attribution` /
+    `warnings` 都有默认值，「往返丢字段」会静默通过。
+    """
+    p = _path(run_id)                       # 先验 run_id（目录穿越），再碰库
+    row = derived_store.read_backtest_run(run_id)
+    if row is None or not p.exists():
+        raise FileNotFoundError(
+            f"没有 run_id={run_id!r} 的回测产物（backtest_run 行={row is not None}，"
+            f"sidecar={p.exists()}：{p}）")
     payload = dict(pd.read_pickle(str(p)))
     payload.pop("_format", None)
-    return BacktestResult(**payload)
+    return BacktestResult(**payload, **{k: row[k] for k in _ROW_FIELDS})
 
 
 def append_oos_run(result: BacktestResult) -> "tuple[bool, list[str]]":

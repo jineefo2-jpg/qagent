@@ -30,6 +30,9 @@ FACTOR_VALUE_COLUMNS = ("factor_name", "param_hash", "trade_date", "ts_code",
 COVERAGE_COLUMNS = ["factor_name", "param_hash", "first_date", "last_date",
                     "n_dates", "mean_coverage", "n_stale_dates"]
 
+BACKTEST_RUN_COLUMNS = ("run_id", "param_hash", "data_snapshot_id", "engine_version",
+                        "started_at", "elapsed_sec", "config_json", "metrics_json", "is_oos")
+
 
 def _read_conn():
     """派生库还不存在 = 什么都没算过，不是异常（第一次跑必然如此）。"""
@@ -111,6 +114,54 @@ def write_factor_values(df: pd.DataFrame) -> int:
     finally:
         conn.close()
     return len(rows)
+
+
+# ══════════════ 回测运行台账（backtest_run）══════════════
+
+def write_backtest_run(row: Mapping) -> int:
+    """UPSERT 一条回测运行记录，返回写入行数（恒 1）。键见 `BACKTEST_RUN_COLUMNS`。
+
+    ★ 覆盖语义是 `INSERT OR REPLACE`：`run_id` 里已经含了 `started_at`
+      （`backtest.store.make_run_id`），撞主键只可能是**同一次运行重存一遍**，
+      整行替换正是想要的；`DO NOTHING` 会让第二次 save 静默无效。
+    ★ 与 `factor_value` 不同，这张表**不做快照校验**：因子值是缓存（陈旧值喂进回测
+      会产出假净值曲线），而运行记录是**历史**——「这次运行用的是哪份数据」正是
+      `data_snapshot_id` 这一列要说的话，不是把它筛掉的理由。
+    """
+    missing = [c for c in BACKTEST_RUN_COLUMNS if c not in row]
+    if missing:
+        raise ValueError(f"backtest_run 缺键 {missing}：param_hash / data_snapshot_id 撞 NOT NULL，"
+                         f"缺别的只会在写入深处炸出一个没有上下文的错误")
+    conn = _derived.connect_write()
+    try:
+        _derived.init_schema(conn)
+        conn.execute(
+            f"INSERT OR REPLACE INTO backtest_run ({', '.join(BACKTEST_RUN_COLUMNS)}) "
+            f"VALUES ({', '.join(['?'] * len(BACKTEST_RUN_COLUMNS))})",
+            [row[c] for c in BACKTEST_RUN_COLUMNS])
+    finally:
+        conn.close()
+    return 1
+
+
+def read_backtest_run(run_id: str) -> Optional[dict]:
+    """按 `run_id` 读回一条运行记录；没有这一行（或派生库还不存在）返回 `None`。
+
+    ★ 返回 `None` 而不是空 dict：调用方（`backtest.store.load`）要把「没落过库」
+      与「落过但字段是空的」分开 —— 前者该抛 FileNotFoundError，后者是数据坏了。
+    ★ 表不存在时**照抛**（老版本派生库），不吞成 `None`：那是「该 rm 掉重算」的信号
+      （见 `derived_schema.sql` 的模块头），吞掉就变成一次查不出原因的「没有这条运行」。
+    """
+    conn = _read_conn()
+    if conn is None:
+        return None
+    try:
+        got = conn.execute(
+            f"SELECT {', '.join(BACKTEST_RUN_COLUMNS)} FROM backtest_run WHERE run_id = ?",
+            [run_id]).fetchall()
+    finally:
+        conn.close()
+    return dict(zip(BACKTEST_RUN_COLUMNS, got[0])) if got else None
 
 
 # ══════════════ 读 ══════════════

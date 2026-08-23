@@ -53,9 +53,16 @@
 ★ 换手预算【绑定】时同样告警，不只【超出】时。被裁掉的调仓一声不响是本文件最危险的
   失败形态：`scores A=3,B=2,Z=-1`、`prev={Z:0.10}`、π=τ=0.10 —— 目标 `{A,B}`，
   实际交出 `{A,Z}`，账本留着**最想卖掉的** Z、没买进前二的 B，而 Σw=π、换手恰好等于 τ，
-  **每一条硬约束都满足**，所以别处也发现不了。何况 `positions.target_weight` 存的是
-  交出的权重，意图中的账本哪儿都没留，净值曲线因此无法归因。
+  **每一条硬约束都满足**，所以别处也发现不了。
   这正是 §5.5 刚为退市股挖的那个例外的一般形式：那次的补丁治了退市，主路径还漏着。
+
+★ 因此返回值是**三元组** `(final, intended, warnings)`（架构 §4.3 裁决 ③，2026-08-21）。
+  `intended` = 换手裁剪【之前】的目标账本。它不是锦上添花：没有它，净值曲线分不清
+  「信号不行」与「换手预算让信号表达不出来」—— 对一个受换手约束的策略，这是完全相反的
+  两个结论，而 `metrics.attribution` 的 `constraint/turnover_budget` 一行专为它而设。
+  上一版让调用方自己造反事实（`max_turnover=inf` 再调一次），代价是多做一遍功，
+  以及**必须丢掉那次的 warnings**（否则每条降级报两遍）—— 丢 warning 本身就违反
+  「降级必须可见」。两者在本函数内部是同一个 `tgt`，没有理由让调用方去重建。
 
 本文件是纯计算：不碰 DB、不 import query，可交易性（停牌 / 一字板）属 Task 11 的
 `execution.simulate`。返回值是**目标权重**，不是成交结果。
@@ -145,8 +152,8 @@ def _violators(w: pd.Series, ind: pd.Series, cs: PortfolioConstraints) -> pd.Ind
 
 def build_targets(scores: pd.Series, target_position: float, prev_weights: pd.Series,
                   industry: pd.Series, constraints: PortfolioConstraints
-                  ) -> tuple[pd.Series | None, list[str]]:
-    """按合成分数产出目标权重。返回 `(target_weight, warnings)`。
+                  ) -> tuple[pd.Series | None, pd.Series | None, list[str]]:
+    """按合成分数产出目标权重。返回 `(target_weight, intended_weight, warnings)`。
 
     Args:
         scores: index = **当日完整股票池**，算不出的位置填 NaN（见模块头：先剔 NaN 会让
@@ -161,12 +168,16 @@ def build_targets(scores: pd.Series, target_position: float, prev_weights: pd.Se
         constraints: 只支持 `weighting='equal'`；其余字段见 `PortfolioConstraints`。
 
     Returns:
-        `(weights, warnings)`；数据中断时 weights 是 `None`（见模块头 ★3）。
-        weights 的 index = 目标持仓 ∪ 上期持仓，**清仓的票显式写 0.0**。
+        `(weights, intended, warnings)`；数据中断时前两者都是 `None`（见模块头 ★3）。
+        两者**共用同一个 index** = 目标持仓 ∪ 上期持仓，**清仓的票显式写 0.0**；
+        `intended` 是换手裁剪之前的那份目标（其余约束一视同仁，见模块头 ★）。
         目标账本是**两值**的：在册即持有、不在册即不持有 —— 「没意见」不是目标账本
         会有的状态，所以 `simulate` 把缺席折成 0.0（卖光）是对的。
-        撑住这条读法的不变量就在本函数最后一行：**返回值保留每一只 `prv != 0`**，
-        在册的持仓不会因为"这期没选中"而从账本里消失，缺席因此只可能是「本来就没有」。
+        撑住这条读法的不变量就在本函数最后一行：**返回值保留每一只 `prv != 0` 与
+        每一只 `tgt != 0`**，在册的持仓不会因为"这期没选中"而从账本里消失，
+        本期想买而被换手预算整只挡下的也不会消失（那一只 final==0、prv==0，
+        只按 final 筛就恰好把 `intended` 唯一有意义的那几行裁掉 —— 于是
+        `constraint/turnover_budget` 永远算成 0，而那正是这一列存在的全部理由）。
         warnings 与 `pipeline.process` 同惯例，由引擎汇进 `BacktestResult.warnings`：
         约束被迫让路的那一天必须在报告里看得见。
 
@@ -205,7 +216,9 @@ def build_targets(scores: pd.Series, target_position: float, prev_weights: pd.Se
         cov = len(valid) / len(sc) if len(sc) else 0.0
         warns.append(f"评分覆盖率 {cov:.0%} < {_MIN_SCORE_COVERAGE:.0%}，判为数据中断："
                      f"该日不调仓（上期 {int((prev != 0).sum())} 只持仓按 τ 开盘持平）")
-        return None, warns
+        # intended 同样是 None：中断日没有「意图中的账本」，交一份空的会被归因读成
+        # 「本想清仓但被换手拦住了」—— 而真相是这一天压根没有目标。
+        return None, None, warns
 
     # ── 选股：等权 + 行业上限。一次贪心扫描 == brief 的「删该行业末位 + 池中下一名替补」
     #    迭代到不动点：终态里每个行业留下的必是它分数最高的那 per_ind 只，替补顺序即分数序。
@@ -276,5 +289,8 @@ def build_targets(scores: pd.Series, target_position: float, prev_weights: pd.Se
         warns.append(f"换手预算 {cs.max_turnover:.1%} 拦下 {deferred} 笔调仓，"
                      f"账本与目标相差 L1={float(gap.sum()):.4f}")
 
-    out = final[(final != 0) | (prv != 0)].sort_index()
-    return out.rename("target_weight"), warns
+    # `tgt != 0` 必须进这道筛（见 Returns）：被换手预算整只挡下的票 final==0 且 prv==0，
+    # 少了它，`intended` 恰好在它唯一有意义的那几行上整行消失。
+    keep = (final != 0) | (tgt != 0) | (prv != 0)
+    return (final[keep].sort_index().rename("target_weight"),
+            tgt[keep].sort_index().rename("intended_weight"), warns)
