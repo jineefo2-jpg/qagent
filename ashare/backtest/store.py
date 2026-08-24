@@ -139,8 +139,24 @@ def load(run_id: str) -> BacktestResult:
     return BacktestResult(**payload, **{k: row[k] for k in _ROW_FIELDS})
 
 
-def append_oos_run(result: BacktestResult) -> "tuple[bool, list[str]]":
+def _sharpe_cell(v) -> str:
+    """台账里的一个 Sharpe 格。两列共用一个函数：两处各写一次格式化，
+    「样本内 0.83 / 样本外 .83」这种排不齐的行读起来像两个不同的量。"""
+    return "—" if v is None or pd.isna(v) else f"{float(v):.3f}"
+
+
+def append_oos_run(result: BacktestResult, *, sharpe_is: float | None = None
+                   ) -> "tuple[bool, list[str]]":
     """触及样本外时往 `docs/oos-runs.md` 追加一行。返回 `(是否追加, warnings)`。
+
+    Args:
+        result: 样本外那一次运行。
+        sharpe_is: **样本内** Sharpe，由同时握着两次运行的调用方（闸 1）传入。
+            台账的 `Sharpe(IS)` 列存在的唯一理由是让人一眼看到 `SR_oos ≥ 0.6·SR_is`
+            成不成立；只有 OOS 那个数的一行，读者得自己去别处找分母。
+            ⚠ **引擎的自动追加填不了它** —— `run_backtest` 一次只看见一条曲线。
+            所以这一列由闸 1 负责：它跑完样本内、样本外两次，`sr_is` 就在手上。
+            不传 = 这一行没有分母，那一格写「—」。
 
     warnings 通道不是装饰（global-constraints ★）：本函数唯一的降级是「这次不记」，
     而不记正是 D7 失效的样子，必须让调用方（引擎）把理由汇进 `BacktestResult.warnings`。
@@ -164,7 +180,6 @@ def append_oos_run(result: BacktestResult) -> "tuple[bool, list[str]]":
                      f"再跑一次等于把样本外污染成样本内")
         note = "⚠ 重复指纹（D7 污染） · " + note
 
-    sharpe = result.metrics.get("sharpe")
     row = " | ".join([
         _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%d %H:%M"),
         "+".join(n for n, _ in cfg.factors)[:48] or "—",
@@ -172,8 +187,8 @@ def append_oos_run(result: BacktestResult) -> "tuple[bool, list[str]]":
         result.data_snapshot_id,
         result.engine_version,
         f"{cfg.start}~{cfg.end}",
-        "—",                                        # 样本内 Sharpe 由闸 1 成对写入
-        "—" if sharpe is None or pd.isna(sharpe) else f"{float(sharpe):.3f}",
+        _sharpe_cell(sharpe_is),                    # 样本内 Sharpe 由闸 1 成对写入
+        _sharpe_cell(result.metrics.get("sharpe")),
         "未跑",
         note,
     ])
