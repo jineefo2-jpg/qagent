@@ -702,6 +702,174 @@ def test_an_all_nan_composite_reaches_the_build_targets_outage_gate():
     assert any("中断" in x for x in warns)
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# combine(use_store=True)：因子预计算缓存的快路径（架构 §1.2 那行 8 s 的前提）
+#
+# 本节只验【接线】—— 缓存的真读真写在 test_factor_store.py 里对着真 DuckDB 跑。
+# 这里 `store.read_current` 全部替身，为的是把 combine 这一侧的四件事单独钉死：
+#
+#   1 默认【不】走缓存。错的缓存比慢的现算坏，而默认值是没人会显式写出来的那个选择。
+#   2 覆盖率仍然量在 `raw_value` 上。库里的 `processed_value` 是 `fillna(0)` 之后的，
+#     拿它量覆盖率恒等于 100%（CLAUDE.md 规则 6，这个坑已经咬过三次）。
+#   3 部分命中 → 缺的那几个【现算】，而且缺了谁要写在 warning 里。
+#     不出声的话，一次「忘了 build 一个因子」的 37 分钟重算在数字上完全看不出来。
+#   4 `available_from` 未到的因子不问缓存：库里那一天是全 NULL，与「没算过」逐位相同，
+#     而 `compute_factor` 的短路根本不取数 —— 现算比读库还便宜，还能把那条 warning
+#     原样留在两条路径上。
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def _fake_store(monkeypatch, cached, *, store_warns=()):
+    """把 `store.read_current` 换成替身；返回一个记录它被问了什么的 dict。"""
+    from ashare.factors import store
+
+    seen: dict = {}
+
+    def read_current(param_hashes, as_of_date, universe):
+        seen["asked"] = dict(param_hashes)
+        seen["as_of_date"] = as_of_date
+        seen["universe"] = list(universe)
+        return ({n: v for n, v in cached.items() if n in param_hashes}, list(store_warns))
+
+    monkeypatch.setattr(store, "read_current", read_current)
+    return seen
+
+
+def test_combine_does_not_touch_the_store_unless_asked(monkeypatch):
+    """★ 默认值 = False。命中一份错的缓存比慢一点的现算坏得多，而 `param_hash`
+    覆盖不到因子函数体 —— 「缓存是不是当前实现算的」库里没有任何一列答得上来。
+    所以走缓存必须是调用方【写出来】的决定（闸 3 / 闸 5 会写），不是默认继承的。"""
+    _fake_store(monkeypatch, {"a": (V1, V1)})       # 一旦被问，返回的值与现算不同
+    _reg("a", V1)
+    out, warns = base.combine({"a": 1.0}, AS_OF, U)
+
+    pd.testing.assert_series_equal(out, _z("a", V1), check_names=False, check_exact=True)
+    assert warns == []
+
+
+def test_combine_serves_the_stored_processed_value_without_recomputing(monkeypatch):
+    """★ 快路径省掉的是 `pipeline.process`（16 因子 × 3,100 只的横截面 OLS），
+    不是省一次取数。库里的 processed 与现算不同（这里故意造成不同）时必须用库里的，
+    否则这条用例对「读了库又照样现算一遍」毫无分辨力。"""
+    calls = []
+    _reg("a", V1, calls=calls)
+    stored_z = pd.Series(np.linspace(-1.7320508076, 2.2360679775, len(U)), index=U)
+    assert not np.allclose(stored_z, _z("a", V1)), "前提：库里的值与现算不同，否则测不出谁在算"
+    _fake_store(monkeypatch, {"a": (V1, stored_z)})
+
+    out, warns = base.combine({"a": 1.0}, AS_OF, U, use_store=True)
+
+    pd.testing.assert_series_equal(out, stored_z, check_names=False, check_exact=True)
+    assert calls == [], "命中缓存就不该再调因子函数"
+    assert warns == [], "全部命中不该有 warning —— 会响的东西必须平时不响"
+
+
+def test_combine_asks_the_store_for_the_declared_param_hash_and_universe(monkeypatch):
+    """`factor_value` 的主键含 `param_hash`：只按名字问，闸 5 的 ±30% 参数高原下
+    会命中另一代参数算出来的值 —— 一个合理的浮点数，且永远对不出来。"""
+    _reg("a", V1, window=20)
+    seen = _fake_store(monkeypatch, {})
+    base.combine({"a": 1.0}, AS_OF, U, use_store=True)
+
+    assert seen["asked"] == {"a": base.get_factor("a").param_hash()}
+    assert seen["universe"] == U
+
+
+def test_combine_measures_coverage_on_the_stored_raw_not_the_stored_processed(monkeypatch):
+    """★ CLAUDE.md 规则 6，第四次：`processed_value` 是 `fillna(0)` 之后落的库，
+    一列永远满。拿它量覆盖率，`min_coverage` 这道闸在缓存路径上就永远不会响 ——
+    而它拦的是「这个因子今天只有 30% 的票有值」这种事。"""
+    thin = V1.copy()
+    thin.iloc[3:] = np.nan                                   # 3/10 = 30% < min_coverage 60%
+    _reg("a", V1)
+    _reg("thin", V1)
+    _fake_store(monkeypatch, {"a": (V1, _z("a", V1)),
+                              "thin": (thin, pd.Series(0.0, index=U))})
+
+    out, warns = base.combine({"a": 1.0, "thin": 1.0}, AS_OF, U, use_store=True)
+
+    pd.testing.assert_series_equal(out, _z("a", V1), check_names=False, check_exact=True)
+    assert any("thin" in w and "30%" in w for w in warns), warns
+
+
+def test_combine_recomputes_only_the_factors_the_store_missed(monkeypatch):
+    """★ 部分命中【不】整批作废：闸 3 的 200 次置换里，忘 build 一个因子不该让
+    另外 15 个也回去重算。命中的那几个原样用，缺的现算，结果与全现算逐位相同。"""
+    calls_a, calls_b = [], []
+    _reg("a", V1, calls=calls_a)
+    _reg("b", V2, calls=calls_b, direction=-1)
+    ref, ref_w = base.combine({"a": 2.0, "b": 1.0}, AS_OF, U)
+    calls_a.clear()
+    calls_b.clear()
+    _fake_store(monkeypatch, {"a": (V1, _z("a", V1))})       # 只有 a 在库里
+
+    out, warns = base.combine({"a": 2.0, "b": 1.0}, AS_OF, U, use_store=True)
+
+    pd.testing.assert_series_equal(out, ref, check_names=False, check_exact=True)
+    assert calls_a == [] and len(calls_b) == 1
+    assert ref_w == []
+    assert any("b" in w and "未命中" in w for w in warns), warns
+
+
+def test_a_partial_hit_names_the_missing_factors_instead_of_hiding_in_the_numbers(monkeypatch):
+    """★ 未命中在【数字上完全看不出来】—— 结果按契约就该与全现算一样。
+    看得出来的只有耗时（一次 37 分钟的重算），而那是没人盯着的那一维。
+    缺的是谁必须写在 warning 里，冷库（一个都没命中）同样要出声。"""
+    _reg("a", V1)
+    _reg("b", V2)
+    _fake_store(monkeypatch, {})                             # 冷库：一行都没有
+
+    out, warns = base.combine({"a": 1.0, "b": 1.0}, AS_OF, U, use_store=True)
+
+    pd.testing.assert_series_equal(out, (_z("a", V1) + _z("b", V2)) / 2,
+                                   check_names=False, check_exact=True)
+    hit = [w for w in warns if "未命中" in w]
+    assert len(hit) == 1 and "a" in hit[0] and "b" in hit[0], warns
+
+
+def test_combine_passes_the_store_warnings_through(monkeypatch):
+    """`read_current` 自己会降级（池子对不上、两次查询之间换了库），那几条 warning
+    是唯一的信号 —— 吞掉的话缓存路径的每一次作废都长成一次正常的现算。"""
+    _reg("a", V1)
+    _fake_store(monkeypatch, {}, store_warns=["2024-01-05 因子缓存跳过：股票池对不上"])
+
+    _, warns = base.combine({"a": 1.0}, AS_OF, U, use_store=True)
+    assert any("股票池对不上" in w for w in warns), warns
+
+
+def test_combine_does_not_ask_the_store_about_a_factor_that_is_not_available_yet(monkeypatch):
+    """★ 库里 `available_from` 之前的那一天是**全 NULL**，与「没算过」逐位相同。
+    走缓存拿回来的是一列 NaN → 只被覆盖率闸剔除，报的是「覆盖率 0%」而不是
+    「早于 available_from」—— 一条本来说得清清楚楚的降级，换了个说不清的说法。
+    而 `compute_factor` 的那条短路根本不取数，现算它比读库还便宜。"""
+    calls = []
+    _reg("a", V1)
+    _reg("north", available_from=dt.date(2016, 12, 5), calls=calls)
+    seen = _fake_store(monkeypatch, {})
+
+    out, warns = base.combine({"a": 1.0, "north": 1.0}, "2015-06-12", U, use_store=True)
+    ref, ref_w = base.combine({"a": 1.0, "north": 1.0}, "2015-06-12", U)
+
+    assert "north" not in seen["asked"] and "a" in seen["asked"]
+    pd.testing.assert_series_equal(out, ref, check_names=False, check_exact=True)
+    assert calls == [], "短路仍然不许调因子函数"
+    assert [w for w in warns if "available_from" in w] == \
+        [w for w in ref_w if "available_from" in w] != []
+
+
+def test_the_store_path_does_not_loosen_the_alpha_whitelist(monkeypatch):
+    """反向锚：白名单 / 权重守卫在缓存路径上一个都不能少，而且仍然拦在问库之前 ——
+    `log_mv` 早就 build 过（它是中性化的回归元），从库里读出来一样是规模押注。"""
+    seen = _fake_store(monkeypatch, {})
+    _reg("a", V1)
+    _reg("size", V1, category="risk")
+    with pytest.raises(ValueError, match="白名单"):
+        base.combine({"a": 1.0, "size": 1.0}, AS_OF, U, use_store=True)
+    with pytest.raises(ValueError, match="权重"):
+        base.combine({"a": 0.0}, AS_OF, U, use_store=True)
+    assert seen == {}, "拒绝要发生在问库之前"
+
+
 # ══════════════ ★ 收口：注册表装配（子进程 + 两条路径）══════════════
 _TOTAL_FACTORS = 18
 

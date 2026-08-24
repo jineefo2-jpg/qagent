@@ -25,12 +25,13 @@ import pathlib
 import re
 import shutil
 
+import numpy as np
 import pandas as pd
 import pytest
 
 duckdb = pytest.importorskip("duckdb")
 from ashare.data import _db, _derived, derived_store, query
-from ashare.factors import base, store
+from ashare.factors import base, pipeline, store
 
 D1 = dt.date(2024, 1, 5)          # 池 = A / B / C
 D2 = dt.date(2024, 1, 10)         # 池 = A / C（B 此日为 ST）
@@ -747,7 +748,276 @@ def test_build_leaves_the_snapshot_pinned_until_close_db(store_env, tmp_path):
     assert query.get_universe(D1)                                 # 只有 close_db() 解钉
 
 
-# ══════════════ 5 · 分层方向 ══════════════
+# ══════════════ 5 · store.read_current + combine(use_store=True) ══════════════
+#
+# 快路径存在的理由是数字：架构 §1.1 的规模（16 因子 × 3,100 只 × 780 周）下，
+# Task 14 实测【只算中性化内核】就要 11.0 s/次回测，而闸 3 要跑 200 次置换 ——
+# 置换只打乱当日的**合成分数**，因子值在 201 次运行里逐位相同，于是其中
+# 2,496,000 次 `compute_factor` 是纯重算（≈ 37 分钟白烧）。
+#
+# 但快路径的唯一契约是「不改变任何结果」，所以本节最吃重的是那条**差分**用例：
+# 同一天同一个池子，`use_store=True` 与 `False` 必须【逐位】相等（`check_exact=True`
+# —— `assert_series_equal` 的默认 rtol 是 1e-5，吞得下 0.6% 的系统性偏差，
+# global-constraints ★ 已经被它坑过一次）。
+
+_RAW2 = {"A00001.SZ": -0.8414709848, "B00002.SZ": 1.7724538509,
+         "C00003.SH": 0.3010299957, "D00004.SZ": -2.7182818285}
+
+
+def _counting(values, calls: list):
+    """记账版因子体：每次被调用记一笔，用来验「命中缓存就不再算」。"""
+    def compute(as_of_date, universe, **params):
+        calls.append(as_of_date)
+        return pd.Series([values[c] for c in universe], index=list(universe), dtype=float)
+    return compute
+
+
+def _register_fn(name, fn, *, direction=1, category="price", **kw):
+    kw.setdefault("neutralize", False)
+    base.factor(name=name, direction=direction, category=category, lookback_days=1, **kw)(fn)
+    return base.get_factor(name)
+
+
+def _zs(values, codes) -> pd.Series:
+    """oracle：3 只票、neutralize=False 时 process 退化成 winsorize → zscore → fillna(0)。"""
+    s = pd.Series([values[c] for c in codes], index=list(codes), dtype=float)
+    return ((s - s.mean()) / s.std()).fillna(0.0)
+
+
+def test_read_current_hands_back_raw_and_processed_in_that_order(store_env):
+    """两列写反了、或两列返回同一个东西，下游看到的都是合理的浮点数：
+    raw 那一列去量覆盖率（永远满 → 闸不响），processed 那一列进合成分数（没做过 zscore）。"""
+    _register_fn("f1", _counting(_RAW, []))
+    store.build(["f1"], [D1])
+    codes = query.get_universe(D1)
+
+    got, warns = store.read_current({"f1": base.get_factor("f1").param_hash()}, D1, codes)
+
+    raw, proc = got["f1"]
+    assert raw.tolist() == [_RAW[c] for c in codes]
+    pd.testing.assert_series_equal(proc, _zs(_RAW, codes), check_names=False, check_exact=True)
+    assert warns == []
+
+
+def test_combine_from_the_store_is_bit_identical_to_recomputing(store_env):
+    """★ 快路径的**全部**契约：同一天同一个池子，两条路给出逐位相同的分数与 warning。
+
+    两个因子的横截面形状不同、direction 一正一负、权重 2:1 —— 缺一样，
+    「缓存路径漏乘 direction / 漏乘权重 / 只用了第一个因子」这类变异就与真实现相等。"""
+    ca, cb = [], []
+    _register_fn("f1", _counting(_RAW, ca))
+    _register_fn("f2", _counting(_RAW2, cb), direction=-1)
+    store.build(["f1", "f2"], [D1])
+    codes = query.get_universe(D1)
+
+    fresh, wf = base.combine({"f1": 2.0, "f2": 1.0}, D1, codes)
+    spent = (len(ca), len(cb))
+    cached, wc = base.combine({"f1": 2.0, "f2": 1.0}, D1, codes, use_store=True)
+
+    pd.testing.assert_series_equal(cached, fresh, check_exact=True)
+    assert (wc, wf) == ([], [])
+    assert (len(ca), len(cb)) == spent, "命中缓存就不该再调因子函数"
+    assert fresh.std() > 0, "对照前提：合成分数不是一列常数，否则任何变异都相等"
+
+
+def test_a_store_hit_does_not_run_the_processing_chain(store_env, monkeypatch):
+    """★ 省下来的就是这一步。`pipeline.process` = 去极值 → 横截面 OLS 中性化 → zscore，
+    16 因子 × 3,100 只 × 780 周实测 11.0 s/次；闸 3 的 200 次里 99.5% 是它。
+    「读了库、又照样跑一遍 process」在数字上与命中【完全一样】，只有钟表看得见。"""
+    _register_fn("f1", _counting(_RAW, []))
+    store.build(["f1"], [D1])
+    codes = query.get_universe(D1)
+    ref, _ = base.combine({"f1": 1.0}, D1, codes)
+
+    monkeypatch.setattr(pipeline, "process",
+                        lambda *a, **k: pytest.fail("命中缓存不该再跑处理链"))
+    out, warns = base.combine({"f1": 1.0}, D1, codes, use_store=True)
+
+    pd.testing.assert_series_equal(out, ref, check_exact=True)
+    assert warns == []
+
+
+def test_a_partial_hit_computes_the_missing_factor_instead_of_nan_filling_it(store_env):
+    """★ 只 build 了 f1、合成要 f1+f2 —— 这是「给系统新增一个因子」的正常状态。
+
+    缺的那个若跟着一起读回来，会被 `reindex(columns=...)` 物化成**一列 NaN**，
+    与「这个因子那天本来就没数据」逐位相同，然后被覆盖率闸静默剔出分母：
+    合成分数从两个因子变成一个，而 warning 说的是「覆盖率 0%」。
+    正确的做法是现算它，结果与全现算逐位相同。"""
+    ca, cb = [], []
+    _register_fn("f1", _counting(_RAW, ca))
+    _register_fn("f2", _counting(_RAW2, cb), direction=-1)
+    store.build(["f1"], [D1])                     # 只预计算一个
+    codes = query.get_universe(D1)
+    fresh, wf = base.combine({"f1": 2.0, "f2": 1.0}, D1, codes)
+    spent = (len(ca), len(cb))
+
+    out, warns = base.combine({"f1": 2.0, "f2": 1.0}, D1, codes, use_store=True)
+
+    pd.testing.assert_series_equal(out, fresh, check_exact=True)
+    assert wf == []
+    assert (len(ca), len(cb)) == (spent[0], spent[1] + 1), "命中的不再算，缺的现算"
+    assert any("未命中" in w and "f2" in w for w in warns), warns
+
+
+def test_the_store_path_still_measures_coverage_on_raw_value(store_env):
+    """★ CLAUDE.md 规则 6：库里的 `processed_value` 是 `fillna(0)` 之后的 ——
+    3 只票里 2 只没值的因子，raw 覆盖率 33%（该剔），processed 一列满（100%，不剔）。
+    量错一列，`min_coverage` 这道闸在缓存路径上永远不响。"""
+    thin = dict(_RAW, **{"B00002.SZ": float("nan"), "C00003.SH": float("nan")})
+    _register_fn("f1", _counting(_RAW, []))
+    _register_fn("thin", _counting(thin, []))
+    store.build(["f1", "thin"], [D1])
+    conn = _derived.connect_read(_derived.DEFAULT_DERIVED_PATH)
+    try:
+        assert conn.execute("SELECT count(raw_value), count(processed_value) FROM factor_value "
+                            "WHERE factor_name = 'thin'").fetchone() == (1, 3), \
+            "前提：库里 thin 的 raw 只有 1/3 非空，processed 三行都满"
+    finally:
+        conn.close()
+
+    codes = query.get_universe(D1)
+    out, warns = base.combine({"f1": 1.0, "thin": 1.0}, D1, codes, use_store=True)
+    ref, _ = base.combine({"f1": 1.0}, D1, codes)
+
+    pd.testing.assert_series_equal(out, ref, check_exact=True)
+    assert any("thin" in w and "33%" in w for w in warns), warns
+
+
+def test_a_date_with_one_stale_row_is_not_served_from_the_store(store_env):
+    """★ 判命中的谓词是 `current_factor_dates` 的 `bool_and`（整天每一行都当前），
+    不是 `read_factor_values` 自己那句 `snapshot_id = ?`。
+
+    只靠后者的话，一行陈旧就变成【那只票读回 NaN】—— 覆盖率 2/3 仍然过闸，
+    因子留在分母里，而它的 processed 那一列在那只票上是空的：一个缺了一只票的
+    横截面，与「这只票今天没值」逐位相同。"""
+    calls = []
+    _register_fn("f1", _counting(_RAW, calls))
+    store.build(["f1"], [D1])
+    ph = base.get_factor("f1").param_hash()
+    codes = query.get_universe(D1)
+    ref, _ = base.combine({"f1": 1.0}, D1, codes)
+
+    derived_store.write_factor_values(_rows(          # UPSERT 同主键：把其中一行改陈旧
+        ("f1", ph, D1, "B00002.SZ", _RAW["B00002.SZ"], 0.0, "snap_stale")))
+    calls.clear()
+    out, warns = base.combine({"f1": 1.0}, D1, codes, use_store=True)
+
+    pd.testing.assert_series_equal(out, ref, check_exact=True)
+    assert len(calls) == 1, "整天作废 → 现算"
+    assert any("未命中" in w for w in warns), warns
+
+
+def test_a_snapshot_change_sends_the_store_path_back_to_computing(store_env):
+    """换了一批数据，因子值就不是这批数据算的了。这一条与
+    `test_read_treats_a_snapshot_mismatch_as_a_miss` 是同一件事在 combine 这一层的落点 ——
+    不过就是回测拿另一批数据算出的因子跑出一条好看的假净值。"""
+    calls = []
+    _register_fn("f1", _counting(_RAW, calls))
+    store.build(["f1"], [D1])
+    codes = query.get_universe(D1)
+    calls.clear()
+    assert base.combine({"f1": 1.0}, D1, codes, use_store=True)[1] == [] and calls == [], \
+        "前提：刚 build 完就该命中"
+
+    _bump_snapshot(store_env)
+    out, warns = base.combine({"f1": 1.0}, D1, codes, use_store=True)
+    ref, _ = base.combine({"f1": 1.0}, D1, codes)
+
+    pd.testing.assert_series_equal(out, ref, check_exact=True)
+    assert len(calls) == 2, "缓存作废 → 两次调用各算一遍"
+    assert any("未命中" in w for w in warns), warns
+
+
+def test_the_batch_is_voided_if_the_db_moves_between_judging_and_reading(store_env, monkeypatch):
+    """★ `read_current` 打三次库：判命中一次、取 raw 一次、取 processed 一次。
+    中间换了库（没钉住快照的调用方撞上一次 nightly promote）→ 判命中说「在」、
+    取值说「不在」。而 `read_factor_values` 未命中交回的是**带列名的空表**，
+    `frame[n]` 于是是一条【长度为 0】的 Series —— 它进 `num += w·d·z` 就是整列 NaN，
+    与「今天没有任何可用因子」逐位相同，而那会被 `build_targets` 判成维持上期持仓。
+    整批作废、现算、出声。"""
+    calls = []
+    _register_fn("f1", _counting(_RAW, calls))
+    store.build(["f1"], [D1])
+    codes = query.get_universe(D1)
+    ph = base.get_factor("f1").param_hash()
+    ref, _ = base.combine({"f1": 1.0}, D1, codes)
+
+    # 判命中的那一刻还在（替身），取值的那一刻全库已经是另一个快照了
+    monkeypatch.setattr(derived_store, "current_factor_dates",
+                        lambda hashes, dates: {(n, query.norm_date(d))
+                                               for n in hashes for d in dates})
+    derived_store.write_factor_values(_rows(
+        *[("f1", ph, D1, c, _RAW[c], 0.0, "snap_promoted") for c in codes]))
+    calls.clear()
+
+    out, warns = base.combine({"f1": 1.0}, D1, codes, use_store=True)
+
+    pd.testing.assert_series_equal(out, ref, check_exact=True)
+    assert len(calls) == 1
+    assert any("整批作废" in w for w in warns), warns
+
+
+def test_the_store_is_skipped_when_the_universe_is_not_the_build_universe(store_env):
+    """★ `processed_value` 是**横截面统计量**（去极值取中位数、中性化是横截面 OLS、
+    zscore 是横截面均值方差）。同一只票在 3 只的池子里和在 2 只的池子里是两个数，
+    而两个都是合理的浮点。`build` 写的是 `get_universe(d)` 那个横截面，
+    所以池子对不上就整批不用 —— 否则「命中即等值」这句话是假的。"""
+    calls = []
+    _register_fn("f1", _counting(_RAW, calls))
+    store.build(["f1"], [D1])
+    ph = base.get_factor("f1").param_hash()
+    sub = query.get_universe(D1)[:2]
+    ref, _ = base.combine({"f1": 1.0}, D1, sub)
+    stored, _ = derived_store.read_factor_values({"f1": ph}, D1, sub)
+    assert not np.allclose(stored["f1"].to_numpy(), ref.to_numpy()), \
+        "前提：库里那份（3 只的横截面）与子池现算的确实不同，否则这条用例分辨不出任何东西"
+
+    calls.clear()
+    out, warns = base.combine({"f1": 1.0}, D1, sub, use_store=True)
+
+    pd.testing.assert_series_equal(out, ref, check_exact=True)
+    assert len(calls) == 1
+    assert any("股票池" in w for w in warns), warns
+
+
+def test_use_store_on_a_cold_store_just_computes_and_says_so(store_env):
+    """派生库还不存在 = 第一次跑，不是异常。但「你要的缓存一行都没有」必须出声：
+    数字上它与命中【完全一样】，看得见的只有多花的 37 分钟。"""
+    _register_fn("f1", _counting(_RAW, []))
+    codes = query.get_universe(D1)
+    assert not pathlib.Path(_derived.DEFAULT_DERIVED_PATH).exists()
+
+    out, warns = base.combine({"f1": 1.0}, D1, codes, use_store=True)
+    ref, _ = base.combine({"f1": 1.0}, D1, codes)
+
+    pd.testing.assert_series_equal(out, ref, check_exact=True)
+    assert any("未命中" in w for w in warns), warns
+
+
+def test_the_store_path_does_not_replay_the_process_warnings(store_env):
+    """★ 已知代价，写下来免得下一个人以为它被测住了：`factor_value` **没有一列**
+    记着「这一天中性化被跳过了」（`store.build` 的模块头已经点过这件事）。
+    于是 `use_store=True` 拿不到 `pipeline.process` 那一层的降级 warning ——
+    它们只出现在【当初那次 build】的返回值里。
+
+    值本身仍然逐位相同（跳过中性化的那一步在 build 时就已经跳过了），
+    所以这不是结果分叉，是**可观测性**的分叉。要补只能给 `factor_value` 加列，
+    那是另一张变更单。"""
+    _register_fn("neu", _counting(_RAW, []), neutralize=True)
+    codes = query.get_universe(D1)
+    _, wb = store.build(["neu"], [D1])
+    assert any("中性化跳过" in w for w in wb), "前提：3 只票的横截面走不进 OLS（MIN_OBS=30）"
+
+    fresh, wf = base.combine({"neu": 1.0}, D1, codes)
+    cached, wc = base.combine({"neu": 1.0}, D1, codes, use_store=True)
+
+    pd.testing.assert_series_equal(cached, fresh, check_exact=True)
+    assert any("中性化跳过" in w for w in wf)
+    assert wc == [], "缓存路径拿不到那条 warning —— 它在 build 那次的返回值里"
+
+
+# ══════════════ 6 · 分层方向 ══════════════
 
 def test_derived_store_does_not_import_the_layers_above_it(store_env):
     """L1 闸只查「谁能 import duckdb」。反向依赖（data 层 import factors / backtest）

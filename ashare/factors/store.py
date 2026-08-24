@@ -105,6 +105,80 @@ def build(names: Sequence[str], dates: Sequence[_dt.date], *,
     return written, warns
 
 
+def read_current(param_hashes: Mapping[str, str], as_of_date, universe: Sequence[str]
+                 ) -> Tuple[Dict[str, Tuple[pd.Series, pd.Series]], List[str]]:
+    """读回**可以直接当现算用**的因子值：`({因子: (raw, processed)}, warnings)`。
+
+    `combine(use_store=True)` 的唯一取数口。没命中的因子不出现在返回的 dict 里
+    （由调用方现算），本函数**绝不现算** —— 现算与落库的口径分歧是最难查的一类 bug
+    （`derived_store.read_factor_values` 的同一条裁决）。
+
+    ★ **一次命中到底保证了什么，一个字都不能多**：库里这一天的**每一行**都盖着
+      当前的 `snapshot_id`（`current_factor_dates` 的 `bool_and`），且行取自
+      `(factor_name, param_hash)` 这个主键。而 `param_hash` 只覆盖
+      `default_params` + `neutralize` + `available_from`（`base._HASHED_SPEC_FIELDS`），
+      **不覆盖因子函数体**（也没法覆盖）。所以命中只等于
+      「某一代实现、在同一组声明参数、同一批数据上算出来的值」——
+      这是现有主键能给的最强保证，不是「与当前实现一致」。
+      改了函数体想让缓存跟上，只能 `build(..., overwrite=True)` 显式说出来，
+      库自己发现不了（与 `build` 的幂等判据是同一条契约，见那边的 ★）。
+
+    ★ 判命中用 `current_factor_dates` 而不是「`read` 返回的行数」：`read` 自己那句
+      `snapshot_id = ?` 只把陈旧的**行**滤掉，于是一天里坏一行 = 那只票读回 NaN，
+      覆盖率闸多半照样放行 —— 一个缺了几只票的横截面，与「这几只票今天没值」
+      逐位相同。整天都当前才算命中。
+
+    ★ 池子必须与 `get_universe(d)` 逐只相同，否则整批不用：`processed_value` 是
+      `pipeline.process` 的产物，而去极值（中位数）、中性化（横截面 OLS）、zscore
+      三步**全是横截面统计量** —— 同一只票在 3,100 只的池子里和在 10 只的池子里
+      算出来是两个数，且两个都是合理的浮点。`build` 落的是 `get_universe(d)` 那个
+      横截面（`drop_out_of_universe` 保证库里不多不少就是它），所以这条等式成立时
+      「读回来的 == 现算的」才是真话。
+      顺序上它排在命中判定【之后】：冷库（第一次跑）根本不该为此多打一次
+      `explain_universe` 的全表扫描。
+
+    ponytail: 逐日三次查询（判命中 / 取 raw / 取 processed），**天花板卡在这里**。
+      2026-08-24 在架构 §1.1 的真实规模上实测（16 因子 × 3,100 只 × 780 周
+      = 3,869 万行 / 2.2 GB 派生库）：本函数 49 ms/日 → 38 s/次回测，而它省下的
+      `pipeline.process` 是 45 ms/日 → 35 s/次。**净收益约等于零**（相对现算 1.05×）。
+      钱花在哪：`derived_store._read_conn()` 每次调用现开一个 DuckDB 只读连接
+      （2.2 GB 库上 5.8 ms × 3 = 17 ms），加上 `read_factor_values` 每天两次
+      `pivot + reindex`（约 20 ms）；真正的扫描只有 4~5 ms。
+      同一份数据、连接常开、一次取两列、不 pivot：**4.3 ms/日 → 3.4 s/次**，
+      也就是 §1.2 那行「净值-only < 8 s」够得着的唯一形状。
+      升级路径不在本文件（L1 挡着，`store.py` 不能碰 duckdb）：要给
+      `derived_store` 加一个**批量**口（一个连接、一次查一整段日期、二维 ndarray 出），
+      再由 `engine` 在回测入口预取一次。那是另一张变更单。
+      **在此之前 `use_store=True` 的收益全部来自「不跑因子函数」那一半**
+      （滚动窗口 / PIT 关联 / 取数 —— §1.2 给全量预计算的预算是 20 min，
+      折算约 770 ms/日/16 因子，本函数是它的 1/15），不是来自省中性化。
+    """
+    if not param_hashes:
+        return {}, []
+    d = query.norm_date(as_of_date, name="as_of_date")
+    codes = list(universe)
+
+    cur = derived_store.current_factor_dates(param_hashes, [d])
+    hit = {n: h for n, h in param_hashes.items() if (n, d) in cur}
+    if not hit:
+        return {}, []
+
+    pool = query.get_universe(d)
+    if set(codes) != set(pool):
+        return {}, [f"{d} 因子缓存整批跳过：传入的股票池（{len(codes)} 只）不是当日 "
+                    f"get_universe 的池子（{len(pool)} 只），而落库的 processed_value 是在"
+                    f"建库那个横截面上算的（去极值/中性化/zscore 全是横截面统计量），"
+                    f"换个池子它就不是同一个数 —— 改为现算"]
+
+    raw, w1 = derived_store.read_factor_values(hit, d, codes, processed=False)
+    proc, w2 = derived_store.read_factor_values(hit, d, codes, processed=True)
+    if w1 or w2:
+        # current_factor_dates 说在、read 说不在：两次查询之间换了库（未钉住的调用方）。
+        # 此时两列各自命中的是哪一代已经说不清，整批作废现算 —— 而且必须出声。
+        return {}, [f"{d} 因子缓存整批作废：判命中与取值之间数据库变了，改为现算"] + w1 + w2
+    return {n: (raw[n], proc[n]) for n in hit}, []
+
+
 def _long_frame(todo: Sequence[str], hashes: Mapping[str, str], d: _dt.date,
                 codes: Sequence[str], raw: pd.DataFrame, proc: pd.DataFrame,
                 snap: str) -> pd.DataFrame:

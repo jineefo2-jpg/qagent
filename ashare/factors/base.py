@@ -187,6 +187,18 @@ def _checked_universe(universe: Sequence[str]) -> list[str]:
     return codes
 
 
+def _not_yet_available(spec: FactorSpec, as_of_date: DateLike) -> bool:
+    """`as_of_date` 早于 `spec.available_from` —— 这条短路的**唯一定义**。
+
+    `compute_factor` 与 `combine` 的缓存分流共用它：写成两份的话，缓存那条路会去问
+    库里 2016 年之前的北向因子（一整天全 NULL，与「没算过」逐位相同），拿回一列 NaN，
+    于是降级从「早于 available_from」变成「覆盖率 0%」—— 同一个剔除，换了个说不清的理由。
+    ★ `available_from is None` 时【不】调 `_as_date`：那样会把 NaT 的拒绝提前到
+      每一个因子上，而 `compute_factor` 现在只对声明了起始日的因子拒 NaT。
+    """
+    return spec.available_from is not None and _as_date(as_of_date) < spec.available_from
+
+
 def compute_factor(name: str, as_of_date: DateLike, universe: Sequence[str], *,
                    processed: bool = True, **param_override) -> tuple[pd.Series, list[str]]:
     """算一个因子。返回 `(Series, warnings)`，index 恒等于 `universe`（顺序也一样）。
@@ -210,7 +222,7 @@ def compute_factor(name: str, as_of_date: DateLike, universe: Sequence[str], *,
 
     spec = get_factor(name)
     codes = _checked_universe(universe)      # ★ 顺序：先验 universe，再判 available_from
-    if spec.available_from is not None and _as_date(as_of_date) < spec.available_from:
+    if _not_yet_available(spec, as_of_date):
         return (pd.Series(float("nan"), index=codes, name=name, dtype=float),
                 [f"{as_of_date} {name}: 早于 available_from={spec.available_from}，"
                  f"返回全 NaN（不取数、不填 0）"])
@@ -247,8 +259,8 @@ def compute_panel(names: Sequence[str], as_of_date: DateLike, universe: Sequence
     return pd.DataFrame(data), warns
 
 
-def combine(weights: Mapping[str, float], as_of_date: DateLike, universe: Sequence[str]
-            ) -> tuple[pd.Series, list[str]]:
+def combine(weights: Mapping[str, float], as_of_date: DateLike, universe: Sequence[str], *,
+            use_store: bool = False) -> tuple[pd.Series, list[str]]:
     """合成分数 `Σ wᵢ·dᵢ·zᵢ / Σ wᵢ`（规格 §6 默认等权，即全部 w = 1.0）。
 
     ★ 只接受 `category ∈ ALPHA_CATEGORIES` 的因子，其余一律拒绝（见上面的白名单说明）。
@@ -262,6 +274,32 @@ def combine(weights: Mapping[str, float], as_of_date: DateLike, universe: Sequen
     ★ 全部因子都不可用 → 返回全 NaN + warning，**不抛也不返回空 Series**：
       全 NaN 会被 `build_targets` 的中断闸门判成"维持上期持仓"，而空 Series 读作
       【清仓】。数据中断常与极端行情同期，回测里会长成"策略在暴跌前防御性离场"。
+
+    ── `use_store`：因子预计算缓存的快路径（架构 §1.2「净值-only < 8 s」的前提）──
+
+    `True` 时先问 `store.read_current`，命中的因子直接用库里的 `raw_value` /
+    `processed_value`，**跳过 `pipeline.process`**（去极值 → 横截面 OLS 中性化 → zscore）。
+    省的就是它：架构 §1.1 的规模（16 因子 × 3,100 只 × 780 周）下光中性化内核
+    实测 11.0 s/次回测，而闸 3 的 200 次置换只打乱当日的**合成分数** ——
+    因子值在 201 次运行里逐位相同，其中 2,496,000 次 `compute_factor` 是纯重算。
+
+    ★ **默认 False，而且应当继续是 False**：命中不等于「与当前实现一致」——
+      `param_hash` 覆盖不到因子函数体（见 `store.read_current` 的 ★），
+      一份错的缓存比一次慢的现算坏得多，而默认值恰恰是没人会显式写出来的那个选择。
+      要走缓存的是闸 3 / 闸 5，它们**写得出来**这个参数。
+      另一面同样实在：`read_current` 在冷库上逐次出 warning，默认开等于给每一个
+      没预计算过的调用方灌 780 条噪声。
+    ★ 快路径**不改变任何结果**，这是它唯一的契约（`test_factor_store.py` 有一条
+      逐位相等的差分用例钉着）。所以白名单、覆盖率闸、按剩余权重重新归一
+      三件事一步都不少 —— 它们是策略，只住在这里（挪进 engine 就撞架构 A5）。
+    ★ 覆盖率照样量 `raw_value`：库里的 `processed_value` 是 `fillna(0)` 之后的，
+      一列永远满（CLAUDE.md 规则 6，这个坑咬过三次）。
+    ★ 部分命中 → 缺的那几个**现算**，不整批作废（一个因子忘了 build，不该让另外
+      15 个也回去重算），但缺了谁必须落进 warning：结果按契约就该与全现算一样，
+      未命中在**数字上完全看不出来**，看得见的只有多花的那 37 分钟。
+    ★ 已知代价：`factor_value` 没有一列记着「那一天中性化被跳过了」，所以命中的因子
+      **不会重放** `pipeline.process` 那层的降级 warning —— 它们只在【当初那次
+      `build`】的返回值里。要补只能给表加列，那是另一张变更单。
     """
     from . import pipeline
 
@@ -290,9 +328,27 @@ def combine(weights: Mapping[str, float], as_of_date: DateLike, universe: Sequen
     den = 0.0
     dropped: list[str] = []
     warns: list[str] = []
+
+    cached: dict = {}
+    if use_store:
+        from . import store          # 与 pipeline 同理：store 在模块顶层 import base，会成环
+        # `available_from` 未到的因子不问库（理由见 `_not_yet_available`）
+        want = {n: s.param_hash() for n, s in specs.items()
+                if not _not_yet_available(s, as_of_date)}
+        cached, wc = store.read_current(want, as_of_date, codes)
+        warns += wc
+        missed = [n for n in want if n not in cached]
+        if missed:
+            warns.append(f"{as_of_date} 因子缓存未命中 {len(missed)}/{len(want)} 个，改为现算："
+                         f"{', '.join(missed)}（结果不变，代价是时间）")
+
     for n, spec in specs.items():
-        raw, w1 = compute_factor(n, as_of_date, codes, processed=False)
-        warns += w1
+        hit = cached.get(n)
+        if hit is None:
+            raw, w1 = compute_factor(n, as_of_date, codes, processed=False)
+            warns += w1
+        else:
+            raw = hit[0]
         # 用 isfinite 而不是 notna：±inf 也算"没有值"，与 build_targets 的覆盖率闸同一口径
         # （portfolio.py「±inf 与 NaN 同等处理」）。notna 会把 inf 数进覆盖率，而 inf 一旦
         # 撞上 MAD==0（稀疏因子常见，winsorize 原样返回）就是 mean=inf/std=nan → zscore 全 NaN
@@ -307,8 +363,11 @@ def combine(weights: Mapping[str, float], as_of_date: DateLike, universe: Sequen
         #   量覆盖率，所以复用不了 compute_factor(processed=True) —— 但代价是"processed"
         #   有了两个定义：往 compute_factor 的链上加一步而漏了这里，合成分数就悄悄少一步。
         #   两行必须保持一模一样。
-        z, w2 = pipeline.process(raw, as_of_date, codes, spec=spec)
-        warns += w2
+        if hit is None:
+            z, w2 = pipeline.process(raw, as_of_date, codes, spec=spec)
+            warns += w2
+        else:
+            z = hit[1]          # 库里的 processed_value 就是同一条链的产物（快路径的全部收益）
         num += float(weights[n]) * spec.direction * z
         den += float(weights[n])
 
