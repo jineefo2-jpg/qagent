@@ -768,7 +768,7 @@ tests/ashare/
 > 但没给任何写入途径 —— 闸 1 手上有这个数却无处安放，那一列会永远是「—」。
 > 加一个 keyword-only 参数即可。
 
-### Task 15: 引擎正确性反测（§5.6，P2 硬性验收）
+### Task 15: 引擎正确性反测（算法说明书 **§11** —— 计划初稿误写「§5.6」，那是设计规格的编号；P2 硬性验收）
 
 **Files:** Create `tests/ashare/test_p2_acceptance.py`; Modify `docs/oos-runs.md`（说明本期未跑样本外）
 
