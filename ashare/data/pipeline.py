@@ -119,10 +119,12 @@ def _ingest_range(conn, src, start: _dt.date, end: _dt.date, *, indices: Sequenc
     summary["financials_swept"] = financials
 
     n_db = n_hk = 0
-    for d in days:
+    for i, d in enumerate(days):
         n_db += ingest.ingest_daily_basic(conn, src, d)
         if d >= HK_HOLD_FROM:
             n_hk += ingest.ingest_hk_hold(conn, src, d)
+        if (i + 1) % 200 == 0:
+            log(f"daily_basic/hk_hold {i + 1}/{len(days)}")
     summary["daily_basic"], summary["money_flow"] = n_db, n_hk
 
     summary["index_daily"] = sum(ingest.ingest_index_daily(conn, src, ix, start, end) for ix in indices)

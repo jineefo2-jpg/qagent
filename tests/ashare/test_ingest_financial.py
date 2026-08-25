@@ -180,9 +180,12 @@ def test_ingest_financial_end_to_end(conn):
     assert err == ""                                 # 无丢弃行时不写 dropped 备注
 
 
-def test_ingest_daily_basic_is_per_day_and_idempotent(conn):
+def test_ingest_daily_basic_is_per_day_and_skips_done(conn):
+    """DONE 的日期第二次调用必须【跳过】而不是重拉 —— 与 ingest_daily_bar_by_date 同一契约。
+    2026-08-25 实测教训：没有这道守卫，full 续跑会把 2010 年以来每一天重新调一遍 API，
+    3000+ 次「无声重拉」在终端上表现为卡死，还平白多烧一遍限频配额。"""
     assert ingest.ingest_daily_basic(conn, FakeSrc(), "20240102") == 2
-    assert ingest.ingest_daily_basic(conn, FakeSrc(), "20240102") == 2
+    assert ingest.ingest_daily_basic(conn, FakeSrc(), "20240102") == 0   # DONE → 跳过，不触 API
     assert conn.execute("SELECT count(*) FROM daily_basic").fetchone()[0] == 2
     r = conn.execute("SELECT pe_ttm, total_mv FROM daily_basic WHERE ts_code='600519.SH'").fetchone()
     assert r == (31.0, 2.1e8)

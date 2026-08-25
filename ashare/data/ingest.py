@@ -512,6 +512,8 @@ _DAILY_BASIC_COLS = ["ts_code", "trade_date", "turnover_rate", "turnover_rate_f"
 def ingest_daily_basic(conn, src, trade_date) -> int:
     d = _parse_date(trade_date)
     job = f"daily_basic:{d.isoformat()}"
+    if job_state(conn, job) == "DONE":
+        return 0
     set_job(conn, job, "daily_basic", d.isoformat(), "RUNNING")
     try:
         df = src.daily_basic(trade_date=d)
@@ -717,6 +719,8 @@ def ingest_hk_hold(conn, src, trade_date) -> int:
     """北向持股占比（沪深港通）。2016-12-05 前无数据，不补 0（B5 由 FactorSpec.available_from 处理）。"""
     d = _parse_date(trade_date)
     job = f"money_flow:{d.isoformat()}"
+    if job_state(conn, job) == "DONE":
+        return 0
     set_job(conn, job, "money_flow", d.isoformat(), "RUNNING")
     try:
         raw = src.hk_hold(trade_date=d)
