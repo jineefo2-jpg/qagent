@@ -235,7 +235,7 @@ Detailed design: `docs/adr/0001-broker-abstraction.md`. The constraints below ar
 | D8 | 后复权价是唯一真值，**禁止前复权** | 历史回测结果随新数据变动 |
 | D9 | 日线按交易日历补齐，停牌日写占位行（`vol=0`，OHLC=前收）；源给出 `vol=0` 的行同样算停牌 | `rolling(20)` 拿到 25 个交易日，因子静默污染；没成交的日子被按前收成交 |
 
-补充三条工程约束：
+补充六条工程约束：
 
 1. `ashare/data/query.py` 是唯一数据出口。`scripts/check_ashare_layering.py`（AST 静态检查，由 pytest 调用）
    守六条：L1 只有 `ashare/data/**` 可 `import duckdb`；L2 query 公开取数函数首参 `as_of_date`
@@ -247,9 +247,19 @@ Detailed design: `docs/adr/0001-broker-abstraction.md`. The constraints below ar
 3. 行业中性化前先查 `_meta.industry_source`：不是 `'sw'` 说明行业是**今天的值回填到上市日**
    （申万成分接口无权限时的降级），做行业中性化就是前视污染，必须拒绝。
    `validate.check_industry_source` 是阻断项，操作员用 `--allow-static-industry` 显式承认才放行。
-4. 回测入口用 `query.snapshot_id(pin=True)` 钉住数据：钉住后 promote 换库会抛而不是静默重连，
+4. **任何跨多个日期的循环**（回测入口、`store.build` 批量落库、批跑因子）都要用 `query.snapshot_id(pin=True)` 钉住数据：钉住后 promote 换库会抛而不是静默重连，
    否则一次运行可能横跨两个数据库却只记录一个 `data_snapshot_id`（D7 失效）。
-5. `ashare/agent_tools.py` 的工具**永远不进 `TRADING_TOOLS`**。
+   注意钉住只能由 `close_db()` 解除。
+5. **写 `factor_value` 时缺失值一律写 NULL，不写 NaN。** DuckDB 的 `DOUBLE` 真的能存 NaN ——
+   `count()` 会把它算进去、`IS NULL` 判它为假，于是覆盖率指标永远是 100%，
+   而「覆盖率不足就剔除因子」这道闸从此形同虚设。
+   **同一个坑在 SQL 侧也有**：DuckDB 的 `0/0` 给的是 **NaN 不是 NULL**（`1/0` 给 `inf`）。
+   所以算覆盖率这类比值时 `nullif` 是承重的 —— 少了它，一个全过期的日期会把
+   整个因子的 `avg(cov)` 变成 NaN。这一层已经踩到三次。
+6. **`pipeline.process` 末尾的 `fillna(0)` 会让它【下游】的任何覆盖率度量失效。**
+   已经咬过两次：`build_targets` 的 50% 闸经 `combine` 喂进来只可能是 100% 或 0%；
+   `coverage_report` 若照 `processed_value` 算则恒为 1.0。覆盖率一律从 `raw_value` 算。
+7. `ashare/agent_tools.py` 的工具**永远不进 `TRADING_TOOLS`**。
    注意 `TRADING_TOOLS` 的语义是「需要用户身份」而非「危险」——`get_user_profile` 也在其中。
    另：`TOOL_SCHEMAS.extend()` 必须插在 `quant_agent.py` 的 `_OPENAI_TOOLS` 赋值之前，
    否则模块加载时已固化，新工具静默失效。

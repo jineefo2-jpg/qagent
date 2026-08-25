@@ -44,3 +44,9 @@ cryptography>=42.0.0
 duckdb>=1.0.0,<2.0.0
 tushare>=1.4.0
 baostock>=0.8.8
+
+# A 股回测的统计检验（P2 / 算法说明书 §4.2）
+# 可选：ICIR 的 t 检验 p 值（scipy.stats.t）。缺席时 p=None，t 值照常给出。
+scipy>=1.10
+# statsmodels 只是 Newey-West 的【参照实现】，生产路径一行都不 import 它
+# （metrics.py 用 numpy 直接算 Bartlett 核），故它在 requirements-dev.txt 里，不在这里。

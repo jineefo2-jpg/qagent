@@ -159,7 +159,8 @@
 | `ashare/factors/base.py` | `@factor` 注册表 + `FactorSpec` | §4.2 | ✗ | 量化 |
 | `ashare/factors/pipeline.py` | 去极值 → 中性化 → 标准化（顺序固定） | `process()` | ✗ | 量化 |
 | `ashare/factors/{price,fundamental,flow,risk}.py` | 因子实现（签名固定） | `@factor` 装饰的函数 | ✗ | 量化 |
-| `ashare/factors/store.py` | `factor_value` 预计算落库与读取 | `build()/read()` | ✓ derived 库 | 量化 |
+| `ashare/data/derived_store.py` | 派生库读写（**独家持 duckdb**） | `write_factor_values()/read_factor_values()/coverage_report()` | ✓ derived 库 | 量化 |
+| `ashare/factors/store.py` | 编排「算 → 写」，**不碰 duckdb** | `build()` | ✗（经 derived_store） | 量化 |
 | `ashare/backtest/engine.py` | 主循环（≤ 400 行，仅编排） | `run_backtest(config)` | ✗ | 量化 |
 | `ashare/backtest/{cost,portfolio,metrics,guards}.py` | 成本 / 组合构建 / 指标 / 五闸 | §4.3 | ✗ | 量化 |
 | `ashare/backtest/store.py` | 回测结果持久化 | `save()/load()/list_runs()` | ✓ derived 库 | 量化 |
@@ -185,7 +186,7 @@ sources ──▶ ingest ──▶ validate            [写侧，独立进程]
 
 | # | 规则 | 违反后果 |
 |---|---|---|
-| L1 | 除 `ashare/data/ingest.py`、`ashare/factors/store.py`、`ashare/backtest/store.py` 外，任何模块 `import duckdb` → fail | 绕过唯一出口 |
+| L1 | **只有 `ashare/data/**` 可以 `import duckdb`**（2026-08-21 收紧：原来给 `factors/store.py`、`backtest/store.py` 开的口子已关闭 —— 一旦这两层拿到 duckdb，它们同样能连 market.duckdb 读未掩码的原始行） | 绕过唯一出口 |
 | L2 | `ashare/data/**` 不得 import `ashare.factors` / `ashare.backtest` / `ashare.strategy` / `ashare.agent_tools` | 循环依赖 |
 | L3 | `ashare/factors/**` 只能 import `ashare.data.query`、`ashare.factors.*` | 因子直连数据库（违 D2） |
 | L4 | `ashare/agent_tools.py` 只能 import `ashare.data.query`、`ashare.factors`、`ashare.backtest.{store,metrics}`；**禁止 import `ashare.data.ingest`、`ashare.factors.store`、`ashare.backtest.store` 的写函数、`brokers.*`** | 违 D1 |
@@ -472,15 +473,22 @@ def get_factor(name: str) -> FactorSpec: ...
 def list_factors(category: str | None = None) -> list[FactorSpec]: ...
 
 def compute_factor(name: str, as_of_date, universe: list[str], *,
-                   processed: bool = True, **param_override) -> pd.Series:
+                   processed: bool = True, **param_override) -> tuple[pd.Series, list[str]]:
     """raw → （processed=True 时）走 pipeline.process。
     available_from 之前的日期直接返回全 NaN Series（不静默填 0）。"""
 
 def compute_panel(names: list[str], as_of_date, universe: list[str], *,
                   processed: bool = True) -> pd.DataFrame:
-    """index=ts_code，columns=names。优先从 factor_value 表读，缺的现算。"""
+    """index=ts_code，columns=names。**一律现算**，返回 `(DataFrame, warnings)`。
 
-def combine(weights: Mapping[str, float], as_of_date, universe: list[str]) -> pd.Series:
+    **2026-08-21 修正两处（初稿两条都错）：**
+    · 「优先从 factor_value 表读，缺的现算」与 Task 8 的裁决直接矛盾 ——
+      `derived_store.read` 未命中就返回空、**不静默现算**，因为「现算与落库的口径分歧」
+      是最难查的一类 bug。读缓存还是现算由**调用方**决定，不在这一层偷偷混合。
+    · 裸返回类型没有地方放本文档自己要求记录的 warning（§4.2 通例）。
+    """
+
+def combine(weights: Mapping[str, float], as_of_date, universe: list[str]) -> tuple[pd.Series, list[str]]:
     """合成分数 = Σ wᵢ × directionᵢ × processedᵢ。默认全 1.0 等权（规格 §5.2）。
     ★ 覆盖率不足（< min_coverage）或 available_from 未到的因子，
       从当日分母中【剔除】并按剩余因子重新归一，而不是当 0 参与 ——
@@ -491,29 +499,143 @@ def combine(weights: Mapping[str, float], as_of_date, universe: list[str]) -> pd
 # ashare/factors/pipeline.py —— 顺序固定，不可调换（规格 §5.2）
 def winsorize_mad(s: pd.Series, n: float = 3.0) -> pd.Series: ...
 def neutralize(s: pd.Series, as_of_date, universe, *,
-               by: tuple[str, ...] = ("log_mv", "industry")) -> pd.Series:
-    """横截面 OLS 取残差。行业 dummy 来自 get_industry（已并小行业）。
-    有效样本 < 30 或设计矩阵秩亏 → 返回原 Series 并在 warnings 里记一条，不静默返回 NaN。"""
+               by: tuple[str, ...] = ("log_mv", "industry")) -> tuple[pd.Series, list[str]]:
+    """横截面 OLS 取残差（为什么不是 Barra 的 WLS：见算法说明书 §3.2 的裁决 ——
+    组合是等权 top-N，相关的是【无权】正交，那是 OLS 的恒等式）。
+    行业 dummy 来自 get_industry（已并小行业）；industry_source != 'sw' 直接抛（回填行业 = 前视）。
+    有效样本 < 30 或设计矩阵秩亏 → 返回原 Series + warning，不静默返回 NaN。
+    返回 (残差, warnings)：warnings 上浮到 BacktestResult.warnings，降级的那一天在运行记录里看得见。"""
 def zscore(s: pd.Series) -> pd.Series: ...
-def process(s: pd.Series, as_of_date, universe, *, spec: FactorSpec) -> pd.Series:
+def process(s: pd.Series, as_of_date, universe, *, spec: FactorSpec) -> tuple[pd.Series, list[str]]:
     """1 winsorize_mad → 2 (spec.neutralize 时) neutralize → 3 zscore → 4 fillna(0)"""
 ```
 
 ```python
-# ashare/factors/store.py —— 唯一写 derived 库的因子模块
+# ashare/factors/store.py（L3，不 import duckdb）—— 编排「算 → 写」
+#   落库本身在 ashare/data/derived_store.py（L1）。拆两层不是为了整洁，是 L1 闸的要求。
+#   ★ read 的键是 (name, param_hash) 不是 name：PK 含 param_hash，而 L1 够不到
+#     FACTOR_REGISTRY 解析不出它；只按名字读，在闸 5 的 ±30% 参数网格下会同时命中
+#     两代值，pivot 要么抛要么静默留一个。
 def build(names: list[str], dates: list[_dt.date], *,
-          overwrite: bool = False, progress=None) -> dict:
-    """预计算并写入 factor_value(factor_name, param_hash, trade_date, ts_code,
-                                 raw_value, processed_value, snapshot_id)
+          overwrite: bool = False, progress=None) -> tuple[dict, list[str]]:
+    """算 → 写。写入本身走 derived_store.write_factor_values。
+
     PRIMARY KEY (factor_name, param_hash, trade_date, ts_code)
-    ★ snapshot_id 变化 → 该快照下的因子值视为失效，需重算（不删旧行，加新行）。"""
-def read(names: list[str], date: _dt.date, universe: list[str],
-         processed: bool = True) -> pd.DataFrame: ...
-def coverage_report(names: list[str]) -> pd.DataFrame:
-    """每个因子的已计算日期区间与覆盖率，供 /api/ashare/health 展示。"""
+    ★ snapshot_id 变化 → 该快照下的因子值失效，**原地 UPSERT 覆盖**。
+      2026-08-21 修正：本行初稿写「不删旧行，加新行」，那与上面的 PK 直接冲突
+      （PK 不含 snapshot_id，加不了新行），照着写就会退化成 DO NOTHING ——
+      留下陈旧值配陈旧快照，而 read 会把它当成当前快照放行。这是本层存在的意义所在。"""
+
+# ── ashare/data/derived_store.py（L1，独家持 duckdb）──
+def write_factor_values(df: pd.DataFrame) -> int: ...
+def read_factor_values(name_to_hash: dict[str, str], date: _dt.date,
+                       universe: list[str], processed: bool = True
+                       ) -> tuple[pd.DataFrame, list[str]]: ...
+def current_factor_dates(name_to_hash: dict[str, str]) -> pd.DataFrame: ...
+def coverage_report(name_to_hash: dict[str, str]) -> pd.DataFrame:
+    """每因子的已算日期区间、覆盖率（**从 raw_value 算**）与 n_stale_dates，
+    供 /api/ashare/health 展示。覆盖率必须只统计当前快照的行 ——
+    混代统计会让报出来的数越过 min_coverage，而 read 实际只能服务其中一部分。"""
 ```
 
 ### 4.3 回测引擎输入输出
+
+> **★ `use_store` 的两条补裁（2026-08-24，实测之后）**
+>
+> **① `use_store` 走 `run_backtest()` 的 kwarg，不进 `BacktestConfig`。**
+> 与「调仓频率禁止当函数参数」**方向相反、理由相同**：那条禁令防的是
+> 「改变结果的东西逃出指纹」（碰撞），这条防的是「不改变结果的东西挤进指纹」（分家）——
+> config 字段经 asdict 默认进 `param_hash`，而 `use_store` 有差分测试钉死逐位同值，
+> 哈希它就是给同一个实验铸两个指纹、多发一次样本外机会（Task 9 评审那个洞的重演）。
+> 判据始终是一个：**指纹只跟着会改变结果的东西走。**
+>
+> **② §1.2「净值-only < 8 s」重述（终于有实测了）：**
+> 逐日快路 41.2 s/次（读的开销 ≈ 被替掉的 OLS，净赚 1.05×）；
+> 批量读天花板 **3.4 s/次**（一条连接、一次范围查询、ndarray 出）。
+> 8 秒预算**可达但只经批量读可达**：`derived_store.read_factor_panel(hashes, dates, ...)`
+> + 引擎入口一次预载。闸 3 的 200 次：逐日 ≈ 2.3 h（不可用），批量 ≈ 11 min（合 A3 预算）。
+> 注意批量读**不受 L2 约束**（§4.3 早有裁决：回测读区间是天然形状，前视保护在写入侧）。
+
+> **★ 引擎侧五条裁决（2026-08-21，Task 13 落地后）**
+>
+> **① `BacktestResult.equity` 必须是【日频】，不是调仓频率。** 周频采样会**低估最大回撤**
+> （看不见周内的低点），而 MDD 喂 Calmar —— 这是朝着好看方向的偏差。
+> 策略周频调仓，但账本每个交易日盯市；成本是稀疏序列，对齐到日频索引上即可。
+> 年化按各自频率：净值 252、IC 52（§9 的「按入参序列自己的频率」）。
+>
+> **② `compute_diagnostics=True` 时 `ic` / `layers` / `attribution` 必须真的产出。**
+> 尤其 `attribution` —— §3.2 的 OLS-vs-WLS 裁决**只能靠它被证伪**，不接等于那条裁决
+> 永远说不清对错。不产出而只发一条 warning，是把一个可检验的断言变成一句空话。
+>
+> **③ `build_targets` 返回三元组 `(final, intended, warnings)`。** 现在引擎为了拿到裁剪前的
+> 意图账本，用 `max_turnover=inf` **再调一次** —— 既多做一遍功，又必须**丢弃第二次的
+> warnings**（否则每条降级报两遍）。丢弃 warning 这件事本身就违反「降级必须可见」。
+>
+> **④ `compute_diagnostics` 只闸住那三个【新增】块；`metrics.compute(full=True)` 恒真。**
+> 这解开了 `types.py` 与 `metrics.compute(full=)` 的矛盾：豁免条件写的是
+> 「只能新增、不得改动 metrics 里的任何一个数」，而 `full=False` 会**删掉**
+> turnover / cost-drag / D6-gap —— 同一个 `param_hash` 产出不同的 metrics 键集。
+> `full=False` 只留给临时分析，绝不由 `compute_diagnostics` 驱动。
+>
+> **⑥ ICIR 摘要（含 Newey-West t 值）进 `ic` 诊断块，不进 `metrics`（2026-08-22 补裁）。**
+> Task 13 指出 ① 与 ④ 在这里互撞，读对了：把 ICIR 放进 `metrics` 会让
+> `compute_diagnostics` 改变 metrics 的键集，而 ④ 禁止这件事。
+> 但只放 `ic_series` 的逐日值同样不行 —— 实测 **`icir()` 在生产代码里无人调用**，
+> 只有测试在调。规格 §4.2 把 NW 调整的 t 值称作「把噪声因子判成有效因子的头号原因」的解药，
+> 而它在真实运行里一个数都不产出。
+> 落点是 `result.ic`：它本身就受 `compute_diagnostics` 闸住，加进去不动 `metrics` 的键集，
+> ④ 与 ① 同时成立。
+>
+> **⑦ 引擎不得在 `cfg.end` 之后成交（2026-08-22 裁决）。**
+> 现在最后一个周频信号日若落在区间末尾，$\tau = T{+}1$ 会掉到 `[start, end]` 之外而成交照做。
+> 那是一笔**结果永远不被度量**的交易：扣了成本却没有对应的收益，净值被低估 ——
+> 方向上保守，但一样是错的。
+> 落法：执行日落在区间外的信号**丢弃并告警**；期末账本按 `end` 收盘**盯市**，不强制清仓
+> （回测本来就不该以清仓收尾）。
+>
+> **⑤ `backtest_run` 的读写归 `derived_store`，`backtest/store.py` 只做转发。**
+> 表在 schema 里躺着却没有写入方，比没有这张表更糟。pickle 是权宜之计
+> （L1 不许 backtest 层碰 duckdb，而当时 `derived_store` 只覆盖了 `factor_value`）。
+
+> **★ `equity` 在本系统里是两个不同的量，必须分清（2026-08-21 裁决）**
+>
+> · `simulate(equity=...)` —— **货币**口径的组合权益（现金 + 持仓市值），
+>   因为它要做 `shares = Δw × equity / price` 的权重↔股数换算。
+> · `BacktestResult.equity` —— **净值**指数，初始 1.0。
+>
+> `charge` 产出的 `total_cost` 跟着前者，是**货币**；而 `metrics.compute` 收到的是后者。
+> 两者相除得到的不是比例而是钱 —— 实测 `cost_drag_annual = 98502.98`，
+> 而 §5.4 说这个数应该落在 **3%–6%**。**成本模型是否接对了，本来只有这一个便宜的体检指标，
+> 单位一错它就废了。**
+>
+> **落法**：`metrics.compute(..., initial_capital: float)`，
+> `cost_frac_t = cost_t / (net_value_t × initial_capital)`。定额本金回测下这个换算是精确的。
+> 并加一条量纲守卫：`cost_drag_annual > 1.0` 就告警 ——
+> 年化成本拖累超过 100% 永远不是真结果，而这是「两条曲线不在同一量纲上」唯一的信号。
+
+> **派生库的写入口在数据层，不在 backtest / factors 层（2026-08-20 裁决）。**
+>
+> `BacktestResult.save()/load()` 与 Task 8 的因子落库都要写 `derived.duckdb`，
+> 而分层闸 **L1 只允许 `ashare/data/**` `import duckdb`** —— 两处都撞上同一堵墙。
+>
+> **不放宽 L1。** 这道闸故意是粗粒度的：「这个文件能不能 import duckdb」AST 查得出来，
+> 「能 import 但只准连 derived.duckdb」查不出来。一旦 `factors/store.py` 能 import duckdb，
+> 它同样能 `duckdb.connect('market.duckdb')` 然后 SELECT 未经掩码的原始行 ——
+> 那正是 D2 要挡的东西。
+>
+> **落法**：新建**公开**模块 `ashare/data/derived_store.py`，独家持有派生库的读写
+> （因子值 + 回测运行记录）。它只收发 DataFrame 与基础类型，**绝不 import
+> `ashare.backtest` 或 `ashare.factors`** —— 否则低层反向依赖高层。
+> `BacktestResult.save()` 负责把自己序列化成 dict 再交给它。
+> **2026-08-21 修正**：本行初稿说「不额外包一层 `factors/store.py` 转发」——
+> 那句话在「转发」的前提下是对的，但 `build` 不是转发，它是「算 → 写」的编排。
+> 实际落地是两层：`derived_store`（L1，持 duckdb，收发 DataFrame）
+> + `factors/store.py`（L3，调 `compute_panel` 与 `write_factor_values`，不碰 duckdb）。
+>
+> 注意 L2（首参 `as_of_date`）**不延伸到** `derived_store`：回测引擎读因子面板天然是
+> 读一个日期区间（2010–2024 一次读完），强行套 `as_of_date` 形状就不对。
+> 这里的前视保护在**写入时**——因子值本身是按 PIT 纪律算出来的。
+
 
 ```python
 # ashare/backtest/types.py
@@ -546,7 +668,7 @@ class BacktestConfig:
     factors: tuple[tuple[str, float], ...]      # 有序元组以便 hash；((name, weight), ...)
     constraints: PortfolioConstraints = PortfolioConstraints()
     cost: CostConfig = CostConfig()
-    macro_timing: bool = True                   # False → 恒定满仓（P2 阶段默认 False）
+    macro_timing: bool = False                   # False → 恒定满仓（P2 阶段默认 False）
     position_floor: float = 0.20
     position_cap: float = 1.00
     benchmark: str = "000985.CSI"
@@ -1301,10 +1423,10 @@ Parquet 冷备的角色**只有两个**：灾备重建、跨工具分析。
 | **B2** | 涨跌停价的**数据可得性**没有兜底方案 | D6 直接依赖 `limit_up/limit_down`。Tushare `stk_limit` 有积分门槛，拿不到就没法判定一字板 | 补 `ashare/data/limits.py` 规则兜底，并把已知规则边界硬编码 + 列出**已知不准确场景**：新股上市首日（主板无涨跌幅/科创创业前 5 日无限制）、退市整理期、ST 戴帽摘帽当日、2019-07-22 科创板开板、2020-08-24 创业板改 20%、北交所 30%。规则算不出的当日 → `limit_unknown` → **该股当日不可交易**（保守，不假设可交易） | **高（威胁 D6）** |
 | **B3** | **停牌日没有占位行** | Tushare `daily` 在停牌日**不返回该股的行**。若不补行，`get_bars(lookback=20)` 拿到的是「最近 20 条记录」而不是「最近 20 个交易日」—— 一只停牌 5 天的股票，它的 `reversal_20` 实际覆盖 25 个交易日。**横截面因子被静默污染，且完全没有报错**。这是全套设计里最隐蔽的 bug 源 | ingest 的 normalize 阶段补行：`在市 AND 日历交易日 AND daily 无行 → 插入 OHLC=NULL, is_suspended=TRUE`。`get_bars` 的 lookback 一律按**日历交易日**计数而非记录数 | **高（静默数据污染）** |
 | **B4** | 因子值没有落库表 | 五闸的闸 3（200 次 shuffle）与闸 5（±30% 参数网格）都要反复用同一批因子值。每次现算 16 因子 × 780 日 = 全量回测最贵的部分，60 s 目标不可能达成 | 补 `factor_value(factor_name, param_hash, trade_date, ts_code, raw_value, processed_value, snapshot_id)` 与 `ashare/factors/store.py`（§4.2）。缓存 key 必须含 `param_hash` + `snapshot_id`，否则会用旧数据算出的因子跑新回测 | 中高（威胁 60 s 指标） |
-| **B5** | 因子的**数据可得起始日**没有表达方式 | `north_hold_chg_20` 依赖北向持股，2016-12 陆股通才有数据。等权合成时若把缺失当 0 参与，2010–2016 年的合成分数会被静默降权（分母算了它，分子恒 0），回测结果失真且难察觉 | `FactorSpec.available_from` + `combine()` 在覆盖率不足或未到起始日时**把该因子从当日分母中剔除并重新归一**（§4.2） | 中高 |
+| **B5** | 因子的**数据可得起始日**没有表达方式 | `north_hold_chg_20` 依赖北向持股，2016-12 陆股通才有数据。**2026-08-21 修正：本栏原来的「后果」说错了危险在哪。** 一个因子【整体】缺失时，「填 0」与「剔除后重新归一」只差一个逐日常数，而 §7.2 只拿分数做排序 —— 300 只票实测目标权重**逐位相同**，B5 原本描述的那种失真不存在。真正的损害在【部分】覆盖：`process` 末尾的 `fillna(0)` 会把缺失的那 40% 判成「行业内平均水平」，同一测试下 50 只选中的票**换掉 13 只**。规则不变（仍是剔除+归一），但理由要改对，否则下一个人会去防错的东西 | `FactorSpec.available_from` + `combine()` 在覆盖率不足或未到起始日时**把该因子从当日分母中剔除并重新归一**（§4.2） | 中高 |
 | **B6** | `stock_status`（ST 历史）**没有数据来源** | 规格 §4.2 凭空定义了这张表，但 Tushare 没有「ST 状态历史区间」接口。没有它，D5 的 ST 剔除只能用「今天是不是 ST」→ 又一个幸存者偏差 | 由 `namechange`（历史名称变更）反推：名称含 `ST`/`*ST` 的区间即 ST 区间。**必须写明边界**：用变更**生效日**而非公告日；名称里的 `S`（未股改）、`退` 单独归类；反推结果与当前 `stock_basic.name` 交叉校验，不一致的进人工清单 | 中高（威胁 D5） |
 | **B7** | 中性化 OLS 的**退化情形**没有规定 | 申万一级 31 个行业里，早年部分行业成分股 < 5 只；某些日期整个池子 < 100 只。设计矩阵秩亏 → OLS 抛异常或返回全 NaN | `get_industry` 把成分 < 5 的行业并入 `__OTHER__`；`neutralize()` 在有效样本 < 30 或秩亏时**返回原始 Series 并记 warning**，而不是静默返回 NaN（§4.2） | 中 |
-| **B8** | 退市清仓的成交价假设**过于乐观** | 规格 §5.3 说「`delist_date` 前最后一个交易日按收盘价强制清仓」。退市整理期股票连续跌停、几乎无流动性，按收盘价成交是系统性乐观偏差 | ① `get_universe` 剔除 `DELIST_PERIOD` 状态（大部分已被 ST 规则覆盖）；② 若持仓中仍出现，按**进入退市整理期首日的收盘价 × 0.5** 清仓入账，并在 `BacktestResult.warnings` 记录。宁可低估也不能高估 | 中 |
+| **B8** | 退市清仓的成交价假设**过于乐观** | 规格 §5.3 说「`delist_date` 前最后一个交易日按收盘价强制清仓」。退市整理期股票连续跌停、几乎无流动性，按收盘价成交是系统性乐观偏差 | ① `get_universe` 剔除 `DELIST_PERIOD` 状态（大部分已被 ST 规则覆盖）；② 若持仓中仍出现，按**最后一个有效后复权收盘价 × 0.5** 清仓入账，并在 `BacktestResult.warnings` 记录。宁可低估也不能高估。**2026-08-20 修正**：初稿写「整理期首日收盘价」，但掩码只看得到当前 bar、不知道整理期哪天开始 —— 拿不到那个值。末日收盘价在连续跌停序列的末端，因此比首日方案更保守，与本行自己的「宁可低估」同向 | 中 |
 | **B9** | 回测 `< 60 s` 没有定义**前置条件** | 「含不含因子预计算」「含不含诊断」口径不同，差 10 倍 | 定死为：**因子已落库 + `compute_diagnostics=True` + 全市场 15 年周频**。因子冷启动预计算另计（< 20 min）。已落进 §1.2 / §9.1 | 中 |
 
 ### 12.3 规格含糊、本文已定死（无需 PM 决策，备案即可）

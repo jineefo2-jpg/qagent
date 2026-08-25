@@ -1,1 +1,8 @@
 pytest>=8.0
+
+# Newey-West HAC 标准误的【参照实现】（算法说明书 §4.2）。生产路径在
+# ashare/backtest/metrics.py 里用 numpy 直接算 Bartlett 核（6 行），一行都不 import 它 ——
+# 挂在这个依赖上的话，它缺席时「NW 钉子」那条测试会静默 skip，而朴素标准误正是
+# 把噪声因子判成有效因子的头号原因。只有 test_our_hac_matches_statsmodels 用它交叉验证
+# 两者逐位一致，防止两份实现各自演化。所以它是【测试依赖】，不是运行依赖。
+statsmodels>=0.14

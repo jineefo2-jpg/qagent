@@ -2,7 +2,7 @@
 
 四条不变量（架构文档 §4.1）：
   Q1 所有 SQL 参数化（? 占位），禁止字符串拼接日期/代码
-  Q2 日期入参在入口 _norm_date() → datetime.date，越界抛 AsOfDateError
+  Q2 日期入参在入口 norm_date() → datetime.date，越界抛 AsOfDateError
   Q3 空结果返回带正确列名的空 DataFrame/Series，绝不返回 None
   Q4 本层 raise（QueryError 子类），不返回 {"error": ...}；dict 化只发生在 agent_tools
 
@@ -69,6 +69,15 @@ def open_db(market_path: str | None = None, derived_path: str | None = None) -> 
     if not pathlib.Path(path).exists():
         raise QueryError(f"market 库不存在: {path}（先跑 python -m ashare.data.pipeline full）")
     ident = _file_ident(path)
+    # ★ 钉住期间不许换库（2026-08-21）：本函数会把 _conn_ident 指到新 inode，
+    #   于是 _conn() 的「磁盘 ident != _conn_ident」比较又相等了，钉住检查【永远不再触发】——
+    #   查询静默落到另一个数据库上，而 _pinned_ident 还宣称钉着。
+    #   那正是 D7 要挡的「一次运行横跨两份数据只记一个 data_snapshot_id」，
+    #   且比直接抛更坏：抛出来的错是特性，静默成功不是。要换库先 close_db()。
+    if _pinned_ident is not None and ident != _pinned_ident:
+        raise QueryError(
+            f"当前快照已钉住（snapshot_id(pin=True)），不能在运行途中 open_db 到另一份数据库。"
+            f"钉住只由 close_db() 解除。路径: {path}")
     if _conn_obj is not None and _conn_ident == ident:
         return
     if _conn_obj is not None:
@@ -145,7 +154,10 @@ def snapshot_id(*, pin: bool = False) -> str:
 
 
 # ══════════════ 日期规范化（Q2）══════════════
-def _norm_date(x: DateLike, *, name: str = "as_of_date") -> _dt.date:
+def norm_date(x: DateLike, *, name: str = "as_of_date") -> _dt.date:
+    """把 str / datetime / date 归一成 date。**公开**（2026-08-21）：
+    data 层之外也要用它（`factors/store.py` 的日期列表），而私有名走 L6。
+    不返回任何行情数据，故不受 L2「首参 as_of_date」约束 —— 已列进白名单。"""
     if isinstance(x, _dt.datetime):
         return x.date()
     if isinstance(x, _dt.date):
@@ -186,7 +198,7 @@ def _open_days() -> list[_dt.date]:
 
 
 def is_trade_date(as_of_date: DateLike) -> bool:
-    d = _norm_date(as_of_date)
+    d = norm_date(as_of_date)
     _check_in_calendar(d)
     cal = _calendar()
     row = cal[cal["trade_date"] == d]
@@ -195,7 +207,7 @@ def is_trade_date(as_of_date: DateLike) -> bool:
 
 def prev_trade_date(as_of_date: DateLike, n: int = 1) -> _dt.date:
     """严格早于 as_of_date 的第 n 个交易日。"""
-    d = _norm_date(as_of_date)
+    d = norm_date(as_of_date)
     _check_in_calendar(d)
     days = _open_days()
     i = bisect.bisect_left(days, d)          # days 已排序；O(log n) 而非每次扫 4000 个日期
@@ -206,7 +218,7 @@ def prev_trade_date(as_of_date: DateLike, n: int = 1) -> _dt.date:
 
 def next_trade_date(as_of_date: DateLike, n: int = 1) -> _dt.date | None:
     """严格晚于 as_of_date 的第 n 个交易日。日历未覆盖到时返回 None（不抛）——回测末端必须处理。"""
-    d = _norm_date(as_of_date)
+    d = norm_date(as_of_date)
     days = _open_days()
     i = bisect.bisect_right(days, d)
     return days[i + n - 1] if i + n - 1 < len(days) else None
@@ -218,11 +230,11 @@ def get_trade_dates(as_of_date: DateLike, *,
     """[start, as_of_date] 闭区间内的交易日。
     freq: 'D' 全部 | 'W' 每周最后一个交易日 | 'M' 每月最后一个交易日。
     'W' 即规格 §5.3 的 weekly_dates 定义 —— 唯一实现点，禁止各处自己算周末。"""
-    end = _norm_date(as_of_date)
+    end = norm_date(as_of_date)
     _check_in_calendar(end)
     all_days = _open_days()
     hi = bisect.bisect_right(all_days, end)
-    lo = bisect.bisect_left(all_days, _norm_date(start, name="start")) if start is not None else 0
+    lo = bisect.bisect_left(all_days, norm_date(start, name="start")) if start is not None else 0
     days = all_days[lo:hi]
     if freq == "D":
         return days
@@ -247,7 +259,7 @@ _PRELOADABLE = ("daily_bar", "daily_basic")     # get_money_flow 不读缓存，
 def preload(start: DateLike, end: DateLike,
             tables: Sequence[str] = ("daily_bar", "daily_basic")) -> None:
     """把区间数据一次性物化进进程内缓存。回测入口调用一次；Live 路径不调用。"""
-    s, e = _norm_date(start, name="start"), _norm_date(end, name="end")
+    s, e = norm_date(start, name="start"), norm_date(end, name="end")
     for t in tables:
         if t not in _PRELOADABLE:
             raise QueryError(f"不可 preload 的表: {t}")
@@ -311,7 +323,7 @@ def explain_universe(as_of_date: DateLike, *,
     ★ 剔除顺序固定：1 退市 → 2 上市满 min_list_days → 3 非 ST → 4 当日有行且非停牌
       → 5 市场过滤 → 6 在 1–5 剩余池内算 20 日均成交额分位，剔后 liquidity_drop_pct（floor）。
     先硬性剔除、后算流动性分位 —— 顺序颠倒会让退市股/次新股参与分位计算，结果不同。"""
-    as_of = _norm_date(as_of_date)
+    as_of = norm_date(as_of_date)
     _check_in_calendar(as_of)
     if not is_trade_date(as_of):
         # 非交易日当天没有 daily_bar 行 → step4 全 False → 静默返回空池。
@@ -370,7 +382,7 @@ def get_stock_basic(as_of_date: DateLike,
                     ts_codes: Sequence[str] | None = None) -> pd.DataFrame:
     """index=ts_code。sw_* 取 as_of_date 时点的行业（industry_member PIT）；
     name 为当前名称（历史名称仅用于推 ST 状态，已固化进 stock_status，不单独存）。"""
-    as_of = _norm_date(as_of_date)
+    as_of = norm_date(as_of_date)
     _check_in_calendar(as_of)
     sql = """
     WITH m AS (
@@ -414,6 +426,18 @@ def get_industry(as_of_date: DateLike,
     return s
 
 
+def industry_source() -> str | None:
+    """`_meta.industry_source`：`'sw'` = 真实申万成分历史；其余（如 `'tushare_static'`）
+    = 今天的行业回填到上市日（P1 在申万成分接口无权限时的降级）。无记录返回 None。
+
+    ★ 行业中性化前【必须】查这个：在降级标签上做行业中性化就是把今天的行业分类
+      用到了历史横截面上，属于前视污染。建库时的 `--allow-static-industry` 只放行建库，
+      不放行中性化 —— 所以这里返回原始值，由调用方（factors/pipeline.py）拒绝。
+    无位置参数，不是取数函数，L2 首参规则不适用。"""
+    r = _conn().execute("SELECT value FROM _meta WHERE key='industry_source'").fetchone()
+    return r[0] if r else None
+
+
 # ══════════════ 行情（D8：对外只给后复权；原始价不出 query 层）══════════════
 _BAR_FIELDS = ("open", "high", "low", "close", "pre_close", "vol", "amount")
 _PRICE_FIELDS = ("open", "high", "low", "close", "pre_close")
@@ -450,7 +474,7 @@ def _bars_raw(as_of: _dt.date, ts_codes: Sequence[str], start: _dt.date | None) 
 def _window_start(as_of: _dt.date, lookback: int | None, start: DateLike | None) -> _dt.date | None:
     """lookback 按【交易日历条数】换算成起始日（不是记录数——D9 已保证两者相等，此处仍按日历算）。
     与 start 都给时取交集（更晚者）。"""
-    s = _norm_date(start, name="start") if start is not None else None
+    s = norm_date(start, name="start") if start is not None else None
     if lookback is not None:
         if lookback <= 0:
             raise QueryError("lookback 必须为正整数")
@@ -475,7 +499,7 @@ def get_bars(as_of_date: DateLike,
     ★ 永远额外返回 is_suspended 列。停牌日有行但 OHLC 为 NaN —— 填充与否由因子自己决定。
     ★ 本函数【不返回】limit_up / limit_down：复权价与原始涨跌停价比较是 bug 温床，
       涨跌停信息只能通过 get_tradable_mask 获取。"""
-    as_of = _norm_date(as_of_date)
+    as_of = norm_date(as_of_date)
     _check_in_calendar(as_of)
     if not fields:
         raise UnknownFieldError("fields 不能为空")
@@ -520,7 +544,7 @@ def get_daily_basic(as_of_date: DateLike,
                     fields: Sequence[str] = ("pe_ttm", "pb", "ps_ttm", "total_mv", "circ_mv", "turnover_rate_f"),
                     lookback: int = 1) -> pd.DataFrame:
     """lookback=1 → 单日，index=ts_code；lookback>1 → MultiIndex (ts_code, trade_date)。"""
-    as_of = _norm_date(as_of_date)
+    as_of = norm_date(as_of_date)
     _check_in_calendar(as_of)
     if not fields:
         raise UnknownFieldError("fields 不能为空")
@@ -557,7 +581,7 @@ def get_index_bars(as_of_date: DateLike,
                    lookback: int = 250,
                    fields: Sequence[str] = ("close", "pe_ttm")) -> pd.DataFrame:
     """index=trade_date。用于 beta_250 中性化与 P3 宏观 ERP / trend_ma200。"""
-    as_of = _norm_date(as_of_date)
+    as_of = norm_date(as_of_date)
     _check_in_calendar(as_of)
     if not fields:
         raise UnknownFieldError("fields 不能为空")
@@ -589,7 +613,7 @@ def get_tradable_mask(exec_date: DateLike,
       open==limit_up 且 high==low → can_buy=False（limit_up_seal，一字涨停买不进）
       open==limit_down 且 high==low → can_sell=False（limit_down_seal，一字跌停卖不出）
       delist_date <= exec_date   → can_buy=False, can_sell=True（delisted，强制清仓路径）"""
-    d = _norm_date(exec_date, name="exec_date")
+    d = norm_date(exec_date, name="exec_date")
     _check_in_calendar(d, name="exec_date")
     if not is_trade_date(d):
         raise AsOfDateError(f"exec_date={d} 不是交易日")
@@ -705,7 +729,7 @@ def get_financial(as_of_date: DateLike,
       重述行的 ann_date 可能仍是原始公告日（Tushare 不保证），True 不是 PIT 安全的。
     额外返回列：ann_date、end_date、report_type、lag_days(= as_of - ann_date)。
     注：只返回有可见披露的股票（index 是 ts_codes 的子集）；get_financial_ttm 则对无数据的股票返回 NaN。"""
-    as_of = _norm_date(as_of_date)
+    as_of = norm_date(as_of_date)
     _check_in_calendar(as_of)
     if not fields:
         raise UnknownFieldError("fields 不能为空")
@@ -750,7 +774,7 @@ def get_financial_ttm(as_of_date: DateLike,
     存量科目：期初期末均值 =（最新 + 上年同期）/ 2；
     比率科目（roe 等）不支持 TTM → UnknownFieldError。
     任一所需期次不可见（PIT）→ NaN，不外推。返回 index=ts_codes 顺序的 Series。"""
-    as_of = _norm_date(as_of_date)
+    as_of = norm_date(as_of_date)
     _check_in_calendar(as_of)
     if field in _TTM_FLOW:
         kind = "flow"
@@ -790,7 +814,7 @@ def get_macro(as_of_date: DateLike,
               lookback_periods: int = 60) -> pd.DataFrame:
     """WHERE publish_date <= as_of_date；同 (indicator, period) 取 publish_date 最大者。
     index=period，columns=indicator，附加列 <indicator>__publish_date 便于审计。"""
-    as_of = _norm_date(as_of_date)
+    as_of = norm_date(as_of_date)
     _check_in_calendar(as_of)
     inds = list(indicators)
     cols: list[str] = []
@@ -830,7 +854,7 @@ def get_money_flow(as_of_date: DateLike,
     """MultiIndex (ts_code, trade_date)，按交易日历补齐 lookback 个交易日。
     ★ hk_hold_ratio 仅 2016-12 起有数据；早于该日 / 缺失日返回 NaN，不填 0（B5）——
       调用方（north_hold_chg_20 因子）靠 FactorSpec.available_from 声明。"""
-    as_of = _norm_date(as_of_date)
+    as_of = norm_date(as_of_date)
     _check_in_calendar(as_of)
     if lookback < 1:
         raise QueryError("lookback 必须 >= 1")
