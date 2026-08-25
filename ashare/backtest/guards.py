@@ -5,13 +5,17 @@
 一道该拦没拦的闸比没有这道闸更坏 —— 它把一条烂策略洗成「走过严格流程」的结论，
 而报告上看不出任何异常。
 
-五处「看起来像成功的失败」，每一处都在下面有对应的守卫和用例：
+下面每一处「看起来像成功的失败」都有对应的守卫和用例：
 
   · 样本内 Sharpe ≤ 0 时，`SR_oos ≥ 0.6·SR_is` 是个**负**门槛，−0.2 会被判成"守住了 60%"；
   · 真实 Sharpe 是 NaN 时，`SR_b ≥ NaN` 恒为假 → `p = 1/(n+1)` → 噪声被判**显著**；
   · 置换对照里的 NaN 若不计入分子，p 被系统性压小，方向恒指向"显著"；
   · 邻域平均 Sharpe ≤ 0 时 PeakRatio 是负数，`< 1.3` 恒真 → 孤峰满分过闸；
-  · θ* 混进自己的邻域会把均值朝 SR* 拉高 → PeakRatio 变小 → 尖峰洗成高原。
+  · θ* 混进自己的邻域会把均值朝 SR* 拉高 → PeakRatio 变小 → 尖峰洗成高原；
+  · θ̂ 逐折不动而测试窗净值一路阴跌 —— 「参数稳定」洗白一个只在拟合窗内成立的策略
+    （2026-08-24 评审 C1：闸 2 判业绩不判参数离散度）；
+  · ⚠ 级告警是引擎**最后**追加的那条，普通告警上百条时一刀切的封顶恰好把它吃掉（C2）；
+  · 邻域里算不出的点被剔出均值 → 分母变小 → 尖峰借势把自己洗成高原（C3）。
 
 ★ 1【`engine_version` 绝不进 D7 指纹】（§8 闸 1）指纹是 `(param_hash, data_snapshot_id)`。
   哈希在两个方向上都会杀死这道闸：**撞车**（两组参数一个指纹）把新实验读成重放；
@@ -47,8 +51,9 @@
   θ* 的识别因此退化成一次 `param_hash` 比较，同时不会凭空造出"分家"的指纹。
 
 已知边界（有意的）：
-  · 闸 2 的稳定性判据是 `max(θ̂)/min(θ̂)`，阈值 `_WF_MAX_PARAM_RATIO` **是本实现选的** ——
-    §8 只给了一个例子（动量窗口在 20 与 250 之间横跳即不稳定），没给数。见该常量的注释。
+  · 闸 2 的判据是**拼接样本外的业绩**（`≥ 0.6 × 闸 1 的样本内 Sharpe`，2026-08-24 裁决）；
+    θ̂ 的离散度（`theta_spread` / `theta_flips`）只进 detail、**不设阈值** ——
+    上一版实现的 `max/min > 3.0` 是编出来的数，规格已裁掉，这个判据不许再长回来。
   · 网格只扫**因子关键字参数**与 `PortfolioConstraints` 字段；扫不到 `cost.*`
     （成本是闸 4 的事）与 `position_cap`（择时属 P3）。
 """
@@ -61,22 +66,20 @@ import math
 from dataclasses import dataclass
 from typing import Any, Mapping, Optional, Sequence
 
+import pandas as pd
+
 from ..factors.base import get_factor
 from .engine import run_backtest
+from .metrics import compute as _metrics_compute
 from .store import OOS_CUTOFF
 from .types import BacktestConfig, PortfolioConstraints
 
 _ONE_DAY = _dt.timedelta(days=1)
 
-# §8 的三个数值判据。都写成常量是为了让"这个阈值从哪来"只有一个答案。
-_OOS_SR_RATIO = 0.6            # 闸 1：SR_oos ≥ 0.6 × SR_is
+# §8 的数值判据。都写成常量是为了让"这个阈值从哪来"只有一个答案。
+_OOS_SR_RATIO = 0.6            # 闸 1 与闸 2 共用：SR_oos ≥ 0.6 × SR_is（闸 2 复用，不新造数字）
 _SHUFFLE_ALPHA = 0.05          # 闸 3：p < 0.05
 _PEAK_RATIO_MAX = 1.3          # 闸 5：PeakRatio < 1.3
-# 闸 2：§8 只说「不出现量级跳变」并举例 20 ↔ 250（12.5 倍），**没有给阈值**。
-# 取 3.0 的理由：一个 lookback 窗口差 3 倍已经是另一个因子了，而"量级"（10 倍）
-# 松到连 20 ↔ 180 都算稳定。阈值宁可紧 —— 闸判过而实盘不稳，代价比反过来大。
-# 这是本实现的选择，不是规格的裁决；改它只需改这一个数。
-_WF_MAX_PARAM_RATIO = 3.0
 
 _MAX_WARNINGS = 20             # detail['warnings'] 的条数上限（闸 3 有 200 次运行）
 NOT_RUN = "未运行"
@@ -119,21 +122,29 @@ def _sharpe(res) -> float:
 
 
 def _uniq(warns: Sequence[str]) -> list:
-    """去重保序 + 封顶。**被砍掉多少条要说出来** —— 悄悄截断等于降级不可见。"""
+    """去重保序 + 封顶。两条规矩：**被砍掉多少条要说出来**（悄悄截断等于降级不可见），
+    **⚠ 打头的一条都不许砍**（2026-08-24 评审 C2）—— 引擎把「⚠ D7 重复指纹」追加在
+    告警列表**末尾**（`append_oos_run` 是 `run_backtest` 的最后一步），而 `combine` /
+    `build_targets` 的普通告警逐日带文本、动辄上百条：一刀切的封顶砍掉的恰好就是那条 ⚠。
+    闸判过而它不见了，等于把污染洗掉 —— 正是模块头说的那种最坏形状。"""
     out: list = []
     seen: set = set()
     for w in warns:
         if w not in seen:
             seen.add(w)
             out.append(w)
-    if len(out) <= _MAX_WARNINGS:
+    rest = [w for w in out if not w.lstrip().startswith("⚠")]
+    if len(rest) <= _MAX_WARNINGS:
         return out
-    return out[:_MAX_WARNINGS] + [f"…另有 {len(out) - _MAX_WARNINGS} 条去重后的告警未列出"]
+    flagged = [w for w in out if w.lstrip().startswith("⚠")]
+    return flagged + rest[:_MAX_WARNINGS] + [
+        f"…另有 {len(rest) - _MAX_WARNINGS} 条去重后的告警未列出（⚠ 级不参与封顶，已全数保留）"]
 
 
 def _note(text: str, warns: Sequence[str]) -> str:
     """底层运行喊了 ⚠（比如「D7 重复指纹」）就顶到 note 上。
-    闸判过而这条不见了，等于把污染洗掉 —— 而 note 是操作员唯一必看的那一行。"""
+    闸判过而这条不见了，等于把污染洗掉 —— 而 note 是操作员唯一必看的那一行。
+    这里的计数等于截断**前**的 ⚠ 条数：`_uniq` 保证 ⚠ 级永不被封顶砍掉。"""
     n = sum(1 for w in warns if w.lstrip().startswith("⚠"))
     return f"⚠ 底层运行有 {n} 条重大告警（见 detail.warnings） · {text}" if n else text
 
@@ -274,19 +285,62 @@ def _folds(start: _dt.date, end: _dt.date, train_years: int, test_years: int) ->
         tr_s = _plus_years(tr_s, test_years)
 
 
+def _theta_dispersion(grid: Mapping[str, Sequence], chosen: Sequence[Mapping]) -> "tuple[dict, dict]":
+    """θ̂ 的两个离散度，只进 detail、**不设阈值**（2026-08-24 裁决）。分开报是因为它们是
+    不同现象：`spread = max/min` 把单调漂移与振荡混在一起，而漂移可能是真实的 regime
+    变化（A 股持有期随市场成熟而缩短，是信息不是噪声）；`flips` = 逐折差分的**变号次数**，
+    才是初稿说的「反复横跳」。非数值/非正数的参数没有「量级」，两个量都报 None
+    （逐折取值在 detail.folds 里看得到）。"""
+    spread: dict = {}
+    flips: dict = {}
+    for k in grid:
+        vals = [t[k] for t in chosen]
+        nums = [v for v in vals if isinstance(v, (int, float)) and not isinstance(v, bool)]
+        if len(nums) == len(vals) and nums and min(nums) > 0:
+            spread[k] = max(nums) / min(nums)
+            # 差分为 0 的段没有方向，不算「跳」：[60,54,60,60,54] 的变号是 2 不是 3。
+            signs = [1 if b > a else -1 for a, b in zip(nums, nums[1:]) if b != a]
+            flips[k] = sum(1 for s, t in zip(signs, signs[1:]) if s != t)
+        else:
+            spread[k] = flips[k] = None
+    return spread, flips
+
+
 def gate2_walk_forward(cfg: BacktestConfig, train_years: int = 5, test_years: int = 1,
-                       *, grid: Optional[Mapping[str, Sequence]] = None,
-                       max_param_ratio: float = _WF_MAX_PARAM_RATIO) -> GateResult:
-    """滚动训练 + 前滚测试，判各年最优参数 θ̂_y 有没有量级跳变（§8 闸 2）。
+                       *, grid: Optional[Mapping[str, Sequence]] = None) -> GateResult:
+    """滚动训练 + 前滚测试，判**拼接样本外**的业绩（§8 闸 2，2026-08-24 裁决）：
+
+        `SR(逐折测试窗收益按时间串联) ≥ 0.6 × SR_is（闸 1 的那一次样本内）`
+
+    判在业绩上，不判在参数离散度上：闸 2 相对闸 1 多出来的是「换多个 regime 还成不成立」，
+    参数稳不稳只是失败时的**一种解释**。θ̂ 的离散度经 `_theta_dispersion` 进 detail，
+    不设阈值 —— 上一版的 `max/min > 3.0` 判据把「参数几乎不动、样本外业绩死掉」的策略
+    认证成「稳定」（评审 C1 的假通过原型），已整个裁掉。
+
+    两侧的口径（都来自裁决原文）：
+      · 样本内 = 闸 1 的那一次（`start`…2019-12-31）。「拼起来的样本内」**不存在** ——
+        5 年训练窗逐年重叠，串联会把 2011–2018 每年数进去多次。本函数自己再跑这一次：
+        config 与闸 1 的 `is_cfg` 逐位相同（`param_hash` 相等，评审实测），结果可互换，
+        将来引擎有按指纹的结果缓存时这一次自动免费。
+      · 样本外 = 各折测试窗的**逐日收益**按折序串联（测试窗按构造首尾相接），
+        Sharpe 用引擎同一个 `metrics.compute` 算 —— 两侧同一把尺子，0.6 才有意义。
 
     **泄漏就在训练/测试的接缝上**：θ̂_y 只能由**训练窗**的 Sharpe 选出。
     因子的 lookback 回看到测试窗之前是正常的（那是数据窗口），拿测试窗的结果选参数不是。
-    折窗一律钉在样本内（模块头 ★2）。
+    折窗一律钉在样本内（模块头 ★2）。任何一折选不出 θ̂、或给不出测试窗净值 → 判不过：
+    缺掉的折不会自己变成中性，「N 折的结论」不能由 N−k 折得出（评审 I1）。
     """
     if not grid:
         return GateResult("gate2", False, {},
                           f"{NOT_RUN}：没有参数网格。walk-forward 的产出是逐年的最优参数 θ̂_y，"
                           f"没有候选集就没有可选的东西")
+    if train_years < 1 or test_years < 1:
+        # test_years=0 会让 `_folds` 的前滚步长为 0、永不推进 —— 一个连 `run_all_gates`
+        # 的 try/except 都接不住的挂死。当场拒绝。
+        return GateResult("gate2", False,
+                          {"train_years": train_years, "test_years": test_years},
+                          f"{NOT_RUN}：train_years={train_years} / test_years={test_years}，"
+                          f"两个窗宽都至少要 1 年（0 会让前滚永不推进）")
     try:
         points = _grid_points(cfg, grid)
     except ValueError as e:
@@ -299,9 +353,30 @@ def gate2_walk_forward(cfg: BacktestConfig, train_years: int = 5, test_years: in
                           f"{NOT_RUN}：{cfg.start}~{end}（已钉在样本内）放不下一个完整的 "
                           f"{train_years}+{test_years} 年折")
 
+    # 样本内那一次 —— 与闸 1 的 is_cfg 逐位相同。先跑它：算不出 / 不为正时，
+    # 5 折 × g 个候选的折内运行全部免掉（同闸 3「真实 Sharpe 都没有就不跑对照」的先例）。
+    is_cfg = _bare(cfg, end=end)
+    is_res = run_backtest(is_cfg)
+    runw: list = list(is_res.warnings)
+    sr_is = _sharpe(is_res)
+    detail: dict = {"in_sample": _stamp(is_cfg, is_res), "ratio_required": _OOS_SR_RATIO,
+                    "n_folds": len(folds)}
+    if not _finite(sr_is):
+        detail["warnings"] = warns = _uniq(runw)
+        return GateResult("gate2", False, detail,
+                          _note(f"样本内 Sharpe 是 {sr_is}，算不出来：0.6 倍门槛没有基准"
+                                f"（算不出 ≠ 达标）", warns))
+    if not sr_is > 0:
+        detail["warnings"] = warns = _uniq(runw)
+        return GateResult("gate2", False, detail,
+                          _note(f"样本内 Sharpe {sr_is:.4f} ≤ 0，0.6 倍门槛是个负数 —— "
+                                f"样本内就不赚钱，拼接样本外无从「保持」", warns))
+
     own: list = []
-    runw: list = []
     rows: list = []
+    rets: list = []                 # 各折测试窗的逐日收益，按折序串联
+    holes: list = []                # 选出了 θ̂ 却给不出测试窗收益的折
+    anchor = None                   # 拼接净值的 1.0 锚点：第一段测试窗净值的第一天
     for tr_s, tr_e, te_s, te_e in folds:
         scored: list = []
         for point, pcfg in points:
@@ -310,7 +385,7 @@ def gate2_walk_forward(cfg: BacktestConfig, train_years: int = 5, test_years: in
             scored.append((point, _sharpe(r), pcfg))
         ok = [s for s in scored if _finite(s[1])]
         if not ok:
-            own.append(f"{tr_s}~{tr_e} 这一折的候选参数全都算不出 Sharpe，该折不参与稳定性判定")
+            own.append(f"⚠ {tr_s}~{tr_e} 这一折的候选参数全都算不出 Sharpe，选不出 θ̂")
             rows.append({"train": [tr_s.isoformat(), tr_e.isoformat()],
                          "test": [te_s.isoformat(), te_e.isoformat()],
                          "theta": None, "train_sharpe": None, "test_sharpe": None})
@@ -318,40 +393,62 @@ def gate2_walk_forward(cfg: BacktestConfig, train_years: int = 5, test_years: in
         point, sr, pcfg = max(ok, key=lambda s: s[1])
         tr = run_backtest(_bare(pcfg, start=te_s, end=te_e))
         runw += tr.warnings
+        eq = pd.Series(tr.equity, dtype=float)
+        if len(eq) >= 2:
+            # 逐日收益手写成 shift-除法：`pct_change` 默认 ffill，会把净值缺口桥成一段
+            # 编造的收益（metrics.py 为同一个坑写过注释）。缺口在这里保持 NaN，下游有闸。
+            rets.append((eq / eq.shift(1) - 1.0).iloc[1:])
+            if anchor is None:
+                anchor = eq.index[0]
+        else:
+            holes.append(f"{te_s}~{te_e}")
         rows.append({"train": [tr_s.isoformat(), tr_e.isoformat()],
                      "test": [te_s.isoformat(), te_e.isoformat()],
-                     "theta": dict(point), "train_sharpe": sr, "test_sharpe": _num(_sharpe(tr))})
+                     "theta": dict(point), "train_sharpe": sr,
+                     "test_sharpe": _num(_sharpe(tr)), "n_test_days": int(len(eq))})
 
-    chosen = [r["theta"] for r in rows if r["theta"] is not None]
-    if not chosen:
-        warns = _uniq(own + runw)
-        return GateResult("gate2", False, {"folds": rows, "warnings": warns},
-                          _note("没有任何一折选得出参数：无从判断稳定性", warns))
-
-    ranges: dict = {}
-    unstable: list = []
-    for k in grid:
-        vals = [t[k] for t in chosen]
-        nums = [v for v in vals if isinstance(v, (int, float)) and not isinstance(v, bool)]
-        if len(nums) == len(vals) and nums and min(nums) > 0:
-            ratio = max(nums) / min(nums)
-            ranges[k] = {"values": vals, "min": min(nums), "max": max(nums), "ratio": ratio}
-            if ratio > max_param_ratio:
-                unstable.append(f"{k} 在 {min(nums)}~{max(nums)} 之间跳（{ratio:.2f} 倍）")
-        else:
-            # 非数值 / 非正数的参数没有"量级"可言，判据退化成"每折都选了同一个"
-            ranges[k] = {"values": vals, "min": None, "max": None, "ratio": None}
-            if len(set(map(repr, vals))) > 1:
-                unstable.append(f"{k} 逐折取值不一致：{vals}")
-
+    chosen = [row["theta"] for row in rows if row["theta"] is not None]
+    detail["folds"] = rows
+    detail["n_chosen"] = len(chosen)
+    detail["theta_spread"], detail["theta_flips"] = _theta_dispersion(grid, chosen)
     warns = _uniq(own + runw)
-    detail = {"folds": rows, "ranges": ranges, "max_param_ratio": max_param_ratio,
-              "n_folds": len(folds), "warnings": warns}
-    passed = not unstable
+    detail["warnings"] = warns
+    if len(chosen) < len(folds):
+        # 评审 I1 重放过的假通过：2/5 折选不出参数、被悄悄丢掉，note 却说「5 折全部选参完毕」。
+        return GateResult("gate2", False, detail,
+                          _note(f"只有 {len(chosen)}/{len(folds)} 折选得出 θ̂：拼接样本外缺了"
+                                f"选不出参数的那几折，{len(chosen)} 折说不出"
+                                f"「{len(folds)} 折」的结论", warns))
+    if holes:
+        return GateResult("gate2", False, detail,
+                          _note(f"{len(holes)}/{len(folds)} 折的测试窗净值不足两个点"
+                                f"（{'; '.join(holes)}）：拼接样本外缺了这些段，判不过", warns))
+
+    rr = pd.concat(rets)
+    detail["n_oos_returns"] = int(len(rr))
+    n_nan = int(rr.isna().sum())
+    if n_nan:
+        return GateResult("gate2", False, detail,
+                          _note(f"拼接样本外的 {len(rr)} 个逐日收益里有 {n_nan} 个算不出"
+                                f"（测试窗净值有缺口）：缺口不会自己变成中性，判不过", warns))
+    pooled = pd.concat([pd.Series([1.0], index=[anchor]), (1.0 + rr).cumprod()])
+    # 丢掉 compute 的告警是有意的：benchmark=None 是本闸的构造（只判 Sharpe，不判相对指标），
+    # 「未提供基准」不是降级；而 pooled 由上面已验无 NaN 的收益构造，缺值告警不可能触发。
+    m, _ = _metrics_compute(pooled, pd.DataFrame(), pd.DataFrame(), None, full=False,
+                            initial_capital=cfg.initial_capital, periods_per_year=252)
+    sr_pool = m.get("sharpe")
+    sr_pool = float("nan") if sr_pool is None else float(sr_pool)
+    detail["sharpe_oos_pooled"] = _num(sr_pool)
+    if not _finite(sr_pool):
+        return GateResult("gate2", False, detail,
+                          _note(f"拼接样本外的 Sharpe 是 {sr_pool}，算不出来：算不出 ≠ 达标",
+                                warns))
+    detail["threshold"] = _OOS_SR_RATIO * sr_is
+    passed = sr_pool >= detail["threshold"]
     return GateResult("gate2", passed, detail,
-                      _note(f"{len(folds)} 折全部选参完毕：" +
-                            ("各参数稳定（≤ %.2f 倍）" % max_param_ratio if passed
-                             else "；".join(unstable)), warns))
+                      _note(f"拼接样本外 Sharpe {sr_pool:.4f} vs 门槛 {detail['threshold']:.4f}"
+                            f"（= 0.6 × 样本内 {sr_is:.4f}）：{'过' if passed else '不过'}；"
+                            f"θ̂ 离散度见 detail（不设阈值）", warns))
 
 
 # ══════════════ 闸 3 · Shuffle 置换检验 ══════════════
@@ -372,7 +469,8 @@ def gate3_shuffle(cfg: BacktestConfig, n: int = 200, seed: int = 0) -> GateResul
     base_cfg = _bare(cfg, shuffle_seed=None)
     own: list = []
     if cfg.shuffle_seed is not None:
-        own.append(f"传入的 config 自带 shuffle_seed={cfg.shuffle_seed}（那已经是一次置换对照，"
+        # ⚠ 前缀是承重的：_note 只把 ⚠ 级顶到 note 上，闸自己喊的降级不该比引擎的低一级。
+        own.append(f"⚠ 传入的 config 自带 shuffle_seed={cfg.shuffle_seed}（那已经是一次置换对照，"
                    f"不是真回测），基线已按 shuffle_seed=None 重跑")
     real = run_backtest(base_cfg)
     runw: list = list(real.warnings)
@@ -404,7 +502,7 @@ def gate3_shuffle(cfg: BacktestConfig, n: int = 200, seed: int = 0) -> GateResul
             n_ge += 1
 
     if n_bad:
-        own.append(f"{n_bad}/{n} 次置换对照的 Sharpe 非有限（σ=0 或净值算不出），"
+        own.append(f"⚠ {n_bad}/{n} 次置换对照的 Sharpe 非有限（σ=0 或净值算不出），"
                    f"已按保守口径计入 p 值分子；置换分布的有效样本因此少了这些次")
     p = (1 + n_ge) / (n + 1)
     warns = _uniq(own + runw)
@@ -432,6 +530,12 @@ def gate4_cost_stress(cfg: BacktestConfig, multiplier: float = 2.0) -> GateResul
     冲击成本的**封顶在乘 multiplier 之前**（`cost.charge` 模块头）—— 否则被封顶的
     那批交易在 2.0 下纹丝不动，而它们恰恰是最不流动、最该压力测试的那批。
     """
+    if not multiplier >= 1:
+        # 评审 I4：multiplier=0.0 会以【零成本】跑一遍并报「闸 4 通过」—— 加压不是减压。
+        # `not ≥ 1` 而不是 `< 1`：NaN 两边比较都是 False，得走进这一支而不是溜过去。
+        return GateResult("gate4", False, {"multiplier": multiplier},
+                          f"multiplier={multiplier} < 1：加压不是减压 —— 乘一个小于 1 的数是在"
+                          f"给成本打折，打折跑出来的「通过」证明不了任何抗压性")
     stressed = _bare(cfg, cost=_dc.replace(cfg.cost,
                                            multiplier=cfg.cost.multiplier * multiplier))
     base_hash = cfg.param_hash()
@@ -489,7 +593,6 @@ def gate5_param_plateau(cfg: BacktestConfig,
     star_hash = star_cfg.param_hash()
     star_res = run_backtest(star_cfg)
     runw: list = list(star_res.warnings)
-    own: list = []
     sr_star = _sharpe(star_res)
 
     nb: dict = {}
@@ -505,30 +608,36 @@ def gate5_param_plateau(cfg: BacktestConfig,
                     "peak_ratio": None, "mean_neighbour": None}
     ok = [v for v in nb.values() if _finite(v)]
     if not ok:
-        detail["warnings"] = _uniq(own + runw)
+        detail["warnings"] = _uniq(runw)
         return GateResult("gate5", False, detail,
                           _note(f"邻域里没有一个点算得出 Sharpe（共 {len(nb)} 个）：无从判高原",
                                 detail["warnings"]))
     if len(ok) < len(nb):
-        own.append(f"邻域 {len(nb)} 个点里有 {len(nb) - len(ok)} 个算不出 Sharpe，"
-                   f"已从均值里剔除 —— 分母因此变小，PeakRatio 偏乐观还是偏保守取决于剔掉的是谁")
+        # 评审 C3 重放：3 邻域 1 个 NaN，真比值 1.6941（不过）被剔除后洗成 1.1294（过）。
+        # 「剔掉再取均值」的方向取决于剔掉的是谁 —— 拿不准就判不过（模块头）。
+        bad = sorted(k for k, v in nb.items() if not _finite(v))
+        detail["warnings"] = _uniq(runw)
+        return GateResult("gate5", False, detail,
+                          _note(f"邻域 {len(nb)} 个点里有 {len(bad)} 个算不出 Sharpe"
+                                f"（{'; '.join(bad)}）：把它们剔出均值会让尖峰借小分母把自己"
+                                f"洗成高原，判不过", detail["warnings"]))
     mean_nb = sum(ok) / len(ok)
     detail["mean_neighbour"] = mean_nb
     if not _finite(sr_star):
-        detail["warnings"] = _uniq(own + runw)
+        detail["warnings"] = _uniq(runw)
         return GateResult("gate5", False, detail,
                           _note(f"θ* 自己的 Sharpe 是 {sr_star}，比值无从算起",
                                 detail["warnings"]))
     if not mean_nb > 0:
         # 均值 ≤ 0 时 PeakRatio 是负数（或 ±inf），`< 1.3` 恒真 ——
         # 一座周围全是坑的孤峰会拿到满分。这正是本闸要挡的形状。
-        detail["warnings"] = _uniq(own + runw)
+        detail["warnings"] = _uniq(runw)
         return GateResult("gate5", False, detail,
                           _note(f"邻域平均 Sharpe {mean_nb:.4f} ≤ 0：θ* 周围全是坑，"
                                 f"比值会变成负数而「小于 1.3」，这恰恰是最坏的尖峰",
                                 detail["warnings"]))
     ratio = sr_star / mean_nb
-    warns = _uniq(own + runw)
+    warns = _uniq(runw)
     detail.update(peak_ratio=ratio, warnings=warns)
     passed = ratio < _PEAK_RATIO_MAX
     return GateResult("gate5", passed, detail,
