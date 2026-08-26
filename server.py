@@ -46,6 +46,7 @@ from auth import (
     is_email_login_enabled, email_request_code, email_verify_code,
 )
 from auth.oauth import redirect_base
+from auth import owner_gate
 
 # ── 入口结果缓存配置 ──
 # 同样的 query+上下文，5 分钟内直接重放（跳过 LLM）
@@ -110,6 +111,10 @@ if not _APP_SECRET:
     print("⚠️  未设置 APP_SECRET_KEY，本次启动生成临时密钥（重启后 OAuth state 会失效）")
 app.add_middleware(SessionMiddleware, secret_key=_APP_SECRET,
                     max_age=600, same_site="lax")
+
+# 单所有者锁定：固定账号 + X-Agent-Key，全局中间件兜底（auth/owner_gate.py）。
+# 注册在 SessionMiddleware 之后 = 请求时最先执行，任何 /api 路由都越不过去。
+owner_gate.install(app)
 
 
 # ════════════════════════════════════════════════════════════
@@ -1051,16 +1056,11 @@ def api_memory_prune(days: int = 180,
 #   /api/auth/providers         前端拿可用登录方式
 # ════════════════════════════════════════════════════════════
 
-ALLOWED_EMAILS_RAW = _os.getenv("AUTH_EMAIL_WHITELIST", "").strip()
-ALLOWED_EMAILS = {e.strip().lower() for e in ALLOWED_EMAILS_RAW.split(",")
-                   if e.strip()}
-
-
 def _email_allowed(email: str) -> bool:
-    """空白名单 = 开放注册；否则按集合校验"""
-    if not ALLOWED_EMAILS:
-        return True
-    return (email or "").lower() in ALLOWED_EMAILS
+    """单所有者锁定：只有 OWNER_EMAIL 一个账号（owner_gate 中间件另有全局兜底，
+    这里拦在建会话之前是为了给出友好的错误信息）。原 AUTH_EMAIL_WHITELIST
+    的「空白名单 = 开放注册」语义已被锁定取代。"""
+    return owner_gate.is_owner(email)
 
 
 @app.get("/api/auth/providers")
@@ -1071,7 +1071,8 @@ def api_auth_providers():
         providers.append("email")
     return {
         "providers": providers,
-        "whitelist_enabled": bool(ALLOWED_EMAILS),
+        "whitelist_enabled": True,      # 单所有者锁定恒为真
+        "owner_lock": True,             # 前端据此显示访问密钥输入框
     }
 
 
@@ -1094,6 +1095,9 @@ class EmailVerifyRequest(BaseModel):
 @app.post("/auth/email/send_code")
 def auth_email_send_code(body: EmailCodeRequest):
     """发送邮箱验证码"""
+    if not _email_allowed(body.email):
+        # 锁定在发码之前：非所有者连验证码邮件都不该收到（也省一次 SMTP）
+        return {"success": False, "error": "该邮箱未被授权登录"}
     ok, msg = email_request_code(body.email)
     if not ok:
         return {"success": False, "error": msg}

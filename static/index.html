@@ -1405,8 +1405,15 @@
 <!-- 登录弹窗 -->
 <div class="login-modal-mask" id="loginModalMask" onclick="if(event.target===this)hideLoginModal()">
   <div class="login-modal" role="dialog" aria-modal="true" aria-labelledby="loginModalTitle">
-    <h3 id="loginModalTitle">登录以使用交易功能</h3>
-    <p>未登录用户可使用全部分析功能；交易类操作（账户查询、下单、撤单）需要登录。</p>
+    <h3 id="loginModalTitle">登录（仅限所有者）</h3>
+    <p>本部署已锁定：仅所有者账号可登录，且所有功能需要访问密钥。</p>
+    <div style="margin-bottom:12px;">
+      <input id="agentKeyInput" type="password" placeholder="访问密钥（管理员生成的固定 key）"
+             oninput="setAgentKey(this.value)" autocomplete="off"
+             style="width:100%;padding:8px 10px;border:1px solid var(--border);
+                    border-radius:6px;background:var(--bg);color:var(--text);
+                    font-size:13px;outline:none;box-sizing:border-box;">
+    </div>
     <div id="loginBtnsArea">
       <!-- 1. 邮箱（国内首选，无需翻墙） -->
       <button class="login-provider-btn" id="loginEmailBtn"
@@ -1556,6 +1563,28 @@ function getDeviceId() {
 }
 const DEVICE_ID = getDeviceId();
 
+// ── 单所有者锁定：固定访问密钥（服务端 AGENT_ACCESS_KEY，登录弹窗里输入一次）──
+function getAgentKey() {
+  try { return localStorage.getItem('agent_key') || ''; } catch (_) { return ''; }
+}
+function setAgentKey(k) {
+  k = (k || '').trim();
+  try { localStorage.setItem('agent_key', k); } catch (_) {}
+  // 同步写 cookie：EventSource（/api/broker/stream）发不了自定义头，服务端两处都认
+  document.cookie = 'agent_key=' + encodeURIComponent(k) + '; path=/; SameSite=Lax; max-age=31536000';
+}
+if (getAgentKey()) setAgentKey(getAgentKey());   // 旧会话只有 localStorage 时补种 cookie
+
+// 补丁打在 window.fetch 上而不是只改 api()：本文件和 brokers.html 里还有若干裸 fetch 调用点
+const _rawFetch = window.fetch.bind(window);
+window.fetch = function (url, options = {}) {
+  if (typeof url === 'string' && url.charAt(0) === '/') {
+    options.headers = { ...(options.headers || {}), 'X-Agent-Key': getAgentKey() };
+    options.credentials = options.credentials || 'same-origin';
+  }
+  return _rawFetch(url, options);
+};
+
 // 统一封装：所有 fetch 自动带上 X-Device-Id（cookie 浏览器自动带上，无需手动）
 async function api(url, options = {}) {
   options.headers = {
@@ -1589,6 +1618,7 @@ function showLoginModal() {
     hasAny ? 'none' : '';
   // 默认显示按钮区，隐藏邮箱面板
   hideEmailLoginPanel();
+  document.getElementById('agentKeyInput').value = getAgentKey();
   document.getElementById('loginModalMask').classList.add('show');
 }
 
