@@ -64,6 +64,7 @@ import numpy as np
 import pandas as pd
 
 from ..data import query
+from ..factors import store as factor_store
 from ..factors.base import combine, compute_factor, compute_panel, get_factor
 from . import metrics
 from .cost import charge
@@ -82,8 +83,7 @@ _PERIODS_PER_YEAR = 252
 # 两份各自演化的实现会让 §3.2「OLS 而非 WLS」的裁决永远无法证伪。
 _SIZE_FACTOR = "log_mv"
 _IMPACT_WINDOW = 20      # 冲击成本的回看窗（§5.4：ADV20 与滞后振幅同一个 20 日窗）
-# T 收盘取价的回看：60 个交易日足够 ffill 过一个持有期的停牌，仍取不到就让无价守卫去炸。
-_PRICE_LOOKBACK, _PRICE_LOOKBACK_DEEP = 60, 1600   # 深窗=停牌兜底：2015 潮一停数百日，1600≈6.5 年交易日
+_PRICE_LOOKBACK, _PRICE_LOOKBACK_DEEP = 60, 1600   # 60 日 ffill 常规停牌；深窗兜 2015 潮的数百日长停
 _PRELOAD_TABLES = ("daily_bar", "daily_basic")
 
 POSITION_COLS = ["score", "target_weight", "intended_weight", "filled_weight", "shares",
@@ -110,9 +110,8 @@ def _preload_start(cfg: BacktestConfig) -> _dt.date:
 
 def _tclose(as_of: _dt.date, codes: Sequence[str]) -> pd.Series:
     """T 日收盘后复权价。停牌日 `get_bars` 给 NaN，这里 ffill 到最后一个有效收盘 ——
-    `build_targets` 明确拒收 NaN 的 `prev_weights`（「敞口算不出来」≠「没有敞口」），
-    停牌持仓的价必须由调用方定，定不出来才该炸。仍缺者（长停牌，真库验收实测
-    600827 死在 2015）升级 `_PRICE_LOOKBACK_DEEP` 再查。ponytail: 常数窗，不够再加档。"""
+    `build_targets` 明确拒收 NaN 的 `prev_weights`（「敞口算不出来」≠「没有敞口」）。
+    仍缺者（长停牌，真库验收 600827 死在 2015）升级 `_PRICE_LOOKBACK_DEEP` 再查。"""
     out = pd.Series(float("nan"), index=pd.Index(list(codes)), dtype=float)
     for lb in (_PRICE_LOOKBACK, _PRICE_LOOKBACK_DEEP):
         miss = out.index[out.isna()].tolist()
@@ -229,8 +228,8 @@ def run_backtest(config: BacktestConfig, *, on_progress: Optional[Callable[[int,
 
     Args:
         config: 策略口径。`param_hash()` 是它的 D7 指纹。
-        on_progress: `(已完成期数, 总期数)`，每个调仓日调一次（含被跳过的空池日）。
-        use_store: 因子缓存快路径，透传 combine 与诊断 compute_panel（补裁 ①：kwarg 不进 config/指纹）。
+        on_progress: 每个调仓日调一次 `(已完成期数, 总期数)`；use_store: 因子缓存快路径开关，
+            透传 combine 与诊断 compute_panel（补裁 ①：kwarg 不进 config/指纹）。
 
     Returns:
         `BacktestResult`。`equity` 是**日频净值指数**（初始 1.0），其余是逐期明细，
@@ -256,6 +255,7 @@ def run_backtest(config: BacktestConfig, *, on_progress: Optional[Callable[[int,
     snapshot = query.snapshot_id(pin=True)
     query.preload(_preload_start(cfg), cfg.end, _PRELOAD_TABLES)
     dates = query.get_trade_dates(cfg.end, start=cfg.start, freq="W")
+    use_store and factor_store.preload_window({n: get_factor(n).param_hash() for n, _ in cfg.factors}, dates)
 
     cash = float(cfg.initial_capital)
     holdings = pd.Series(dtype=float, name="shares").rename_axis("ts_code")

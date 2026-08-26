@@ -106,6 +106,35 @@ def build(names: Sequence[str], dates: Sequence[_dt.date], *,
 
 
 _READ_MEMO: dict = {}           # 单条：{"key": ..., "val": ...}，见 read_current 内的注释
+_WINDOW: dict = {}              # 整窗预取，见 preload_window
+
+
+def preload_window(param_hashes: Mapping[str, str], dates: Sequence) -> None:
+    """回测入口的一次性预取：把 read_current 的「逐日开连接 + 三次查询」折成
+    1 次批量判命中 + 1 次整窗读 + 逐日 pivot。键含 snapshot_id —— 换库自动失效；
+    read_current 对窗口外的日期、或没预取过的进程，照走逐日路径。契约不变：
+    判命中仍是对当前快照判，池子核对与整批作废的判词都在 read_current 原位。"""
+    if not param_hashes:
+        return
+    ds = sorted({query.norm_date(x, name="date") for x in dates})
+    if not ds:
+        return
+    snap = query.snapshot_id()
+    cur = derived_store.current_factor_dates(param_hashes, ds)
+    long = derived_store.read_factor_window(param_hashes, ds[0], ds[-1])
+    names = list(param_hashes)
+    by_date: dict = {}
+    if len(long):
+        for d, g in long.groupby("trade_date"):
+            raw = (g.pivot(index="ts_code", columns="factor_name", values="raw_value")
+                    .reindex(columns=names).rename_axis(columns=None))
+            proc = (g.pivot(index="ts_code", columns="factor_name", values="processed_value")
+                     .reindex(columns=names).rename_axis(columns=None))
+            by_date[d] = (raw, proc)
+    _WINDOW["key"] = (tuple(sorted(param_hashes.items())), snap)
+    _WINDOW["dates"] = set(ds)
+    _WINDOW["cur"] = cur
+    _WINDOW["by_date"] = by_date
 
 
 def read_current(param_hashes: Mapping[str, str], as_of_date, universe: Sequence[str]
@@ -167,12 +196,16 @@ def read_current(param_hashes: Mapping[str, str], as_of_date, universe: Sequence
     #   「判命中」的语义是**对当前数据快照**判 —— promote 换库后备忘录若还回放旧命中，
     #   等于把 test_a_snapshot_change_sends_the_store_path_back_to_computing 钉死的
     #   契约整个绕过。快照一换，键就变，判命中照常重跑。
-    memo_key = (d, tuple(sorted(param_hashes.items())), hash(tuple(codes)), query.snapshot_id())
+    snap = query.snapshot_id()
+    memo_key = (d, tuple(sorted(param_hashes.items())), hash(tuple(codes)), snap)
     if _READ_MEMO.get("key") == memo_key:
         got, warns = _READ_MEMO["val"]
         return {n: (r.copy(), p.copy()) for n, (r, p) in got.items()}, list(warns)
 
-    cur = derived_store.current_factor_dates(param_hashes, [d])
+    # 整窗预取命中（preload_window）→ 判命中用批量结果、取值用内存 pivot，零 SQL。
+    # 窗口外的日期 / 没预取的进程 / 快照已换 → win=False，照走下面的逐日路径。
+    win = _WINDOW.get("key") == (memo_key[1], snap) and d in _WINDOW["dates"]
+    cur = _WINDOW["cur"] if win else derived_store.current_factor_dates(param_hashes, [d])
     hit = {n: h for n, h in param_hashes.items() if (n, d) in cur}
     if not hit:
         return {}, []
@@ -183,6 +216,17 @@ def read_current(param_hashes: Mapping[str, str], as_of_date, universe: Sequence
                     f"get_universe 的池子（{len(pool)} 只），而落库的 processed_value 是在"
                     f"建库那个横截面上算的（去极值/中性化/zscore 全是横截面统计量），"
                     f"换个池子它就不是同一个数 —— 改为现算"]
+
+    if win:
+        pair = _WINDOW["by_date"].get(d)
+        if pair is None:
+            # 批量判说在、窗口里却没有行：preload 的两次查询之间库被改了。同逐日路径的
+            # 作废语义 —— 整批作废现算，且必须出声。
+            return {}, [f"{d} 因子缓存整批作废：窗口判命中与取值不一致，改为现算"]
+        raw_w, proc_w = pair
+        out = {n: (raw_w[n].reindex(codes), proc_w[n].reindex(codes)) for n in hit}
+        _READ_MEMO["key"], _READ_MEMO["val"] = memo_key, (out, [])
+        return {n: (r.copy(), p.copy()) for n, (r, p) in out.items()}, []
 
     raw, w1 = derived_store.read_factor_values(hit, d, codes, processed=False)
     proc, w2 = derived_store.read_factor_values(hit, d, codes, processed=True)

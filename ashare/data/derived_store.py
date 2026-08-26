@@ -213,6 +213,35 @@ def read_factor_values(param_hashes: Mapping[str, str], date, universe: Sequence
                .rename_axis(columns=None)), warns
 
 
+_WINDOW_COLS = ["factor_name", "trade_date", "ts_code", "raw_value", "processed_value"]
+
+
+def read_factor_window(param_hashes: Mapping[str, str], start, end) -> pd.DataFrame:
+    """[start, end] 整窗、**当前快照**下的因子长表 —— 一次连接一次查询。
+    这是 `factors.store.read_current` 文档里预留的那张「批量口」变更单（2026-08-27
+    性能专项兑现）：快照过滤与 `read_factor_values` 同一句，判命中语义不变，
+    省掉的是逐日 511 次「开连接 + 两次单日查询」。库不存在返回空表（= 什么都没算过）。"""
+    if not param_hashes:
+        return pd.DataFrame(columns=_WINDOW_COLS)
+    s = query.norm_date(start, name="start")
+    e = query.norm_date(end, name="end")
+    snap = query.snapshot_id()
+    conn = _read_conn()
+    if conn is None:
+        return pd.DataFrame(columns=_WINDOW_COLS)
+    try:
+        got = conn.execute(
+            f"SELECT {', '.join(_WINDOW_COLS)} FROM factor_value "
+            f"WHERE trade_date BETWEEN ? AND ? AND snapshot_id = ? "
+            f"AND (factor_name, param_hash) IN ({_pairs_clause(param_hashes)})",
+            [s, e, snap, *_pairs_params(param_hashes)]).fetchdf()
+    finally:
+        conn.close()
+    if len(got):
+        got["trade_date"] = pd.to_datetime(got["trade_date"]).dt.date
+    return got
+
+
 def drop_out_of_universe(param_hashes: Mapping[str, str], date, universe: Sequence[str]) -> int:
     """删掉这一天**不在当前股票池里**的旧因子值，返回删除行数。
 
