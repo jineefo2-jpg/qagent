@@ -4769,6 +4769,17 @@ def _to_openai_tools(anthropic_schemas: list) -> list:
     ]
 
 
+# ── A 股本地数据只读工具（架构 §6.2）──
+# 必须在下面 _OPENAI_TOOLS 固化【之前】extend：那两个列表在模块加载时就定死了，
+# 之后再 extend TOOL_SCHEMAS 不会生效（本次集成唯一的顺序陷阱，架构文档原文）。
+# 不进 TRADING_TOOLS：那道闸的语义是「需要用户身份」，全市场公开数据没有用户维度。
+try:
+    from ashare.agent_tools import ASHARE_TOOL_REGISTRY, ASHARE_TOOL_SCHEMAS
+    TOOL_REGISTRY.update(ASHARE_TOOL_REGISTRY)
+    TOOL_SCHEMAS.extend(ASHARE_TOOL_SCHEMAS)
+except ImportError:      # duckdb 未装 / ashare 不可用 → A 股功能整体缺席，其余照常
+    pass
+
 # 模块加载时转换一次，避免每轮迭代重算
 _OPENAI_TOOLS = _to_openai_tools(TOOL_SCHEMAS)
 # 未登录用户的工具清单（去掉交易类）—— 预先生成避免每次请求重新计算
