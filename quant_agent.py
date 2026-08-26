@@ -1148,6 +1148,9 @@ def factor_score(symbol: str, style: str = "balanced") -> dict:
     多因子综合打分。
     style: balanced(均衡) / value(价值) / growth(成长) / momentum(动量)
     返回 0-100 分综合得分，含各因子贡献度。
+    ⚠ A 股个股已被本地因子库取代（2026-08-26 工具审计）：联网现抓的打分无 PIT、
+    无复权口径、不可复现，与 ashare 平台的因子结论会互相矛盾 —— 本地平台在位时
+    A 股代码引导改用 get_factor_exposure（见下方市场路由处的拦截）；美股/港股照旧。
     """
     symbol = symbol.upper().strip()
 
@@ -1183,6 +1186,15 @@ def factor_score(symbol: str, style: str = "balanced") -> dict:
     real = None
     real_source = None
     if market == "A":
+        try:
+            import ashare.agent_tools  # noqa: F401 — 本地平台在位即拦截；缺席退回旧路径
+            return {"success": False, "error_type": "use_local_factors",
+                    "error": "A 股因子分析请改用本地因子库（PIT、后复权、可复现），不再联网现算",
+                    "hint": "用 get_factor_exposure(as_of=某交易日, ts_code=该股) 查因子暴露，"
+                            "或 get_factor_exposure(as_of, factor=因子名) 查排名；"
+                            "因子按周频调仓日预计算，无值时返回里会提示最近的调仓日"}
+        except ImportError:
+            pass
         real = _compute_factors_akshare(symbol)
         real_source = "AKShare 实时计算"
     elif market in ("US", "HK"):
@@ -1910,6 +1922,16 @@ def trading_calendar(action: str, date: str = None, date2: str = None) -> dict:
     ⚠️ 工作日近似交易日，未排除法定节假日
     """
     tz = ZoneInfo("Asia/Shanghai")
+
+    # A 股真实交易日历（本地库，含节假日）优先；覆盖不到（日历未及该日期 / parse 动作）
+    # 落回下面的「工作日近似」（2026-08-26 工具审计）。
+    try:
+        from ashare.agent_tools import local_calendar
+        _local = local_calendar(action, date, date2)
+        if _local is not None:
+            return _local
+    except ImportError:
+        pass
 
     def parse(s):
         if not s or s.lower() in ("today", "now", "今天"):
@@ -3221,12 +3243,26 @@ def historical_prices(symbol: str, days: int = 60) -> dict:
     sources_tried = []
     result = None
 
+    # ── 优先级 0: A 股走本地数仓（2026-08-26 工具审计）——后复权、含退市股、零 API 消耗，
+    #    口径与回测引擎同源（D8）。本地拿不到（库缺票/日历未覆盖）自动落回网络源。──
+    if market == "A":
+        try:
+            from ashare.agent_tools import local_history
+            r0 = local_history(symbol, days)
+            sources_tried.append({"source": "本地数仓", "ok": r0.get("success"),
+                                  "error": r0.get("error")})
+            if r0.get("success"):
+                result = r0
+        except ImportError:
+            pass
+
     # ── 优先级 1: AKShare（数据最全，A 股最快）──
-    r = _hist_akshare(symbol, days)
-    sources_tried.append({"source": "AKShare", "ok": r.get("success"),
-                          "error": r.get("error")})
-    if r.get("success"):
-        result = r
+    if result is None:
+        r = _hist_akshare(symbol, days)
+        sources_tried.append({"source": "AKShare", "ok": r.get("success"),
+                              "error": r.get("error")})
+        if r.get("success"):
+            result = r
 
     # ── 优先级 2: 新浪 K 线（A 股专属 fallback，避免与 AKShare 同时挂）──
     if result is None and market == "A":

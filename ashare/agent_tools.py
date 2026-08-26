@@ -144,3 +144,88 @@ processed 为全市场横截面 z 分（未乘 direction）。非调仓日无值
 
 # ★ 冻结的只读集合，供隔离测试断言（架构 §6.3 M1/M2）
 ASHARE_READONLY_TOOLS = frozenset(ASHARE_TOOL_REGISTRY)
+
+
+# ══════════════ 老工具的 A 股本地路由（非 LLM 工具，供 quant_agent 内部调用）══════════════
+# 这三个助手把 quant_agent 里「A 股联网现抓」的路径替换成本地真值（2026-08-26 工具审计）：
+# historical_prices → local_history（后复权，D8 口径与回测同源，含退市股）；
+# trading_calendar → local_calendar（真实交易日历，替掉「工作日近似」）。
+# 失败/未覆盖一律返回 None 或 {"success": False}，由调用方回退网络源 —— 不劫持非 A 股路径。
+
+def to_ts_code(symbol: str) -> Optional[str]:
+    """600519 / 600519.SH / sh600519 / 000858.SZ / 300750 → Tushare ts_code；非 A 股返回 None。"""
+    s = (symbol or "").strip().upper().replace(".SS", ".SH")
+    if s[:2] in ("SH", "SZ", "BJ") and s[2:].isdigit() and len(s) == 8:
+        return f"{s[2:]}.{s[:2]}"
+    if "." in s:
+        code, _, ex = s.partition(".")
+        return f"{code}.{ex}" if ex in ("SH", "SZ", "BJ") and code.isdigit() else None
+    if s.isdigit() and len(s) == 6:
+        if s[0] == "6":
+            return f"{s}.SH"
+        if s[0] in ("0", "3"):
+            return f"{s}.SZ"
+        if s[0] in ("4", "8", "9"):
+            return f"{s}.BJ"
+    return None
+
+
+def local_history(symbol: str, days: int) -> dict:
+    """近 days 个交易日的后复权 K 线，返回结构与 quant_agent._hist_akshare 成功体同构。"""
+    try:
+        query.open_db()
+        ts = to_ts_code(symbol)
+        if ts is None:
+            return {"success": False, "error": f"无法识别为 A 股代码: {symbol}"}
+        tds = query.get_trade_dates(_dt_today())
+        if not tds:
+            return {"success": False, "error": "本地日历为空"}
+        bars = query.get_bars(tds[-1], [ts], lookback=int(days),
+                              fields=("open", "high", "low", "close", "vol"))
+        if bars.empty or ts not in bars.index.get_level_values(0):
+            return {"success": False, "error": f"本地库无 {ts} 行情"}
+        df = bars.xs(ts, level=0)
+        # 停牌日 get_bars 按设计给 NaN 价（D9 占位行）——网络源的 K 线不含停牌日，滤掉对齐
+        df = df[~df["is_suspended"].astype(bool)]
+        if df.empty:
+            return {"success": False, "error": f"{ts} 窗口内全为停牌日"}
+        closes = [float(x) for x in df["close"]]
+        if not all(c == c and c > 0 for c in closes):      # NaN != NaN
+            return {"success": False, "error": f"{ts} 价格序列含缺值，回退网络源"}
+        return {"success": True, "symbol": ts, "market": "A股",
+                "days_returned": len(df),
+                "dates": [str(d) for d in df.index],
+                "open": [float(x) for x in df["open"]],
+                "close": closes,
+                "high": [float(x) for x in df["high"]],
+                "low": [float(x) for x in df["low"]],
+                "volume": [int(v) if v == v else 0 for v in df["vol"]],
+                "data_source": "本地数仓（后复权，与回测同一口径；停牌日不计入，与网络源 K 线一致）"}
+    except Exception as e:                     # noqa: BLE001 — 路由失败即回退，不外抛
+        return {"success": False, "error": f"{type(e).__name__}: {e}"}
+
+
+def local_calendar(action: str, date: Optional[str], date2: Optional[str]) -> Optional[dict]:
+    """trading_calendar 的本地实现。覆盖不到（日历未及/格式不认）返回 None → 调用方走近似逻辑。"""
+    try:
+        query.open_db()
+        if action == "today":
+            today = _dt_today()
+            tds = query.get_trade_dates(today)
+            return {"success": True, "date": str(today),
+                    "is_trading_day": bool(tds and tds[-1] == today),
+                    "timezone": "Asia/Shanghai (CST)",
+                    "note": "A 股法定交易日历（本地库，含节假日）"}
+        if action == "trading_days_between" and date and date2:
+            days = query.get_trade_dates(date2, start=date)
+            return {"success": True, "from": date, "to": date2,
+                    "trading_days": len(days),
+                    "note": "A 股法定交易日历（本地库，含节假日）"}
+        return None
+    except Exception:                          # noqa: BLE001 — 日历未覆盖该日期等，回退近似
+        return None
+
+
+def _dt_today():
+    import datetime
+    return datetime.date.today()
