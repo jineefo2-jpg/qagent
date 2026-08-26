@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- A 股每日增量更新：工作日 21:30（睡眠错过会在唤醒后补跑）。
+     安装: cp scripts/com.jineefo.ashare-daily.plist ~/Library/LaunchAgents/ &&
+           launchctl load ~/Library/LaunchAgents/com.jineefo.ashare-daily.plist
+     卸载: launchctl unload ~/Library/LaunchAgents/com.jineefo.ashare-daily.plist -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.jineefo.ashare-daily</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>/Users/jineefo/Documents/AI-Agent/demo/scripts/ashare_daily_update.sh</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <array>
+    <dict><key>Weekday</key><integer>1</integer><key>Hour</key><integer>21</integer><key>Minute</key><integer>30</integer></dict>
+    <dict><key>Weekday</key><integer>2</integer><key>Hour</key><integer>21</integer><key>Minute</key><integer>30</integer></dict>
+    <dict><key>Weekday</key><integer>3</integer><key>Hour</key><integer>21</integer><key>Minute</key><integer>30</integer></dict>
+    <dict><key>Weekday</key><integer>4</integer><key>Hour</key><integer>21</integer><key>Minute</key><integer>30</integer></dict>
+    <dict><key>Weekday</key><integer>5</integer><key>Hour</key><integer>21</integer><key>Minute</key><integer>30</integer></dict>
+  </array>
+  <key>StandardOutPath</key><string>/Users/jineefo/Documents/AI-Agent/demo/logs/ashare_daily_launchd.log</string>
+  <key>StandardErrorPath</key><string>/Users/jineefo/Documents/AI-Agent/demo/logs/ashare_daily_launchd.log</string>
+</dict>
+</plist>

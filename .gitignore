@@ -39,3 +39,4 @@ data/ashare_derived.duckdb*
 data/ashare_staging/
 data/rate_state.json
 data/parquet_export/
+logs/
