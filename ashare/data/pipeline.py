@@ -181,13 +181,17 @@ def run_full(staging_path: str, src, *, start: _dt.date, end: _dt.date,
 
 # ══════════════ 增量 ══════════════
 def run_daily(market_path: str, staging_path: str, src, *, today: _dt.date | None = None,
+              until: _dt.date | None = None,
               indices: Sequence[str] = DEFAULT_INDICES,
               allow_static_industry: bool = False,
               financials: bool | None = None, cross_source: bool = False,
               progress: Callable[[str], None] | None = None) -> dict:
     """market → 拷贝为 staging → 增量写 → 校验。start = 库里最后一根 K 线的下一天，end = clamp 到 <= today 的最后交易日。
     observed_on = today：宏观新 period 以今天为 observed 公布日（只能是真实拉取日，不得回填）。
-    financials=None：按周节流（距上次扫描 ≥ 7 天才全市场扫财报）；True/False 强制。"""
+    financials=None：按周节流（距上次扫描 ≥ 7 天才全市场扫财报）；True/False 强制。
+    until：**盘中补漏专用** —— K 线终点额外收紧到 <= until（补漏在任意时刻跑都安全：
+    昨天为止各数据源必然已落齐），而 observed_on 仍是真实的 today。不能用 today 冒充：
+    把 today 伪装成昨天会把宏观 observed 可见日整体回填提前一天，那是 D4 的前视方向。"""
     today = today or _dt.date.today()
     if not os.path.exists(market_path):
         raise FileNotFoundError(f"market 不存在: {market_path}，先跑 full")
@@ -210,7 +214,7 @@ def run_daily(market_path: str, staging_path: str, src, *, today: _dt.date | Non
     try:
         _db.init_schema(conn)
         ingest.ingest_calendar(conn, src, today - _dt.timedelta(days=14), today + _dt.timedelta(days=90))
-        end = clamp_end(conn, today)
+        end = clamp_end(conn, min(today, until) if until else today)
         last = last_bar_date(conn)
         if last is None:
             start: _dt.date | None = end
@@ -249,6 +253,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     f.add_argument("--end", default=None)
     d = sub.add_parser("daily")
     d.add_argument("--today", default=None)
+    d.add_argument("--until", default=None,
+                   help="盘中补漏：K 线终点收紧到 <= 该日（通常传昨天），observed_on 仍是真实今天")
     d.add_argument("--financials", choices=("auto", "yes", "no"), default="auto",
                    help="财报全市场扫描：auto=按周节流（默认）/ yes=本次强制扫 / no=跳过")
     for p in (f, d):
@@ -272,8 +278,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                            allow_static_industry=a.allow_static_industry, progress=log)
     else:
         today = _dt.date.fromisoformat(a.today) if a.today else _dt.date.today()
+        until = _dt.date.fromisoformat(a.until) if a.until else None
         fin = {"auto": None, "yes": True, "no": False}[a.financials]
-        summary = run_daily(a.market, a.staging, src, today=today, financials=fin,
+        summary = run_daily(a.market, a.staging, src, today=today, until=until, financials=fin,
                             cross_source=a.cross_source,
                             allow_static_industry=a.allow_static_industry, progress=log)
     print(summary)

@@ -223,6 +223,29 @@ def test_run_full_then_daily_end_to_end(tmp_path):
         query.close_db()
 
 
+def test_daily_until_clamps_bars_but_not_observed_on(tmp_path, monkeypatch):
+    """盘中补漏（--until）：K 线终点收紧到 <= until，而宏观 observed 可见日必须仍是
+    真实 today —— 用 today 伪装成昨天会让 observed 行提前一天可见（D4 的前视方向）。"""
+    staging = tmp_path / "s.duckdb"; market = tmp_path / "m.duckdb"
+    src = FakeSrc()
+    pipeline.run_full(str(staging), src, start=D(2024, 1, 2), end=D(2024, 1, 4),
+                      indices=(), allow_static_industry=True)
+    promote.promote(str(staging), str(market))
+
+    seen: dict = {}
+    real = ingest.ingest_macro
+    def spy(conn, s, ind, start, end, *, observed_on=None):
+        seen[ind] = observed_on
+        return real(conn, s, ind, start, end, observed_on=observed_on)
+    monkeypatch.setattr(ingest, "ingest_macro", spy)
+
+    s = pipeline.run_daily(str(market), str(tmp_path / "s2.duckdb"), src,
+                           today=D(2024, 1, 8), until=D(2024, 1, 7),
+                           indices=(), allow_static_industry=True)
+    assert s["start"] == D(2024, 1, 5) and s["end"] == D(2024, 1, 5)   # 01-07 周日 → clamp 到周五
+    assert seen and set(seen.values()) == {D(2024, 1, 8)}              # observed_on = 真实 today
+
+
 def test_run_daily_noop_when_up_to_date(tmp_path):
     staging = tmp_path / "staging.duckdb"; market = tmp_path / "market.duckdb"
     src = FakeSrc()

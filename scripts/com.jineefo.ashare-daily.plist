@@ -12,6 +12,8 @@
     <string>/bin/zsh</string>
     <string>/Users/jineefo/Documents/AI-Agent/demo/scripts/ashare_daily_update.sh</string>
   </array>
+  <!-- 登录/开机即执行一次补漏 pass（脚本内部对「无欠账」秒级 no-op、对「未到 21 点」跳过当日 pass）-->
+  <key>RunAtLoad</key><true/>
   <key>StartCalendarInterval</key>
   <array>
     <dict><key>Weekday</key><integer>1</integer><key>Hour</key><integer>21</integer><key>Minute</key><integer>30</integer></dict>
