@@ -83,7 +83,7 @@ _PERIODS_PER_YEAR = 252
 _SIZE_FACTOR = "log_mv"
 _IMPACT_WINDOW = 20      # 冲击成本的回看窗（§5.4：ADV20 与滞后振幅同一个 20 日窗）
 # T 收盘取价的回看：60 个交易日足够 ffill 过一个持有期的停牌，仍取不到就让无价守卫去炸。
-_PRICE_LOOKBACK = 60
+_PRICE_LOOKBACK, _PRICE_LOOKBACK_DEEP = 60, 1600   # 深窗=停牌兜底：2015 潮一停数百日，1600≈6.5 年交易日
 _PRELOAD_TABLES = ("daily_bar", "daily_basic")
 
 POSITION_COLS = ["score", "target_weight", "intended_weight", "filled_weight", "shares",
@@ -111,13 +111,14 @@ def _preload_start(cfg: BacktestConfig) -> _dt.date:
 def _tclose(as_of: _dt.date, codes: Sequence[str]) -> pd.Series:
     """T 日收盘后复权价。停牌日 `get_bars` 给 NaN，这里 ffill 到最后一个有效收盘 ——
     `build_targets` 明确拒收 NaN 的 `prev_weights`（「敞口算不出来」≠「没有敞口」），
-    停牌持仓的价必须由调用方定，定不出来才该炸。"""
-    codes = list(codes)
-    panel = (query.get_price_panel(as_of, codes, "close", lookback=_PRICE_LOOKBACK)
-             if codes else pd.DataFrame())
-    if not len(panel):
-        return pd.Series(float("nan"), index=codes, dtype=float)
-    return panel.ffill().iloc[-1].reindex(codes).astype(float)
+    停牌持仓的价必须由调用方定，定不出来才该炸。仍缺者（长停牌，真库验收实测
+    600827 死在 2015）升级 `_PRICE_LOOKBACK_DEEP` 再查。ponytail: 常数窗，不够再加档。"""
+    out = pd.Series(float("nan"), index=pd.Index(list(codes)), dtype=float)
+    for lb in (_PRICE_LOOKBACK, _PRICE_LOOKBACK_DEEP):
+        miss = out.index[out.isna()].tolist()
+        if miss and len(p := query.get_price_panel(as_of, miss, "close", lookback=lb)):
+            out.update(p.ffill().iloc[-1].reindex(miss).astype(float))
+    return out
 
 
 def _value_at_open(exec_date: _dt.date, holdings: pd.Series, cash: float) -> float:
