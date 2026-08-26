@@ -105,6 +105,9 @@ def build(names: Sequence[str], dates: Sequence[_dt.date], *,
     return written, warns
 
 
+_READ_MEMO: dict = {}           # 单条：{"key": ..., "val": ...}，见 read_current 内的注释
+
+
 def read_current(param_hashes: Mapping[str, str], as_of_date, universe: Sequence[str]
                  ) -> Tuple[Dict[str, Tuple[pd.Series, pd.Series]], List[str]]:
     """读回**可以直接当现算用**的因子值：`({因子: (raw, processed)}, warnings)`。
@@ -158,6 +161,17 @@ def read_current(param_hashes: Mapping[str, str], as_of_date, universe: Sequence
     d = query.norm_date(as_of_date, name="as_of_date")
     codes = list(universe)
 
+    # 单条备忘录：引擎一个调仓日 combine 与诊断 compute_panel 背靠背查同参（2026-08-27
+    # 性能 profile：本函数占 44%，其中一半是这对重复）。只存最近一条。
+    # ★ 键必须含 query.snapshot_id()（约 1ms，远小于省下的两次 80ms 读）：
+    #   「判命中」的语义是**对当前数据快照**判 —— promote 换库后备忘录若还回放旧命中，
+    #   等于把 test_a_snapshot_change_sends_the_store_path_back_to_computing 钉死的
+    #   契约整个绕过。快照一换，键就变，判命中照常重跑。
+    memo_key = (d, tuple(sorted(param_hashes.items())), hash(tuple(codes)), query.snapshot_id())
+    if _READ_MEMO.get("key") == memo_key:
+        got, warns = _READ_MEMO["val"]
+        return {n: (r.copy(), p.copy()) for n, (r, p) in got.items()}, list(warns)
+
     cur = derived_store.current_factor_dates(param_hashes, [d])
     hit = {n: h for n, h in param_hashes.items() if (n, d) in cur}
     if not hit:
@@ -176,7 +190,9 @@ def read_current(param_hashes: Mapping[str, str], as_of_date, universe: Sequence
         # current_factor_dates 说在、read 说不在：两次查询之间换了库（未钉住的调用方）。
         # 此时两列各自命中的是哪一代已经说不清，整批作废现算 —— 而且必须出声。
         return {}, [f"{d} 因子缓存整批作废：判命中与取值之间数据库变了，改为现算"] + w1 + w2
-    return {n: (raw[n], proc[n]) for n in hit}, []
+    out = {n: (raw[n], proc[n]) for n in hit}
+    _READ_MEMO["key"], _READ_MEMO["val"] = memo_key, (out, [])
+    return {n: (r.copy(), p.copy()) for n, (r, p) in out.items()}, []
 
 
 def _long_frame(todo: Sequence[str], hashes: Mapping[str, str], d: _dt.date,

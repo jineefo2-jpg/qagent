@@ -19,6 +19,7 @@ import pathlib
 from typing import Sequence, Union
 
 import duckdb
+import numpy as np
 import pandas as pd
 
 from . import _db
@@ -49,6 +50,48 @@ _conn_ident: tuple[int, int] | None = None   # (st_dev, st_ino)：识别影子�
 _conn_realpath: str | None = None
 _market_path: str | None = None
 _PRELOAD: dict[str, pd.DataFrame] = {}
+_PRELOAD_POS: dict[str, dict] = {}          # 表 → 定位索引，见 _build_preload_pos
+
+
+def _build_preload_pos(df: pd.DataFrame) -> dict:
+    """预加载表的定位索引。表按 (ts_code, trade_date) 排序 → 每只票一段连续区间：
+    {code: (lo, hi)} + datetime64 日期数组，切片退化为每票两次二分 + 一次 take。
+    替掉的三次全表 object 扫描（isin + 两次日期比较，1400 万行 × 每期数次）
+    在 2026-08-27 的性能 profile 里占引擎 46% 耗时。"""
+    if not len(df):
+        return {"groups": {}, "dates": None, "min": None, "max": None}
+    codes = df["ts_code"].to_numpy()
+    starts = np.flatnonzero(np.r_[True, codes[1:] != codes[:-1]])
+    ends = np.r_[starts[1:], len(codes)]
+    groups = {codes[lo]: (int(lo), int(hi)) for lo, hi in zip(starts, ends)}
+    return {"groups": groups,
+            "dates": pd.to_datetime(df["trade_date"]).to_numpy(),
+            "min": df["trade_date"].min(), "max": df["trade_date"].max()}
+
+
+def _preload_slice(table: str, codes: Sequence[str], start, end) -> "pd.DataFrame | None":
+    """[start, end] × codes 的缓存切片；未预加载或窗口越出缓存返回 None（调用方走 SQL）。
+    输出行序 = (ts_code, trade_date) 升序 —— 与旧全表布尔掩码路径逐位相同。"""
+    cached, pos = _PRELOAD.get(table), _PRELOAD_POS.get(table)
+    if cached is None or pos is None or pos["min"] is None:
+        return None
+    if start is None or start < pos["min"] or end > pos["max"]:
+        return None
+    s64 = pd.Timestamp(start).to_datetime64()
+    e64 = pd.Timestamp(end).to_datetime64()
+    take: list = []
+    for c in sorted(set(codes)):
+        g = pos["groups"].get(c)
+        if g is None:
+            continue
+        d = pos["dates"][g[0]:g[1]]
+        i0 = g[0] + int(np.searchsorted(d, s64, "left"))
+        i1 = g[0] + int(np.searchsorted(d, e64, "right"))
+        if i1 > i0:
+            take.append(np.arange(i0, i1))
+    if not take:
+        return cached.iloc[0:0]
+    return cached.iloc[np.concatenate(take)]
 _CAL: pd.DataFrame | None = None            # 日历缓存：trade_date, is_open
 _OPEN_DAYS: list[_dt.date] | None = None    # 开市日列表缓存（回测循环里高频调用）
 _pinned_ident: tuple[int, int] | None = None  # snapshot_id(pin=True) 钉住的 inode：之后换文件要抛而不是静默重连
@@ -86,6 +129,7 @@ def open_db(market_path: str | None = None, derived_path: str | None = None) -> 
     _conn_ident, _conn_realpath, _market_path = ident, os.path.realpath(path), path
     _CAL, _OPEN_DAYS = None, None
     _PRELOAD.clear()
+    _PRELOAD_POS.clear()
 
 
 def close_db() -> None:
@@ -99,6 +143,7 @@ def close_db() -> None:
     _conn_obj, _conn_ident, _conn_realpath, _CAL, _OPEN_DAYS = None, None, None, None, None
     _pinned_ident = None
     _PRELOAD.clear()
+    _PRELOAD_POS.clear()
 
 
 def _conn() -> duckdb.DuckDBPyConnection:
@@ -272,10 +317,12 @@ def preload(start: DateLike, end: DateLike,
             [s, e]).fetchdf()
         df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.date
         _PRELOAD[t] = df
+        _PRELOAD_POS[t] = _build_preload_pos(df)
 
 
 def clear_preload() -> None:
     _PRELOAD.clear()
+    _PRELOAD_POS.clear()
 
 
 # ══════════════ 股票池与元数据（D5）══════════════
@@ -366,17 +413,34 @@ def explain_universe(as_of_date: DateLike, *,
     return out
 
 
+_UNIVERSE_MEMO: dict = {}       # (连接 inode, 日期, 全参数) → list。inode 换（promote/重连）即整体失效
+
+
 def get_universe(as_of_date: DateLike, *,
                  min_list_days: int = 250,
                  exclude_st: bool = True,
                  exclude_suspended: bool = True,
                  liquidity_drop_pct: float = 0.20,
                  markets: Sequence[str] | None = None) -> list[str]:
-    """as_of_date 当日可交易股票池（ts_code 升序）。规则与顺序见 explain_universe。"""
+    """as_of_date 当日可交易股票池（ts_code 升序）。规则与顺序见 explain_universe。
+
+    备忘录：引擎一个调仓日会经不同路径要同一个池子 3–4 次（主循环 / read_current 的
+    池子核对 / 诊断），2026-08-27 性能 profile 里占 23%。键含连接 inode ——
+    promote / close / 换库任何一种重连都会换 inode，缓存随之整体失效，PIT 语义不变。"""
+    _conn()   # 钉住/换库检查不许被备忘录绕过（钉着且文件被换必须抛）；顺带把 _conn_ident 刷新到位
+    key = (_conn_ident, norm_date(as_of_date), min_list_days, exclude_st, exclude_suspended,
+           liquidity_drop_pct, tuple(markets) if markets is not None else None)
+    hit = _UNIVERSE_MEMO.get(key)
+    if hit is not None:
+        return list(hit)
     ex = explain_universe(as_of_date, min_list_days=min_list_days, exclude_st=exclude_st,
                           exclude_suspended=exclude_suspended, liquidity_drop_pct=liquidity_drop_pct,
                           markets=markets)
-    return sorted(ex.index[ex["included"]].tolist())
+    out = sorted(ex.index[ex["included"]].tolist())
+    if len(_UNIVERSE_MEMO) >= 1024:                    # 回测全窗 511 期 × 1 组参数，1024 绰绰有余
+        _UNIVERSE_MEMO.clear()
+    _UNIVERSE_MEMO[key] = out
+    return list(out)
 
 
 _BASIC_COLS = ["symbol", "name", "sw_l1", "sw_l2", "sw_l3", "market", "list_date", "delist_date", "is_hs"]
@@ -457,12 +521,9 @@ def _bars_raw(as_of: _dt.date, ts_codes: Sequence[str], start: _dt.date | None) 
     codes = list(ts_codes)
     if not codes:
         return pd.DataFrame(columns=["ts_code", "trade_date", *_BAR_FIELDS, "adj_factor", "is_suspended"])
-    cached = _PRELOAD.get("daily_bar")
-    if cached is not None:
-        lo = cached["trade_date"].min()
-        if start is not None and start >= lo and as_of <= cached["trade_date"].max():
-            m = cached["ts_code"].isin(codes) & (cached["trade_date"] <= as_of) & (cached["trade_date"] >= start)
-            return cached.loc[m, ["ts_code", "trade_date", *_BAR_FIELDS, "adj_factor", "is_suspended"]].copy()
+    sl = _preload_slice("daily_bar", codes, start, as_of)
+    if sl is not None:
+        return sl[["ts_code", "trade_date", *_BAR_FIELDS, "adj_factor", "is_suspended"]].copy()
     sql = ("SELECT ts_code, trade_date, open, high, low, close, pre_close, vol, amount, adj_factor, is_suspended "
            "FROM daily_bar WHERE ts_code IN (" + ",".join("?" * len(codes)) + ") AND trade_date <= ?")
     params: list = [*codes, as_of]
@@ -561,10 +622,9 @@ def get_daily_basic(as_of_date: DateLike,
             return pd.DataFrame(columns=list(fields)).rename_axis("ts_code")
         return pd.DataFrame(columns=list(fields), index=_empty_mi())
     s = _window_start(as_of, lookback, None)
-    cached = _PRELOAD.get("daily_basic")
-    if cached is not None and s >= cached["trade_date"].min() and as_of <= cached["trade_date"].max():
-        m = cached["ts_code"].isin(codes) & (cached["trade_date"] >= s) & (cached["trade_date"] <= as_of)
-        df = cached.loc[m, ["ts_code", "trade_date", *fields]].sort_values(["ts_code", "trade_date"]).copy()
+    sl = _preload_slice("daily_basic", codes, s, as_of)
+    if sl is not None:
+        df = sl[["ts_code", "trade_date", *fields]].sort_values(["ts_code", "trade_date"]).copy()
     else:
         cols = ", ".join(fields)                                     # 字段已白名单校验
         df = _conn().execute(
