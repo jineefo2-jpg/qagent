@@ -695,24 +695,57 @@ _FIN_META = ["ann_date", "end_date", "report_type", "lag_days"]
 
 def _fin_visible(as_of: _dt.date, codes: list[str], fields: Sequence[str], *,
                  include_restated: bool, report_type: str) -> pd.DataFrame:
-    """PIT 可见的最新披露：WHERE ann_date <= as_of，同 (ts_code, end_date) 取 ann_date 最大者。
-    返回列：ts_code, end_date, ann_date, report_type, <fields>。"""
-    cols = ", ".join(fields)
-    flag_sql = "" if include_restated else " AND update_flag = 0"
-    sql = f"""
-    SELECT ts_code, end_date, ann_date, report_type, {cols} FROM (
-        SELECT *, row_number() OVER (PARTITION BY ts_code, end_date
-                                     ORDER BY ann_date DESC, update_flag DESC) AS rn
-        FROM financial_pit
-        WHERE ann_date <= ? AND report_type = ? {flag_sql}
-          AND ts_code IN ({",".join("?" * len(codes))})
-    ) WHERE rn = 1
-    ORDER BY ts_code, end_date DESC
+    """PIT 可见性内核（2026-08-26 重裁）：按【字段】取首个非空值的披露行。
+
+    旧判据「update_flag=0 的最新公告行」在真实 Tushare 数据上失效（P2 真库验收实测）：
+      · 近年利润表数值大量只在 update_flag=1 的行上 —— flag=0 最新行的净利非空率
+        2010 年 98.6% → 2023 年只剩 21.8%，ep_ttm 全市场覆盖塌到 2.8%；
+      · fina_indicator 接口没有 update_flag 字段，merge 时落成 flag=0 的【稀疏壳行】
+        （同日公告、字段全 None），恰好把携值的 flag=1 行遮住。
+    新判据（include_restated=False，默认）对每个 (ts_code, end_date, 字段)：
+      1. flag=0 的携值行优先，组内【最新】公告胜 —— 更正公告（源头认定的合法修正，
+         仍标 flag=0）按既有契约要能进因子（test_two_announcements_same_period_…）；
+      2. 一条 flag=0 携值行都没有时，回落到 flag=1 行，组内【最早】公告胜 ——
+         最早的披露离原始值最近，重述行即使冒用原始公告日也排在真原始之后。
+    PIT 不变：只看 ann_date <= as_of。回落这一步是对源头数据形状的让步，
+    代价是「唯一记录只有重述版」的期次会用上重述值 —— 但那也是旧判据下
+    整只 NaN 之外唯一可得的信息。
+    include_restated=True（研究重述影响用）→ 不分组，取该字段【最新】公告的非空值。
+
+    返回列：ts_code, end_date, ann_date, report_type, <fields>，
+    按 (ts_code ASC, end_date DESC) 排序（get_financial 的 head(n_periods) 依赖此序）。
+    行的 ann_date = 该行各字段所用公告日的最大值 —— 整行「可知」的时点。
     """
-    df = _conn().execute(sql, [as_of, report_type, *codes]).fetchdf()
-    for c in ("end_date", "ann_date"):
-        df[c] = pd.to_datetime(df[c]).dt.date
-    return df
+    order = ("ann_date DESC, update_flag DESC" if include_restated else
+             "update_flag ASC, CASE WHEN update_flag = 0 THEN ann_date END DESC, ann_date ASC")
+    place = ",".join("?" * len(codes))
+    per_field = []
+    for f in fields:
+        sql = f"""
+        SELECT ts_code, end_date, ann_date, {f} FROM (
+            SELECT ts_code, end_date, ann_date, {f},
+                   row_number() OVER (PARTITION BY ts_code, end_date
+                                      ORDER BY {order}) AS rn
+            FROM financial_pit
+            WHERE ann_date <= ? AND report_type = ? AND {f} IS NOT NULL
+              AND ts_code IN ({place})
+        ) WHERE rn = 1
+        """
+        d = _conn().execute(sql, [as_of, report_type, *codes]).fetchdf()
+        for c in ("end_date", "ann_date"):
+            d[c] = pd.to_datetime(d[c]).dt.date
+        per_field.append(d.set_index(["ts_code", "end_date"])
+                          .rename(columns={"ann_date": f"__ann_{f}"}))
+    m = pd.concat(per_field, axis=1)                     # (ts,end) 外连接：字段可来自不同公告
+    if m.empty:
+        return pd.DataFrame(columns=["ts_code", "end_date", "ann_date", "report_type", *fields])
+    ann_cols = [f"__ann_{f}" for f in fields]
+    m["ann_date"] = m[ann_cols].apply(
+        lambda r: max(x for x in r if x is not None and not pd.isna(x)), axis=1)
+    m["report_type"] = report_type
+    m = m.drop(columns=ann_cols).reset_index()
+    m = m.sort_values(["ts_code", "end_date"], ascending=[True, False]).reset_index(drop=True)
+    return m[["ts_code", "end_date", "ann_date", "report_type", *fields]]
 
 
 def get_financial(as_of_date: DateLike,
