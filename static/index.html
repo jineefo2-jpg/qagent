@@ -1343,7 +1343,7 @@
       </div>
     </div>
 
-    <div class="input-area">
+    <div class="input-area" onclick="if(!CURRENT_USER)showLoginModal()">
       <div class="attachment-area" id="attachmentArea"></div>
       <div class="input-wrap">
         <button class="upload-btn" id="uploadBtn"
@@ -1351,12 +1351,12 @@
                 title="附加 PDF（点击发送时随消息一起上传）">📎</button>
         <input type="file" id="pdfInput" accept=".pdf"
                style="display:none" onchange="queueAttachment(this.files[0])">
-        <textarea id="input"
-                  placeholder="向 QuantAgent 提问... (Enter 发送, Shift+Enter 换行)"
+        <textarea id="input" disabled
+                  placeholder="🔒 请先登录（仅限所有者账号 + 访问密钥）"
                   rows="1"
                   onkeydown="handleKey(event)"
                   oninput="autoResize(this)"></textarea>
-        <button class="send-btn" id="sendBtn" onclick="onSendBtnClick()">发送</button>
+        <button class="send-btn" id="sendBtn" disabled onclick="onSendBtnClick()">发送</button>
       </div>
       <div class="input-hint">
         ⚠️ 仅供研究参考，不构成投资建议
@@ -1725,7 +1725,21 @@ async function verifyEmailCode() {
   }
 }
 
+function syncInputLock() {
+  // 未登录 → 输入框/发送键禁用（后台中间件本就拒绝，这里是「从输入框」那一半）。
+  // 点击禁用区由 .input-area 的 onclick 兜住 → 弹登录框。
+  var ta = document.getElementById('input');
+  var btn = document.getElementById('sendBtn');
+  if (!ta || !btn) return;
+  var locked = !CURRENT_USER;
+  ta.disabled = locked;
+  btn.disabled = locked;
+  ta.placeholder = locked ? '🔒 请先登录（仅限所有者账号 + 访问密钥）'
+                          : '向 QuantAgent 提问... (Enter 发送, Shift+Enter 换行)';
+}
+
 function renderUserArea() {
+  syncInputLock();
   var area = document.getElementById('userArea');
   if (!area) return;
   if (CURRENT_USER) {
