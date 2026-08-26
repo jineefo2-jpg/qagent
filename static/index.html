@@ -1339,15 +1339,7 @@
       <div class="empty-state">
         <h2>📊 QuantAgent 量化分析助手</h2>
         <p>多因子打分 · 期权定价 · 风险评估 · 财经搜索</p>
-        <div class="trade-hint" id="tradeHint">
-          <div class="badge-line">🔒 登录后可下单(支持老虎证券 / Alpaca 等)</div>
-          <div>
-            支持美股 / 港股 / 期权,
-            <button class="login-link" onclick="showLoginModal()">用 Google / GitHub / 邮箱登录</button>
-            ,登录后再去 <a href="/brokers" style="color:var(--primary);">绑定券商</a>。
-          </div>
-          <span class="small">⚠️ 当前所有交易功能默认为模拟环境(paper),不涉及真金白银</span>
-        </div>
+        <!-- 单人部署：登录/绑定引导卡片已移除（2026-08-26），syncTradeHint 对其缺席判空安全 -->
       </div>
     </div>
 
@@ -3089,16 +3081,9 @@ function showEmptyState() {
 }
 
 function tradeHintHTML() {
-  return `
-    <div class="trade-hint" id="tradeHint">
-      <div class="badge-line">🔒 登录后可下单(支持老虎证券 / Alpaca 等)</div>
-      <div>
-        支持美股 / 港股 / 期权,
-        <button class="login-link" onclick="showLoginModal()">用 Google / GitHub / 邮箱登录</button>
-        ,登录后再去 <a href="/brokers" style="color:var(--primary);">绑定券商</a>。
-      </div>
-      <span class="small">⚠️ 当前所有交易功能默认为模拟环境(paper),不涉及真金白银</span>
-    </div>`;
+  // 单人部署：登录/绑定引导卡片已移除（2026-08-26）。保留空实现是因为
+  // 空态模板里还有 ${tradeHintHTML()} 调用点；实盘红色警示横幅在别处，不受影响。
+  return '';
 }
 
 // 根据登录态 + 实际绑定的券商动态切换提示语
