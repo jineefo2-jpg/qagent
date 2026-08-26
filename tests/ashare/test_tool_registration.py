@@ -76,6 +76,9 @@ _MARKET = pathlib.Path("data/ashare_market.duckdb")
 
 @pytest.mark.skipif(not _MARKET.exists(), reason="真实 market 库不存在")
 def test_query_universe_on_real_db():
+    from ashare.data import query
+    query.close_db()                  # 全套联跑时前面的测试可能钉在临时库上，先解钉
+    query.open_db(str(_MARKET))       # close 保留旧路径（契约），必须显式指回真库
     r = ASHARE_TOOL_REGISTRY["query_universe"]("2019-06-28", limit=5)
     assert r["success"] is True and r["total"] > 1000
     assert len(r["stocks"]) == 5 and r["truncated"] is True

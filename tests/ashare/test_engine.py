@@ -235,7 +235,7 @@ def world(monkeypatch):
     lookbacks = {"f_alpha": 66, "f_beta": 251, "f_gamma": 30}
     dropped_by_date: dict = {}
 
-    def fake_combine(weights, as_of_date, universe):
+    def fake_combine(weights, as_of_date, universe, *, use_store=False):
         rec["combine"].append({"weights": dict(weights), "date": as_of_date,
                                "universe": list(universe)})
         base = scores_by_date.get(as_of_date, _SCORES)
@@ -258,7 +258,7 @@ def world(monkeypatch):
                                "constraints": constraints, "out": out[0], "intended": out[1]})
         return out
 
-    def fake_panel(names, as_of_date, universe, *, processed=True):
+    def fake_panel(names, as_of_date, universe, *, processed=True, use_store=False):
         """IC 面板：逐因子一列，列间用除不尽的系数拉开（同一列会让两个因子 IC 相同）。"""
         rec["panel"].append({"names": list(names), "date": as_of_date, "processed": processed})
         base = scores_by_date.get(as_of_date, _SCORES)
@@ -906,7 +906,9 @@ def test_macro_timing_is_refused_rather_than_silently_degraded(world):
 
 def test_run_backtest_takes_no_rebalance_frequency_argument():
     sig = inspect.signature(run_backtest)
-    assert list(sig.parameters) == ["config", "on_progress"]
+    # use_store 是架构 §4.3 补裁 ①（2026-08-24）钦定的 kwarg：不进 config/指纹、不改变结果。
+    # 本测试锁的是「没有调仓频率旋钮」，不是「永不加参数」。
+    assert list(sig.parameters) == ["config", "on_progress", "use_store"]
     banned = ("freq", "rebalance", "weekly", "period")
     assert not [p for p in sig.parameters if any(b in p.lower() for b in banned)]
 

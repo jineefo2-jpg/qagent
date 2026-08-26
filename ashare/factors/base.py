@@ -235,7 +235,7 @@ def compute_factor(name: str, as_of_date: DateLike, universe: Sequence[str], *,
 
 
 def compute_panel(names: Sequence[str], as_of_date: DateLike, universe: Sequence[str], *,
-                  processed: bool = True) -> tuple[pd.DataFrame, list[str]]:
+                  processed: bool = True, use_store: bool = False) -> tuple[pd.DataFrame, list[str]]:
     """多个因子的当日横截面。返回 `(DataFrame, warnings)`；**列顺序 == 传入的 names 顺序**
     （由下面那个按 `cols` 填的 dict 决定 —— 原来还多传一个 `columns=cols`，是死参数）。
 
@@ -243,6 +243,11 @@ def compute_panel(names: Sequence[str], as_of_date: DateLike, universe: Sequence
     状态，为一次能省几秒的调用引入线程是拿"回测结果可复现"换的。
     某个因子抛异常时整个调用一起抛（理由见 `compute_factor`）—— 一列静默变 NaN，
     等于让 combine 把它剔出分母，而报出来的样子是"这个因子今天没数据"。
+
+    `use_store`：与 `combine` 同一契约的快路径（不改变结果；命中的 alpha 因子直接用
+    库值跳过 process，miss 与非 alpha 因子（如诊断要的 log_mv）照常现算）。
+    默认 False 的理由同 combine（缓存命中 ≠ 与当前实现一致）。引擎的诊断第二遍
+    （2026-08-26 补裁 ① 收尾）实测占诊断全开耗时的六成，60s 预算靠这里接上。
     """
     cols = list(names)
     if not cols:
@@ -251,11 +256,24 @@ def compute_panel(names: Sequence[str], as_of_date: DateLike, universe: Sequence
     if dup:
         raise ValueError(f"names 含重复因子 {dup}：重复列名会让 df[name] 返回 DataFrame 而不是 Series")
 
-    data: dict = {}
+    hit: dict = {}
     warns: list[str] = []
+    if use_store:
+        from . import store          # 与 combine 同理：store 在模块顶层 import base，会成环
+        able = {n: get_factor(n).param_hash() for n in cols
+                if get_factor(n).category in ALPHA_CATEGORIES}
+        if able:
+            got, w0 = store.read_current(able, as_of_date, universe)
+            warns += w0
+            hit = {n: (proc if processed else raw) for n, (raw, proc) in got.items()}
+
+    data: dict = {}
     for n in cols:
-        data[n], w = compute_factor(n, as_of_date, universe, processed=processed)
-        warns += w
+        if n in hit:
+            data[n] = hit[n]
+        else:
+            data[n], w = compute_factor(n, as_of_date, universe, processed=processed)
+            warns += w
     return pd.DataFrame(data), warns
 
 

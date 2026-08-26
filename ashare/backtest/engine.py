@@ -223,14 +223,14 @@ def _benchmark(cfg: BacktestConfig, index: pd.Index) -> Optional[pd.Series]:
     return bars["close"].astype(float).reindex(index)
 
 
-def run_backtest(config: BacktestConfig,
-                 *, on_progress: Optional[Callable[[int, int], None]] = None
-                 ) -> BacktestResult:
+def run_backtest(config: BacktestConfig, *, on_progress: Optional[Callable[[int, int], None]] = None,
+                 use_store: bool = False) -> BacktestResult:
     """跑一次回测。**没有调仓频率入参**（模块头 ★8）：周频是产品决策不是旋钮。
 
     Args:
         config: 策略口径。`param_hash()` 是它的 D7 指纹。
         on_progress: `(已完成期数, 总期数)`，每个调仓日调一次（含被跳过的空池日）。
+        use_store: 因子缓存快路径，透传 combine 与诊断 compute_panel（补裁 ①：kwarg 不进 config/指纹）。
 
     Returns:
         `BacktestResult`。`equity` 是**日频净值指数**（初始 1.0），其余是逐期明细，
@@ -282,7 +282,7 @@ def run_backtest(config: BacktestConfig,
                 on_progress(i, len(dates))
             continue
 
-        scores, w = combine(weights, t, universe)       # index = 完整池，算不出的留 NaN（★5）
+        scores, w = combine(weights, t, universe, use_store=use_store)   # index = 完整池（★5）
         warns += w
         used[t] = _factors_used(len(weights), w)
         if rng is not None:                             # 闸 3：同日横截面内置换，不跨时间
@@ -341,7 +341,7 @@ def run_backtest(config: BacktestConfig,
         if cfg.compute_diagnostics:
             # IC 面板要的是**处理后**的逐因子列（`combine` 只交出合成后的一列），
             # 所以这里按因子重算一遍；`log_mv` 取原始值 —— 与中性化减掉的同一个定义。
-            panel, wp = compute_panel([n for n, _ in cfg.factors], t, universe, processed=True)
+            panel, wp = compute_panel([n for n, _ in cfg.factors], t, universe, processed=True, use_store=use_store)
             size, ws = compute_factor(_SIZE_FACTOR, t, universe, processed=False)
             warns += wp + ws
             diag.append((t, exec_date, universe, scores, panel, size))

@@ -906,7 +906,7 @@ def test_the_permutation_stays_inside_one_days_cross_section(monkeypatch):
     q = _GuardQuery()
     runs: list = []
 
-    def fake_combine(weights, as_of_date, universe):
+    def fake_combine(weights, as_of_date, universe, *, use_store=False):
         k = _G_WEEKLY.index(as_of_date)
         return pd.Series([10.0 * k + _G_FRAC[c] for c in universe],
                          index=list(universe), name="score", dtype=float), []

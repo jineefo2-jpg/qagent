@@ -89,6 +89,10 @@ def open_db(market_path: str | None = None, derived_path: str | None = None) -> 
 
 
 def close_db() -> None:
+    """解钉 + 断连。★ 有意【保留】`_market_path`：close 的既定契约是「解钉后查询在同一
+    路径上自愈续走」（test_build_leaves_the_snapshot_pinned_until_close_db 钉着这一条，
+    长驻进程 build → close → 查询自动重连新 inode 靠它）。代价：换库必须显式
+    `open_db(新路径)` —— 测试里混用临时库时无参 open_db() 会回到上一个路径。"""
     global _conn_obj, _conn_ident, _conn_realpath, _CAL, _OPEN_DAYS, _pinned_ident
     if _conn_obj is not None:
         _conn_obj.close()

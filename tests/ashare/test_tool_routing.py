@@ -16,6 +16,18 @@ _MARKET = pathlib.Path("data/ashare_market.duckdb")
 _need_db = pytest.mark.skipif(not _MARKET.exists(), reason="真实 market 库不存在")
 
 
+@pytest.fixture(autouse=True)
+def _fresh_query_state():
+    """全套联跑时，前面的测试可能把 query 钉在/停在自己的临时库上（close_db 有意保留
+    `_market_path`，见其文档字符串）。真库测试必须显式重开真库路径，前后各清一次。"""
+    from ashare.data import query
+    query.close_db()
+    if _MARKET.exists():
+        query.open_db(str(_MARKET))
+    yield
+    query.close_db()
+
+
 def test_to_ts_code_conversions():
     assert to_ts_code("600519") == "600519.SH"
     assert to_ts_code("000858") == "000858.SZ"
@@ -85,7 +97,9 @@ def test_factor_score_does_not_intercept_etf_or_concept():
 
 @_need_db
 def test_historical_prices_serves_ashare_from_local():
-    r = qa.historical_prices("600519", days=63)      # 非常规 days，避开 Redis 里的旧网络缓存
+    from cache import cache
+    cache.delete("quant:price:600519:63")            # 自清：跨进程 Redis 缓存可能存着旧的回退结果
+    r = qa.historical_prices("600519", days=63)
     assert r["success"] is True
     assert "本地" in r["data_source"], f"走了 {r['data_source']}，未命中本地路由"
     assert r["sources_tried"][0]["source"] == "本地数仓"
