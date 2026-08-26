@@ -1141,6 +1141,32 @@ def auth_email_verify(body: EmailVerifyRequest):
     return r
 
 
+class KeyLoginRequest(BaseModel):
+    email: str
+
+
+@app.post("/auth/key_login")
+def auth_key_login(body: KeyLoginRequest, request: Request):
+    """访问密钥直登（2026-08-26，用户裁决）：单所有者部署里 AGENT_ACCESS_KEY 即主凭证，
+    「邮箱归属证明」由它承担，跳过验证码。key 错 / 邮箱非所有者 / key 未配置都拒绝。"""
+    supplied = request.headers.get(owner_gate.KEY_HEADER) or request.cookies.get("agent_key")
+    if not owner_gate.key_ok(supplied):
+        return {"success": False, "error": "访问密钥缺失或不正确"}
+    email = body.email.strip().lower()
+    if not _email_allowed(email):
+        return {"success": False, "error": "该邮箱未被授权登录"}
+    user = upsert_user(provider="email", provider_sub=email, email=email,
+                       name=email.split("@")[0], avatar_url="")
+    web_token = create_web_session(user.user_id)
+    from fastapi.responses import JSONResponse
+    r = JSONResponse({"success": True, "user": user.to_public_dict()})
+    r.set_cookie(key=COOKIE_NAME, value=web_token, max_age=COOKIE_MAX_AGE,
+                 httponly=True, samesite="lax",
+                 secure=_os.getenv("OAUTH_COOKIE_SECURE", "").lower() in ("1", "true"),
+                 path="/")
+    return r
+
+
 @app.get("/auth/{provider}/login")
 async def auth_login(provider: str, request: Request):
     if provider not in configured_providers():

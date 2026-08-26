@@ -83,6 +83,36 @@ def test_open_paths_stay_reachable(client):
     assert client.get("/").status_code == 200                # 登录页壳必须能加载
 
 
+def test_key_login_with_owner_email_creates_session(client):
+    """访问密钥直登（2026-08-26 用户裁决）：key + 所有者邮箱 = 建会话，跳过验证码。"""
+    from auth.owner_gate import owner_email
+    r = client.post("/auth/key_login", json={"email": owner_email()},
+                    headers={"X-Agent-Key": KEY})
+    assert r.json()["success"] is True
+    assert client.get("/docs", headers={"X-Agent-Key": KEY}).status_code == 200
+
+
+def test_key_login_refuses_non_owner_email(client):
+    r = client.post("/auth/key_login", json={"email": "intruder@example.com"},
+                    headers={"X-Agent-Key": KEY})
+    assert r.json()["success"] is False
+
+
+def test_key_login_refuses_wrong_or_missing_key(client):
+    from auth.owner_gate import owner_email
+    assert client.post("/auth/key_login", json={"email": owner_email()},
+                       headers={"X-Agent-Key": "wrong"}).json()["success"] is False
+    assert client.post("/auth/key_login",
+                       json={"email": owner_email()}).json()["success"] is False
+
+
+def test_key_login_fails_closed_without_server_key(client, monkeypatch):
+    from auth.owner_gate import owner_email
+    monkeypatch.delenv("AGENT_ACCESS_KEY")
+    assert client.post("/auth/key_login", json={"email": owner_email()},
+                       headers={"X-Agent-Key": KEY}).json()["success"] is False
+
+
 def test_send_code_refuses_non_owner_email(client):
     r = client.post("/auth/email/send_code", json={"email": "intruder@example.com"})
     body = r.json()

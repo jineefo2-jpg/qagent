@@ -46,16 +46,21 @@ def _is_open(path: str) -> bool:
     return path in _OPEN_EXACT or path.startswith(_OPEN_PREFIX)
 
 
+def key_ok(supplied: str | None) -> bool:
+    """常量时间比较访问密钥。AGENT_ACCESS_KEY 未配置 → 恒 False（fail-closed）。"""
+    real = os.environ.get("AGENT_ACCESS_KEY", "")
+    return bool(real) and hmac.compare_digest((supplied or "").encode(), real.encode())
+
+
 def check_request(path: str, supplied_key: str | None, cookie_token: str | None):
     """纯判定：放行返回 None，拒绝返回 (status_code, error_msg)。"""
     if _is_open(path):
         return None
-    real_key = os.environ.get("AGENT_ACCESS_KEY", "")
-    if not real_key:
+    if not os.environ.get("AGENT_ACCESS_KEY", ""):
         return 503, ("服务端未配置 AGENT_ACCESS_KEY，所有功能已锁定（fail-closed）。"
                      "生成: python3 -c \"import secrets; print(secrets.token_urlsafe(32))\" "
                      "后写入 .env 并重启")
-    if not hmac.compare_digest((supplied_key or "").encode(), real_key.encode()):
+    if not key_ok(supplied_key):
         return 403, "访问密钥缺失或不正确（X-Agent-Key）"
     user = current_user(qa_auth=cookie_token)
     if user is None:
