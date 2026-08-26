@@ -494,9 +494,18 @@ def ingest_financial(conn, src, ts_code: str, start, end) -> int:
         frames = [getattr(src, api)(ts_code, start=start_d, end=end_d)
                   for api in ("income", "balancesheet", "cashflow", "fina_indicator")]
         out, dropped = merge_financial_frames(*frames)
+        # 预约披露守卫：Tushare 会提前带出 ann_date 在未来的行（2026-08-25 实测：12 只
+        # 中报在 08-25 拉到 ann_date=08-26）。拉取时刻它们尚未公布，入库即前视（D3），
+        # validate 的 financial_ann_date 是阻断级。丢弃并计数 —— 真实公告日过后由
+        # daily 增量的财报扫描补回，不会永久缺失。
+        fut = out["ann_date"] > _dt.date.today()
+        n_future = int(fut.sum())
+        if n_future:
+            out = out[~fut]
+        notes = [s for s in (f"dropped_no_ann_date={dropped}" if dropped else "",
+                             f"dropped_future_ann_date={n_future}" if n_future else "") if s]
         n = _upsert(conn, "financial_pit", out)
-        set_job(conn, job, "financial_pit", ts_code, "DONE", rows=n,
-                error=f"dropped_no_ann_date={dropped}" if dropped else "")
+        set_job(conn, job, "financial_pit", ts_code, "DONE", rows=n, error="; ".join(notes))
         return n
     except Exception as exc:                 # noqa: BLE001
         set_job(conn, job, "financial_pit", ts_code, "RETRY", error=str(exc)[:500])

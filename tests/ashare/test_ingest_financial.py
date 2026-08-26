@@ -180,6 +180,27 @@ def test_ingest_financial_end_to_end(conn):
     assert err == ""                                 # 无丢弃行时不写 dropped 备注
 
 
+def test_future_ann_date_rows_are_dropped_at_ingest(conn):
+    """预约披露守卫：拉取时 ann_date 在未来的行是【尚未公布】的报表（2026-08-25 实测：
+    12 只中报提前一天带出 ann_date=次日），入库即前视（D3），validate 的
+    financial_ann_date 阻断级会拦。ingest 当场丢弃并在任务备注计数。"""
+    tomorrow = (dt.date.today() + dt.timedelta(days=1)).strftime("%Y%m%d")
+
+    class Src(FakeSrc):
+        def income(self, ts_code, start=None, end=None):
+            return _inc([(ts_code, "20210330", "20210330", "20201231", "1", 0, 1000.0, 400.0, 30.0),
+                         (ts_code, tomorrow, tomorrow, "20260630", "1", 0, 2000.0, 800.0, 60.0)])
+
+    ingest.ingest_financial(conn, Src(), "600519.SH", "20200101", "20991231")
+    ends = {r[0] for r in conn.execute(
+        "SELECT end_date FROM financial_pit WHERE ts_code='600519.SH'").fetchall()}
+    assert D(2026, 6, 30) not in ends                # 未来公告的那行没进库
+    assert D(2020, 12, 31) in ends                   # 正常行不受牵连
+    err = conn.execute("SELECT last_error FROM ingest_log "
+                       "WHERE job_id='financial_pit:600519.SH:2020-01-01'").fetchone()[0]
+    assert "dropped_future_ann_date=1" in err
+
+
 def test_ingest_daily_basic_is_per_day_and_skips_done(conn):
     """DONE 的日期第二次调用必须【跳过】而不是重拉 —— 与 ingest_daily_bar_by_date 同一契约。
     2026-08-25 实测教训：没有这道守卫，full 续跑会把 2010 年以来每一天重新调一遍 API，
