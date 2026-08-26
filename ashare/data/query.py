@@ -363,7 +363,11 @@ def _stock_frame(as_of: _dt.date) -> pd.DataFrame:
     """
     df = _conn().execute(sql, [as_of, as_of, as_of, win_start, as_of]).fetchdf()
     for c in ("list_date", "delist_date"):
-        df[c] = [None if pd.isna(x) else pd.Timestamp(x).date() for x in df[c]]
+        # 向量化（2026-08-27 性能专项）：逐元素 Timestamp 循环在 5800 行 × 每期多调下
+        # 占全窗 ~12s；.dt.date + where 输出逐位相同（date 对象 / None）。
+        conv = pd.Series(pd.to_datetime(df[c]).dt.date, index=df.index, dtype=object)
+        conv[df[c].isna()] = None                    # where(..., None) 会把 None 变回 NaT
+        df[c] = conv
     return df.set_index("ts_code")
 
 
@@ -476,7 +480,11 @@ def get_stock_basic(as_of_date: DateLike,
     sql += " ORDER BY b.ts_code"
     df = _conn().execute(sql, params).fetchdf()
     for c in ("list_date", "delist_date"):
-        df[c] = [None if pd.isna(x) else pd.Timestamp(x).date() for x in df[c]]
+        # 向量化（2026-08-27 性能专项）：逐元素 Timestamp 循环在 5800 行 × 每期多调下
+        # 占全窗 ~12s；.dt.date + where 输出逐位相同（date 对象 / None）。
+        conv = pd.Series(pd.to_datetime(df[c]).dt.date, index=df.index, dtype=object)
+        conv[df[c].isna()] = None                    # where(..., None) 会把 None 变回 NaT
+        df[c] = conv
     return df.set_index("ts_code")[_BASIC_COLS]
 
 
