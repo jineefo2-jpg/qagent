@@ -130,6 +130,7 @@ def open_db(market_path: str | None = None, derived_path: str | None = None) -> 
     _CAL, _OPEN_DAYS = None, None
     _PRELOAD.clear()
     _PRELOAD_POS.clear()
+    _PRELOAD_WIDE.clear()
 
 
 def close_db() -> None:
@@ -144,6 +145,7 @@ def close_db() -> None:
     _pinned_ident = None
     _PRELOAD.clear()
     _PRELOAD_POS.clear()
+    _PRELOAD_WIDE.clear()
 
 
 def _conn() -> duckdb.DuckDBPyConnection:
@@ -323,6 +325,7 @@ def preload(start: DateLike, end: DateLike,
 def clear_preload() -> None:
     _PRELOAD.clear()
     _PRELOAD_POS.clear()
+    _PRELOAD_WIDE.clear()
 
 
 # ══════════════ 股票池与元数据（D5）══════════════
@@ -587,12 +590,46 @@ def get_bars(as_of_date: DateLike,
     return df.set_index(["ts_code", "trade_date"])[out_cols]
 
 
+_PRELOAD_WIDE: dict = {}    # ("daily_bar", field, adjust) → 全窗宽面板，随 _PRELOAD 同清
+
+
+def _wide_panel(field: str, adjust: str) -> "pd.DataFrame | None":
+    """daily_bar 预加载的懒构建宽面板 —— 与 get_bars 同一口径（hfq = ×adj_factor、
+    停牌价置 NaN），一次 pivot（秒级、~185MB/字段）换掉引擎逐期的 unstack
+    （2026-08-27 性能专项：价格面板路径占每期 ~35ms）。"""
+    key = ("daily_bar", field, adjust)
+    w = _PRELOAD_WIDE.get(key)
+    if w is None and _PRELOAD.get("daily_bar") is not None:
+        cached = _PRELOAD["daily_bar"]
+        vals = cached[field].astype(float)
+        if field in _PRICE_FIELDS:
+            if adjust == "hfq":
+                vals = vals * cached["adj_factor"].astype(float)
+            vals = vals.where(~cached["is_suspended"].astype(bool))
+        w = pd.DataFrame({"trade_date": cached["trade_date"],
+                          "ts_code": cached["ts_code"], "v": vals}) \
+              .pivot(index="trade_date", columns="ts_code", values="v")
+        _PRELOAD_WIDE[key] = w
+    return w
+
+
 def get_price_panel(as_of_date: DateLike,
                     ts_codes: Sequence[str],
                     field: str = "close",
                     lookback: int = 250,
                     adjust: str = "hfq") -> pd.DataFrame:
     """宽表：index=trade_date，columns=ts_code。因子计算的主力入口。停牌日为 NaN，不做前向填充。"""
+    codes = list(ts_codes)
+    pos = _PRELOAD_POS.get("daily_bar")
+    if codes and pos is not None and pos["min"] is not None \
+            and field in _BAR_FIELDS and adjust in ("hfq", "none"):
+        as_of = norm_date(as_of_date)
+        _check_in_calendar(as_of)
+        s = _window_start(as_of, lookback, None)
+        if s is not None and s >= pos["min"] and as_of <= pos["max"]:
+            w = _wide_panel(field, adjust)
+            if w is not None:
+                return w.loc[s:as_of].reindex(columns=codes)
     df = get_bars(as_of_date, ts_codes, lookback=lookback, fields=(field,), adjust=adjust)
     if df.empty:
         return pd.DataFrame(columns=list(ts_codes)).rename_axis("trade_date")
