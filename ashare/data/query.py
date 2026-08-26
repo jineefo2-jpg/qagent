@@ -813,7 +813,10 @@ def get_macro(as_of_date: DateLike,
               indicators: Sequence[str],
               lookback_periods: int = 60) -> pd.DataFrame:
     """WHERE publish_date <= as_of_date；同 (indicator, period) 取 publish_date 最大者。
-    index=period，columns=indicator，附加列 <indicator>__publish_date 便于审计。"""
+    index=period，columns=indicator，附加列 <indicator>__publish_date 便于审计。
+    lookback_periods 按【每个指标各自的观测】计数（取各自最近 N 期、行取并集）——
+    不能按并集行数截：混频查询时日频指标把并集灌满逐日日期，tail(N) 只剩最近
+    N 个交易日，月频指标整列 NaN（2026-08-26 P1 真库验收实测）。"""
     as_of = norm_date(as_of_date)
     _check_in_calendar(as_of)
     inds = list(indicators)
@@ -839,7 +842,9 @@ def get_macro(as_of_date: DateLike,
     for i in inds:
         out[i] = val[i] if i in val.columns else float("nan")
         out[f"{i}__publish_date"] = pub[i] if i in pub.columns else None
-    out = out.sort_index().tail(lookback_periods)
+    keep = sorted({p for i in inds if i in val.columns
+                   for p in val[i].dropna().tail(lookback_periods).index})
+    out = out.loc[keep]
     out.index.name = "period"
     return out[cols]
 
