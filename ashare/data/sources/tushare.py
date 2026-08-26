@@ -157,7 +157,11 @@ class TushareSource:
         return self._call("cn_ppi", start_m=start_m, end_m=end_m)
 
     def cn_pmi(self, start_m: str, end_m: str) -> pd.DataFrame:
-        return self._call("cn_pmi", start_m=start_m, end_m=end_m)
+        # cn_pmi 是唯一一个输出字段全部「默认显示 N」的宏观接口（官方文档 doc_id=325）：
+        # 不显式点名 fields 时服务端一列都不给，裸调返回的空列 DataFrame 会让下游
+        # 取 month 列直接 KeyError（2026-08-25 全量回补实测）。cn_m/cn_cpi/cn_ppi/sf_month
+        # 的核心列都是默认 Y，不需要也不要跟风加。
+        return self._call("cn_pmi", start_m=start_m, end_m=end_m, fields="month,pmi010000")
 
     def sf_month(self, start_m: str, end_m: str) -> pd.DataFrame:
         return self._call("sf_month", start_m=start_m, end_m=end_m)

@@ -29,6 +29,9 @@ PROBES = [
     ("hk_hold",       lambda p: p.hk_hold(trade_date="20240102"), True),
     ("index_daily",   lambda p: p.index_daily(ts_code="000985.CSI", start_date="20240101", end_date="20240131"), True),
     ("cn_m",          lambda p: p.cn_m(start_m="202301", end_m="202312"), True),
+    # cn_pmi 输出字段全部「默认显示 N」，必须显式 fields（2026-08-25 回补实测：漏探它导致最后一段才炸）
+    ("cn_pmi",        lambda p: p.cn_pmi(start_m="202301", end_m="202312", fields="month,pmi010000"), True),
+    ("sf_month",      lambda p: p.sf_month(start_m="202301", end_m="202312"), True),
     ("shibor",        lambda p: p.shibor(start_date="20240101", end_date="20240131"), True),
 ]
 
