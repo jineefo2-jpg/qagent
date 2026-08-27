@@ -197,7 +197,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap = argparse.ArgumentParser(
         prog="python -m ashare.strategy.plan",
         description="生成 §6.3 调仓清单：落 ledger 库 + 导出 JSON。落库只发生在这里（L4）。")
-    ap.add_argument("--as-of", required=True, help="信号日（T，收盘后），YYYY-MM-DD")
+    ap.add_argument("--as-of", default=None, help="信号日（T，收盘后），YYYY-MM-DD")
+    ap.add_argument("--nightly", action="store_true",
+                    help="定时链模式（21:30 增量之后调用）：非交易日/非周频调仓日安静跳过；"
+                         "调仓日先 build 当日因子（V6：只 build 这一天）再出清单，build 失败不出清单")
     ap.add_argument("--macro-timing", action="store_true", help="启用宏观择时层（默认恒定 position_cap）")
     ap.add_argument("--top-n", type=int, default=None)
     ap.add_argument("--position-cap", type=float, default=None)
@@ -207,7 +210,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     cfg = default_config(macro_timing=a.macro_timing, top_n=a.top_n, position_cap=a.position_cap)
     query.open_db()
     try:
-        plan = build_rebalance_plan(a.as_of, cfg)
+        as_of = a.as_of
+        if a.nightly:
+            today = _dt.date.today()
+            tds = query.get_trade_dates(today)
+            if not tds or tds[-1] != today:
+                print(f"[plan] nightly：{today} 非交易日，跳过"); return 0
+            if query.get_trade_dates(today, freq="W")[-1] != today:
+                print(f"[plan] nightly：{today} 非周频调仓日，跳过"); return 0
+            as_of = str(today)
+            from ashare.factors import store as _fstore     # 惰性：仅 nightly 需要
+            counts, bw = _fstore.build([n for n, _ in cfg.factors], [today])
+            print(f"[plan] nightly：当日因子已落库 {sum(counts.values())} 行"
+                  + (f"，{len(bw)} 条告警" if bw else ""))
+        elif as_of is None:
+            ap.error("--as-of 与 --nightly 必须给一个")
+        plan = build_rebalance_plan(as_of, cfg)
         overwrote = ledger_store.save_signal_plan(plan)
         out_dir = pathlib.Path(a.out)
         out_dir.mkdir(parents=True, exist_ok=True)

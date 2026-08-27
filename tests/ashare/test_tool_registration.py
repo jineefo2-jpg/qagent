@@ -83,3 +83,32 @@ def test_query_universe_on_real_db():
     assert r["success"] is True and r["total"] > 1000
     assert len(r["stocks"]) == 5 and r["truncated"] is True
     assert set(r["stocks"][0]) == {"ts_code", "name", "sw_l1"}
+
+
+def test_l4_signal_tool_touches_no_write_names():
+    """get_signal_list 只许触达 ledger_store 的读函数 —— 写名出现在 agent_tools 源码里即违规。"""
+    src = pathlib.Path("ashare/agent_tools.py").read_text(encoding="utf-8")
+    for bad in ("save_signal_plan", "record_confirms", "write_positions"):
+        assert bad not in src, f"agent_tools 引用了 ledger 写函数 {bad}（D1：LLM 层无写路径）"
+
+
+def test_signal_list_tool_behaviour(tmp_path, monkeypatch):
+    from ashare.data import _ledger, ledger_store
+    monkeypatch.setattr(_ledger, "DEFAULT_LEDGER_PATH", str(tmp_path / "led.duckdb"))
+    r = ASHARE_TOOL_REGISTRY["get_signal_list"]()
+    assert r["success"] is False and "还没有生成过" in r["error"]        # 空库安静
+    ledger_store.save_signal_plan({
+        "as_of": "2026-08-28", "param_hash": "ph", "data_snapshot_id": "snap",
+        "execute_on": "2026-08-31T09:15:00+08:00", "strategy_version": "v1",
+        "target_position": 0.8, "position_calibrated": True, "excluded": [],
+        "warnings": [], "orders": [{"ts_code": f"{i:06d}.SH", "name": "x", "action": "BUY",
+                                    "current_weight": 0, "target_weight": 0.02,
+                                    "limit_price_range": [1, 2], "urgency": "normal",
+                                    "factor_contrib": {"f": 1}} for i in range(30)]})
+    r = ASHARE_TOOL_REGISTRY["get_signal_list"](top=10)
+    assert r["success"] is True and r["n_orders"] == 30
+    assert len(r["orders"]) == 10 and r["truncated"] is True             # T2 截断
+    assert "factor_contrib" not in r["orders"][0]                        # 精简版不带归因
+    import json as _json
+    assert len(_json.dumps(r, ensure_ascii=False).encode()) < 3072       # T2：< 3KB
+    assert "人工执行" in r["note"]

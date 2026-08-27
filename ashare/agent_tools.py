@@ -103,9 +103,36 @@ def _num(v) -> Optional[float]:
         return None
 
 
+def get_signal_list(top: int = 10) -> dict:
+    """最新调仓清单的只读转述（P3 Task 7，架构 §6.2 预留位兑现）。
+    只转述已生成的清单，不评价、不下单；清单由用户人工执行。"""
+    try:
+        from ashare.data.ledger_store import latest_signal_plan     # 只导读函数（写函数禁触，见测试）
+        p = latest_signal_plan()
+        if p is None:
+            return {"success": False, "error": "还没有生成过任何清单",
+                    "hint": "python3 -m ashare.strategy.plan --as-of <交易日> 生成"}
+        top = max(1, min(int(top), _MAX_CODES))
+        orders = [{k: o.get(k) for k in ("ts_code", "name", "action", "current_weight",
+                                          "target_weight", "limit_price_range", "urgency")}
+                  for o in p.get("orders", [])[:top]]
+        return {"success": True, "as_of": p["as_of"], "execute_on": p["execute_on"],
+                "execute_note": p.get("execute_note"),
+                "target_position": p.get("target_position"),
+                "position_calibrated": p.get("position_calibrated"),
+                "n_orders": len(p.get("orders", [])), "n_excluded": len(p.get("excluded", [])),
+                "orders": orders, "truncated": len(p.get("orders", [])) > top,
+                "warnings": p.get("warnings", [])[:5],
+                "param_hash": p.get("param_hash"), "data_snapshot_id": p.get("data_snapshot_id"),
+                "note": "清单为只读转述，需人工执行；执行后请在信号看板回写确认/对账"}
+    except Exception as e:                     # noqa: BLE001 — T1
+        return _err(e)
+
+
 ASHARE_TOOL_REGISTRY: Dict[str, Callable] = {
     "query_universe": query_universe,
     "get_factor_exposure": get_factor_exposure,
+    "get_signal_list": get_signal_list,
 }
 
 ASHARE_TOOL_SCHEMAS: List[dict] = [
@@ -141,6 +168,18 @@ processed 为全市场横截面 z 分（未乘 direction）。非调仓日无值
         },
     },
 ]
+
+ASHARE_TOOL_SCHEMAS.append({
+    "name": "get_signal_list",
+    "description": """A 股本地信号台账：查最新一期调仓清单（只读转述，不下单、不修改任何数据）。
+返回信号日/执行时点/目标仓位/前 N 笔订单（含限价带与执行紧急度）/未校准警示/双指纹。
+清单由每周调仓日的定时链生成，需用户人工执行 —— 本工具只转述，不构成任何操作。""",
+    "input_schema": {
+        "type": "object",
+        "properties": {"top": {"type": "integer", "description": "返回订单条数上限，默认 10"}},
+        "required": [],
+    },
+})
 
 # ★ 冻结的只读集合，供隔离测试断言（架构 §6.3 M1/M2）
 ASHARE_READONLY_TOOLS = frozenset(ASHARE_TOOL_REGISTRY)

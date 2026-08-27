@@ -31,4 +31,12 @@ if [ "$(date +%H)" -ge 21 ]; then
   else
     notify_fail "daily"; exit 1
   fi
+  # ③ 信号链（P3 Task 6）：非交易日/非周频调仓日在 python 侧安静跳过；
+  #    调仓日 = 先 build 当日因子（V6 只 build 这一天）再出清单落 ledger + 导出 JSON。
+  #    信号失败不影响已 promote 的数据，但要出声。
+  if /usr/bin/python3 -m ashare.strategy.plan --nightly >> $LOG 2>&1; then
+    echo "$(date '+%F %T') nightly-signal OK" >> $LOG
+  else
+    notify_fail "nightly-signal"; exit 1
+  fi
 fi
