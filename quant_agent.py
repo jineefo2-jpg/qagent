@@ -596,17 +596,10 @@ def _news_akshare(symbol: str, max_results: int = 5):
 # ─────────────────────────────────────────────
 
 # MOCK 兜底库（数据源全部失败时使用，明确标注）
-MOCK_QUOTES = {
-    "AAPL":   {"name": "Apple Inc.",      "price": 213.40, "change_pct": +1.24,
-               "volume_m": 52.3,  "pe": 33.5, "market_cap_b": 3250},
-    "MSFT":   {"name": "Microsoft Corp.", "price": 428.15, "change_pct": -0.42,
-               "volume_m": 21.7,  "pe": 36.1, "market_cap_b": 3180},
-    "NVDA":   {"name": "NVIDIA Corp.",    "price": 1185.20,"change_pct": +2.78,
-               "volume_m": 38.4,  "pe": 72.4, "market_cap_b": 2920},
-    "TSLA":   {"name": "Tesla Inc.",      "price": 248.50, "change_pct": -1.85,
-               "volume_m": 95.2,  "pe": 65.8, "market_cap_b": 791},
-    # ★ A 股条目已全部移除（2026-08-27 用户裁决：全量 A 股量化，不许有任何预设/写死的股票）。
-    #   A 股数据源全挂时走诚实失败，绝不端出编造的价格 —— 假数据比没数据坏。
+MOCK_QUOTES: dict = {
+    # ★ 已清空（2026-08-27 用户裁决，两步走）：先清 A 股、随后美股一并清 —— 任何市场
+    #   数据源全挂时都走诚实失败，不端编造的价格。美股功能后续正式做（A 股优先），
+    #   届时接真实数据源而不是回填这里。空字典让下方 MOCK 兜底分支自然休眠。
 }
 
 
@@ -767,17 +760,10 @@ def market_quote(symbol: str, skip_cache: bool = False) -> dict:
 # ─────────────────────────────────────────────
 
 # 预制因子库（演示用，真实场景应从财务数据库计算）
-MOCK_FACTOR_RAW = {
-    "AAPL":   {"value": 35,  "growth": 78,  "momentum": 82,
-               "quality": 92, "technical": 68},
-    "MSFT":   {"value": 42,  "growth": 75,  "momentum": 71,
-               "quality": 95, "technical": 55},
-    "NVDA":   {"value": 18,  "growth": 96,  "momentum": 94,
-               "quality": 88, "technical": 85},
-    "TSLA":   {"value": 25,  "growth": 65,  "momentum": 48,
-               "quality": 72, "technical": 35},
-    # ★ A 股条目已全部移除（同 MOCK_QUOTES 的 2026-08-27 裁决）。A 股因子本就被拦截
-    #   引导到本地因子库（get_factor_exposure），这里不留任何预设分数的回退路径。
+MOCK_FACTOR_RAW: dict = {
+    # ★ 已清空（同 MOCK_QUOTES 的 2026-08-27 裁决）。此前它还会把预设分叠在真值缺口上
+    #   （factor_score 的 {默认50, **MOCK, **real} 合成序）—— 空字典后该叠加自然失效，
+    #   缺的因子回到中性 50 且 data_source 如实报「N/5 因子真值」。
 }
 
 # ─────────────────────────────────────────────
