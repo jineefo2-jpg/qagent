@@ -1332,6 +1332,7 @@
               onclick="MarketSearch.toggle()"
               title="股票/期权搜索">🔍 行情</button>
       <!-- 用户登录区（启动后由 bootstrapAuth 填充） -->
+      <button class="login-link" onclick="showSignalsModal()" title="A 股调仓信号与持仓回写">📋 信号</button>
       <div class="user-area" id="userArea"></div>
     </header>
 
@@ -1395,6 +1396,25 @@
 </aside>
 
 <!-- 登录弹窗 -->
+<!-- 调仓信号看板（P3 Task 5）：清单 + 逐单三态确认 + CSV 对账导入。没有任何「一键执行」——执行永远人工（N2）。 -->
+<div class="login-modal-mask" id="signalsModalMask" onclick="if(event.target===this)hideSignalsModal()">
+  <div class="login-modal" style="max-width:780px;width:94%;" role="dialog" aria-modal="true">
+    <h3>📋 调仓信号看板</h3>
+    <div id="sigBanner"></div>
+    <div id="sigMeta" style="font-size:12px;color:var(--text-dim,#999);margin:6px 0;"></div>
+    <div id="sigTableWrap" style="max-height:46vh;overflow:auto;"></div>
+    <div style="display:flex;gap:8px;margin-top:10px;align-items:center;flex-wrap:wrap;">
+      <button onclick="saveConfirms()" style="padding:6px 12px;border:1px solid var(--primary);
+              background:var(--primary);color:#fff;border-radius:6px;cursor:pointer;font-size:12px;">保存三态确认</button>
+      <span style="font-size:12px;">CSV 对账：</span>
+      <input type="file" id="sigCsvFile" accept=".csv,.txt" style="font-size:12px;max-width:220px;"
+             onchange="prepCsvMapping(this.files[0])">
+    </div>
+    <div id="sigCsvMap" style="font-size:12px;margin-top:6px;"></div>
+    <button class="close-btn" onclick="hideSignalsModal()" aria-label="关闭">×</button>
+  </div>
+</div>
+
 <div class="login-modal-mask" id="loginModalMask" onclick="if(event.target===this)hideLoginModal()">
   <div class="login-modal" role="dialog" aria-modal="true" aria-labelledby="loginModalTitle">
     <h3 id="loginModalTitle">登录（仅限所有者）</h3>
@@ -1626,6 +1646,128 @@ function showLoginModal() {
     document.getElementById('ownerEmailInput').value = localStorage.getItem('owner_email') || '';
   } catch (_) {}
   document.getElementById('loginModalMask').classList.add('show');
+}
+
+// ══════════ 调仓信号看板（P3 Task 5）══════════
+var SIG_PLAN = null;
+
+function hideSignalsModal() { document.getElementById('signalsModalMask').classList.remove('show'); }
+
+async function showSignalsModal() {
+  document.getElementById('signalsModalMask').classList.add('show');
+  var meta = document.getElementById('sigMeta');
+  meta.textContent = '加载中…';
+  try {
+    var r = await api('/api/signals/latest');
+    var d = await r.json();
+    SIG_PLAN = d.plan;
+    if (!SIG_PLAN) {
+      meta.innerHTML = '还没有任何清单。生成：<code>python3 -m ashare.strategy.plan --as-of 交易日</code>';
+      document.getElementById('sigTableWrap').innerHTML = '';
+      document.getElementById('sigBanner').innerHTML = '';
+      return;
+    }
+    var p = SIG_PLAN;
+    document.getElementById('sigBanner').innerHTML = p.position_calibrated ? '' :
+      '<div style="background:#5a3;background:rgba(255,180,0,.15);border:1px solid rgba(255,180,0,.5);' +
+      'border-radius:6px;padding:6px 10px;font-size:12px;margin-bottom:6px;">' +
+      '⚠ 持仓未校准：请先导入对账 CSV 或保存三态确认，本期 current_weight 可靠性下降</div>';
+    meta.innerHTML = '信号日 <b>' + p.as_of + '</b> → 执行 <b>' + p.execute_on + '</b>' +
+      ' ｜ 目标仓位 <b>' + (p.target_position * 100).toFixed(1) + '%</b>' +
+      ' ｜ 订单 ' + p.orders.length + ' 笔，剔除 ' + p.excluded.length + ' 只' +
+      (p.warnings.length ? '<br>' + p.warnings.map(function (w) { return '<span style="color:#e8a">' + w + '</span>'; }).join('<br>') : '');
+    var confirms = {};
+    try {
+      var cr = await api('/api/portfolio/confirms?as_of=' + p.as_of);
+      (await cr.json()).confirms.forEach(function (c) { confirms[c.ts_code] = c; });
+    } catch (_) {}
+    var rows = p.orders.map(function (o) {
+      var c = confirms[o.ts_code] || {};
+      var band = o.limit_price_range ? o.limit_price_range[0] + ' ~ ' + o.limit_price_range[1] : '—';
+      return '<tr>' +
+        '<td>' + o.ts_code + '<br><span style="color:#888">' + o.name + '</span></td>' +
+        '<td>' + o.action + (o.urgency === 'blocked' ? '<br><span style="color:#e8a">' + (o.note || 'blocked') + '</span>' : '') + '</td>' +
+        '<td>' + (o.current_weight * 100).toFixed(2) + '% → ' + (o.target_weight * 100).toFixed(2) + '%</td>' +
+        '<td>' + band + '</td>' +
+        '<td>' + Object.entries(o.factor_contrib || {}).map(function (kv) { return kv[0] + ':' + kv[1]; }).join('<br>') + '</td>' +
+        '<td><select data-sig-code="' + o.ts_code + '" style="font-size:12px;background:var(--bg);color:var(--text);">' +
+        ['', 'filled', 'partial', 'skipped'].map(function (s) {
+          return '<option value="' + s + '"' + ((c.state || '') === s ? ' selected' : '') + '>' + (s || '未确认') + '</option>';
+        }).join('') + '</select>' +
+        '<input data-sig-shares="' + o.ts_code + '" type="number" placeholder="成交股数" value="' + (c.filled_shares || '') + '"' +
+        ' style="width:80px;font-size:12px;margin-left:4px;background:var(--bg);color:var(--text);"></td></tr>';
+    }).join('');
+    document.getElementById('sigTableWrap').innerHTML =
+      '<table style="width:100%;border-collapse:collapse;font-size:12px;">' +
+      '<tr style="text-align:left;color:#888;"><th>标的</th><th>方向</th><th>权重</th><th>限价带</th><th>因子归因</th><th>执行确认</th></tr>' +
+      rows + '</table>';
+  } catch (e) { meta.textContent = '加载失败: ' + e.message; }
+}
+
+async function saveConfirms() {
+  if (!SIG_PLAN) return;
+  var confirms = [];
+  document.querySelectorAll('[data-sig-code]').forEach(function (sel) {
+    if (!sel.value) return;
+    var code = sel.getAttribute('data-sig-code');
+    var sh = document.querySelector('[data-sig-shares="' + code + '"]').value;
+    confirms.push({ ts_code: code, state: sel.value,
+                    filled_shares: sh ? parseFloat(sh) : null });
+  });
+  if (!confirms.length) { showToast('没有已选择状态的订单', 'info'); return; }
+  var r = await api('/api/portfolio/confirm', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ as_of: SIG_PLAN.as_of, confirms: confirms }) });
+  var d = await r.json();
+  showToast(r.ok && d.success ? '已保存 ' + confirms.length + ' 笔确认' : '保存失败: ' + (d.error || r.status),
+            r.ok && d.success ? 'success' : 'error');
+}
+
+// ── CSV 对账（V8：列映射在前端，server 零方言）──
+var SIG_CSV = null;
+function prepCsvMapping(file) {
+  if (!file) return;
+  var rd = new FileReader();
+  rd.onload = function () {
+    var lines = rd.result.split(/\r?\n/).filter(function (l) { return l.trim(); });
+    if (lines.length < 2) { showToast('CSV 至少要有表头 + 一行数据', 'error'); return; }
+    var heads = lines[0].split(/[,\t]/).map(function (h) { return h.trim(); });
+    SIG_CSV = { heads: heads, lines: lines };
+    var opts = heads.map(function (h, i) { return '<option value="' + i + '">' + h + '</option>'; }).join('');
+    document.getElementById('sigCsvMap').innerHTML =
+      '列映射：代码 <select id="csvColCode">' + opts + '</select>' +
+      ' 股数 <select id="csvColShares">' + opts + '</select>' +
+      ' 成本(可选) <select id="csvColCost"><option value="">无</option>' + opts + '</select>' +
+      ' 持仓日 <input id="csvAsOf" value="' + (SIG_PLAN ? SIG_PLAN.as_of : '') + '" style="width:100px;font-size:12px;">' +
+      ' <button onclick="importCsv()" style="font-size:12px;cursor:pointer;">导入为当日持仓</button>';
+  };
+  rd.readAsText(file);
+}
+
+async function importCsv() {
+  if (!SIG_CSV) return;
+  var ci = +document.getElementById('csvColCode').value;
+  var si = +document.getElementById('csvColShares').value;
+  var xi = document.getElementById('csvColCost').value;
+  var rows = [];
+  SIG_CSV.lines.slice(1).forEach(function (l) {
+    var cells = l.split(/[,\t]/);
+    var code = (cells[ci] || '').trim(), sh = parseFloat(cells[si]);
+    if (code && !isNaN(sh)) {
+      var row = { ts_code: code, shares: sh };
+      if (xi !== '' && cells[+xi]) row.avg_cost = parseFloat(cells[+xi]);
+      rows.push(row);
+    }
+  });
+  var asOf = document.getElementById('csvAsOf').value.trim();
+  if (!asOf || !rows.length) { showToast('持仓日或数据行为空', 'error'); return; }
+  var r = await api('/api/portfolio/reconcile', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ as_of: asOf, source: 'reconcile_csv', rows: rows }) });
+  var d = await r.json();
+  showToast(r.ok && d.success ? '已导入 ' + rows.length + ' 行持仓' : '导入失败: ' + (d.error || r.status),
+            r.ok && d.success ? 'success' : 'error');
+  if (r.ok && d.success) showSignalsModal();       // 重新拉取，未校准横幅随之消失
 }
 
 async function keyLogin() {

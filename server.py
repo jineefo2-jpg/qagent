@@ -966,6 +966,73 @@ def reset_account(x_device_id: Optional[str] = Header(None),
 # ════════════════════════════════════════════════════════════
 
 
+# ════════════════════════════════════════════════════════════
+# A 股信号看板 + 持仓回写（P3 Task 5，规格 §6.4）
+#   读：最新/历史清单、实际持仓、逐单确认    写：持仓快照（CSV 由前端按 V8 解析成
+#   规范化行再提交，server 零方言）、三态确认。写路径 require_user；owner-lock
+#   中间件对全部 /api/* 兜底。不存在任何「一键执行」——执行永远是人工的（N2）。
+# ════════════════════════════════════════════════════════════
+
+class PositionsWriteRequest(BaseModel):
+    as_of: str
+    source: str                       # 'reconcile_csv' | 'manual_confirm'（白名单在 ledger_store）
+    rows: list                        # [{ts_code, shares, avg_cost?}]
+
+
+class ConfirmsWriteRequest(BaseModel):
+    as_of: str
+    confirms: list                    # [{ts_code, state, filled_shares?, note?}]
+
+
+def _ledger_api(fn, *a, **kw):
+    """ledger_store 抛的 ValueError（白名单/缺字段）转 422，其余按约定包 dict。"""
+    try:
+        return {"success": True, "result": fn(*a, **kw)}
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+
+
+@app.get("/api/signals/latest")
+def api_signals_latest():
+    from ashare.data import ledger_store
+    return {"plan": ledger_store.latest_signal_plan()}
+
+
+@app.get("/api/signals")
+def api_signals_list(limit: int = 20):
+    from ashare.data import ledger_store
+    return {"plans": ledger_store.list_signal_plans(limit)}
+
+
+@app.get("/api/portfolio/positions")
+def api_portfolio_positions():
+    from ashare.data import ledger_store
+    d, rows = ledger_store.latest_positions()
+    return {"as_of": None if d is None else str(d), "positions": rows}
+
+
+@app.get("/api/portfolio/confirms")
+def api_portfolio_confirms(as_of: str):
+    from ashare.data import ledger_store
+    return {"as_of": as_of, "confirms": ledger_store.get_confirms(as_of)}
+
+
+@app.post("/api/portfolio/reconcile")
+def api_portfolio_reconcile(body: PositionsWriteRequest, user: User = Depends(require_user)):
+    """整日持仓快照回写（source 标注来源；'signal_assumed' 不许经 API 写 ——
+    那是系统推演的口径，用户提交的必然是人工来源）。"""
+    if body.source not in ("reconcile_csv", "manual_confirm"):
+        raise HTTPException(422, f"source 只能是 reconcile_csv / manual_confirm，收到 {body.source!r}")
+    from ashare.data import ledger_store
+    return _ledger_api(ledger_store.write_positions, body.as_of, body.rows, source=body.source)
+
+
+@app.post("/api/portfolio/confirm")
+def api_portfolio_confirm(body: ConfirmsWriteRequest, user: User = Depends(require_user)):
+    from ashare.data import ledger_store
+    return _ledger_api(ledger_store.record_confirms, body.as_of, body.confirms)
+
+
 class ProfileUpdateRequest(BaseModel):
     updates: dict
 
