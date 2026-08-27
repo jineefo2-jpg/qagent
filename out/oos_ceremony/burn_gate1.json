@@ -1,0 +1,107 @@
+{
+  "snapshot": "c2cd172976e1f3fe",
+  "A": {
+    "passed": true,
+    "note": "样本外 Sharpe 0.4156 vs 门槛 0.2934（= 0.6 × 0.4891）：过",
+    "detail": {
+      "in_sample": {
+        "start": "2010-01-01",
+        "end": "2019-12-31",
+        "param_hash": "ab102248f1b54f7f",
+        "data_snapshot_id": "c2cd172976e1f3fe",
+        "engine_version": "p2-engine-1",
+        "cost_multiplier": 1.0,
+        "sharpe": 0.48906033103405266,
+        "information_ratio": 1.0932725972372355
+      },
+      "out_of_sample": {
+        "start": "2020-01-01",
+        "end": "2026-08-21",
+        "param_hash": "601ade2d15ac96f9",
+        "data_snapshot_id": "c2cd172976e1f3fe",
+        "engine_version": "p2-engine-1",
+        "cost_multiplier": 1.0,
+        "sharpe": 0.4156458950390896,
+        "information_ratio": 0.21980594415137947
+      },
+      "ratio_required": 0.6,
+      "warnings": [
+        "2010-01-08 north_hold_chg_20: 早于 available_from=2016-12-05，返回全 NaN（不取数、不填 0）",
+        "2010-01-08 合成剔除 10/15 个因子并按剩余权重重新归一：reversal_20(覆盖率 0%，min_coverage 60%); momentum_120_20(覆盖率 0%，min_coverage 60%); volatility_60(覆盖率 0%，min_coverage 60%); turnover_20(覆盖率 0%，min_coverage 60%); amihud_20(覆盖率 0%，min_coverage 60%); max_ret_20(覆盖率 0%，min_coverage 60%); roe_ttm(覆盖率 18%，min_coverage 60%); gross_margin(覆盖率 2%，min_coverage 60%); sue(覆盖率 0%，min_coverage 60%); north_hold_chg_20(覆盖率 0%，min_coverage 60%)",
+        "2010-01-15 north_hold_chg_20: 早于 available_from=2016-12-05，返回全 NaN（不取数、不填 0）",
+        "2010-01-15 合成剔除 10/15 个因子并按剩余权重重新归一：reversal_20(覆盖率 0%，min_coverage 60%); momentum_120_20(覆盖率 0%，min_coverage 60%); volatility_60(覆盖率 0%，min_coverage 60%); turnover_20(覆盖率 0%，min_coverage 60%); amihud_20(覆盖率 0%，min_coverage 60%); max_ret_20(覆盖率 0%，min_coverage 60%); roe_ttm(覆盖率 17%，min_coverage 60%); gross_margin(覆盖率 2%，min_coverage 60%); sue(覆盖率 0%，min_coverage 60%); north_hold_chg_20(覆盖率 0%，min_coverage 60%)",
+        "2010-01-22 north_hold_chg_20: 早于 available_from=2016-12-05，返回全 NaN（不取数、不填 0）",
+        "2010-01-22 合成剔除 9/15 个因子并按剩余权重重新归一：reversal_20(覆盖率 0%，min_coverage 60%); momentum_120_20(覆盖率 0%，min_coverage 60%); volatility_60(覆盖率 0%，min_coverage 60%); amihud_20(覆盖率 0%，min_coverage 60%); max_ret_20(覆盖率 0%，min_coverage 60%); roe_ttm(覆盖率 18%，min_coverage 60%); gross_margin(覆盖率 2%，min_coverage 60%); sue(覆盖率 0%，min_coverage 60%); north_hold_chg_20(覆盖率 0%，min_coverage 60%)",
+        "换手预算 30.0% 拦下 46 笔调仓，账本与目标相差 L1=0.1365",
+        "2010-01-29 north_hold_chg_20: 早于 available_from=2016-12-05，返回全 NaN（不取数、不填 0）",
+        "2010-01-29 合成剔除 9/15 个因子并按剩余权重重新归一：reversal_20(覆盖率 0%，min_coverage 60%); momentum_120_20(覆盖率 0%，min_coverage 60%); volatility_60(覆盖率 0%，min_coverage 60%); amihud_20(覆盖率 0%，min_coverage 60%); max_ret_20(覆盖率 0%，min_coverage 60%); roe_ttm(覆盖率 18%，min_coverage 60%); gross_margin(覆盖率 2%，min_coverage 60%); sue(覆盖率 0%，min_coverage 60%); north_hold_chg_20(覆盖率 0%，min_coverage 60%)",
+        "换手预算 30.0% 拦下 42 笔调仓，账本与目标相差 L1=0.0393",
+        "2010-02-05 north_hold_chg_20: 早于 available_from=2016-12-05，返回全 NaN（不取数、不填 0）",
+        "2010-02-05 合成剔除 6/15 个因子并按剩余权重重新归一：momentum_120_20(覆盖率 0%，min_coverage 60%); volatility_60(覆盖率 0%，min_coverage 60%); roe_ttm(覆盖率 19%，min_coverage 60%); gross_margin(覆盖率 2%，min_coverage 60%); sue(覆盖率 0%，min_coverage 60%); north_hold_chg_20(覆盖率 0%，min_coverage 60%)",
+        "换手预算 30.0% 拦下 52 笔调仓，账本与目标相差 L1=0.4789",
+        "2010-02-12 north_hold_chg_20: 早于 available_from=2016-12-05，返回全 NaN（不取数、不填 0）",
+        "2010-02-12 合成剔除 6/15 个因子并按剩余权重重新归一：momentum_120_20(覆盖率 0%，min_coverage 60%); volatility_60(覆盖率 0%，min_coverage 60%); roe_ttm(覆盖率 22%，min_coverage 60%); gross_margin(覆盖率 2%，min_coverage 60%); sue(覆盖率 0%，min_coverage 60%); north_hold_chg_20(覆盖率 0%，min_coverage 60%)",
+        "换手预算 30.0% 拦下 52 笔调仓，账本与目标相差 L1=0.5130",
+        "2010-02-26 north_hold_chg_20: 早于 available_from=2016-12-05，返回全 NaN（不取数、不填 0）",
+        "2010-02-26 合成剔除 6/15 个因子并按剩余权重重新归一：momentum_120_20(覆盖率 0%，min_coverage 60%); volatility_60(覆盖率 0%，min_coverage 60%); roe_ttm(覆盖率 22%，min_coverage 60%); gross_margin(覆盖率 2%，min_coverage 60%); sue(覆盖率 0%，min_coverage 60%); north_hold_chg_20(覆盖率 0%，min_coverage 60%)",
+        "换手预算 30.0% 拦下 62 笔调仓，账本与目标相差 L1=0.5479",
+        "2010-03-05 north_hold_chg_20: 早于 available_from=2016-12-05，返回全 NaN（不取数、不填 0）",
+        "…另有 1790 条去重后的告警未列出（⚠ 级不参与封顶，已全数保留）"
+      ],
+      "threshold": 0.2934361986204316,
+      "ratio": 0.849886749473755
+    }
+  },
+  "B": {
+    "passed": true,
+    "note": "样本外 Sharpe 0.3929 vs 门槛 0.2901（= 0.6 × 0.4835）：过",
+    "detail": {
+      "in_sample": {
+        "start": "2010-01-01",
+        "end": "2019-12-31",
+        "param_hash": "5ea64edd7887ca43",
+        "data_snapshot_id": "c2cd172976e1f3fe",
+        "engine_version": "p2-engine-1",
+        "cost_multiplier": 1.0,
+        "sharpe": 0.48350859993817424,
+        "information_ratio": 0.3781357052918217
+      },
+      "out_of_sample": {
+        "start": "2020-01-01",
+        "end": "2026-08-21",
+        "param_hash": "9cc2707b6fa1cf04",
+        "data_snapshot_id": "c2cd172976e1f3fe",
+        "engine_version": "p2-engine-1",
+        "cost_multiplier": 1.0,
+        "sharpe": 0.3929000823622774,
+        "information_ratio": -0.04166255708923718
+      },
+      "ratio_required": 0.6,
+      "warnings": [
+        "2010-01-08 north_hold_chg_20: 早于 available_from=2016-12-05，返回全 NaN（不取数、不填 0）",
+        "2010-01-08 合成剔除 10/15 个因子并按剩余权重重新归一：reversal_20(覆盖率 0%，min_coverage 60%); momentum_120_20(覆盖率 0%，min_coverage 60%); volatility_60(覆盖率 0%，min_coverage 60%); turnover_20(覆盖率 0%，min_coverage 60%); amihud_20(覆盖率 0%，min_coverage 60%); max_ret_20(覆盖率 0%，min_coverage 60%); roe_ttm(覆盖率 18%，min_coverage 60%); gross_margin(覆盖率 2%，min_coverage 60%); sue(覆盖率 0%，min_coverage 60%); north_hold_chg_20(覆盖率 0%，min_coverage 60%)",
+        "2010-01-15 north_hold_chg_20: 早于 available_from=2016-12-05，返回全 NaN（不取数、不填 0）",
+        "2010-01-15 合成剔除 10/15 个因子并按剩余权重重新归一：reversal_20(覆盖率 0%，min_coverage 60%); momentum_120_20(覆盖率 0%，min_coverage 60%); volatility_60(覆盖率 0%，min_coverage 60%); turnover_20(覆盖率 0%，min_coverage 60%); amihud_20(覆盖率 0%，min_coverage 60%); max_ret_20(覆盖率 0%，min_coverage 60%); roe_ttm(覆盖率 17%，min_coverage 60%); gross_margin(覆盖率 2%，min_coverage 60%); sue(覆盖率 0%，min_coverage 60%); north_hold_chg_20(覆盖率 0%，min_coverage 60%)",
+        "2010-01-22 north_hold_chg_20: 早于 available_from=2016-12-05，返回全 NaN（不取数、不填 0）",
+        "2010-01-22 合成剔除 9/15 个因子并按剩余权重重新归一：reversal_20(覆盖率 0%，min_coverage 60%); momentum_120_20(覆盖率 0%，min_coverage 60%); volatility_60(覆盖率 0%，min_coverage 60%); amihud_20(覆盖率 0%，min_coverage 60%); max_ret_20(覆盖率 0%，min_coverage 60%); roe_ttm(覆盖率 18%，min_coverage 60%); gross_margin(覆盖率 2%，min_coverage 60%); sue(覆盖率 0%，min_coverage 60%); north_hold_chg_20(覆盖率 0%，min_coverage 60%)",
+        "换手预算 30.0% 拦下 24 笔调仓，账本与目标相差 L1=0.0070",
+        "2010-01-29 north_hold_chg_20: 早于 available_from=2016-12-05，返回全 NaN（不取数、不填 0）",
+        "2010-01-29 合成剔除 9/15 个因子并按剩余权重重新归一：reversal_20(覆盖率 0%，min_coverage 60%); momentum_120_20(覆盖率 0%，min_coverage 60%); volatility_60(覆盖率 0%，min_coverage 60%); amihud_20(覆盖率 0%，min_coverage 60%); max_ret_20(覆盖率 0%，min_coverage 60%); roe_ttm(覆盖率 18%，min_coverage 60%); gross_margin(覆盖率 2%，min_coverage 60%); sue(覆盖率 0%，min_coverage 60%); north_hold_chg_20(覆盖率 0%，min_coverage 60%)",
+        "2010-02-05 north_hold_chg_20: 早于 available_from=2016-12-05，返回全 NaN（不取数、不填 0）",
+        "2010-02-05 合成剔除 6/15 个因子并按剩余权重重新归一：momentum_120_20(覆盖率 0%，min_coverage 60%); volatility_60(覆盖率 0%，min_coverage 60%); roe_ttm(覆盖率 19%，min_coverage 60%); gross_margin(覆盖率 2%，min_coverage 60%); sue(覆盖率 0%，min_coverage 60%); north_hold_chg_20(覆盖率 0%，min_coverage 60%)",
+        "换手预算 30.0% 拦下 45 笔调仓，账本与目标相差 L1=0.3267",
+        "2010-02-12 north_hold_chg_20: 早于 available_from=2016-12-05，返回全 NaN（不取数、不填 0）",
+        "2010-02-12 合成剔除 6/15 个因子并按剩余权重重新归一：momentum_120_20(覆盖率 0%，min_coverage 60%); volatility_60(覆盖率 0%，min_coverage 60%); roe_ttm(覆盖率 22%，min_coverage 60%); gross_margin(覆盖率 2%，min_coverage 60%); sue(覆盖率 0%，min_coverage 60%); north_hold_chg_20(覆盖率 0%，min_coverage 60%)",
+        "换手预算 30.0% 拦下 50 笔调仓，账本与目标相差 L1=0.2486",
+        "2010-02-26 north_hold_chg_20: 早于 available_from=2016-12-05，返回全 NaN（不取数、不填 0）",
+        "2010-02-26 合成剔除 6/15 个因子并按剩余权重重新归一：momentum_120_20(覆盖率 0%，min_coverage 60%); volatility_60(覆盖率 0%，min_coverage 60%); roe_ttm(覆盖率 22%，min_coverage 60%); gross_margin(覆盖率 2%，min_coverage 60%); sue(覆盖率 0%，min_coverage 60%); north_hold_chg_20(覆盖率 0%，min_coverage 60%)",
+        "换手预算 30.0% 拦下 55 笔调仓，账本与目标相差 L1=0.3021",
+        "2010-03-05 north_hold_chg_20: 早于 available_from=2016-12-05，返回全 NaN（不取数、不填 0）",
+        "2010-03-05 合成剔除 6/15 个因子并按剩余权重重新归一：momentum_120_20(覆盖率 0%，min_coverage 60%); volatility_60(覆盖率 0%，min_coverage 60%); roe_ttm(覆盖率 25%，min_coverage 60%); gross_margin(覆盖率 2%，min_coverage 60%); sue(覆盖率 0%，min_coverage 60%); north_hold_chg_20(覆盖率 0%，min_coverage 60%)",
+        "…另有 1695 条去重后的告警未列出（⚠ 级不参与封顶，已全数保留）"
+      ],
+      "threshold": 0.29010515996290454,
+      "ratio": 0.812602055914863
+    }
+  }
+}
