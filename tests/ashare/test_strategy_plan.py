@@ -150,3 +150,33 @@ def test_smoke_real_db_full_plan():
         assert tw <= cfg.position_cap + 1e-6
     finally:
         query.close_db()
+
+
+# ══════════════ Task 4 · CLI（唯一写库点）══════════════
+def test_cli_persists_exports_and_unpins(fake_world, tmp_path, monkeypatch, capsys):
+    calls = {"close": 0}
+    monkeypatch.setattr(query, "open_db", lambda *a, **k: None)
+    monkeypatch.setattr(query, "close_db", lambda: calls.__setitem__("close", calls["close"] + 1))
+    saved: list = []
+    from ashare.data import ledger_store
+    monkeypatch.setattr(ledger_store, "save_signal_plan",
+                        lambda p: (saved.append(p), len(saved) > 1)[1])
+    rc = sp.main(["--as-of", "2026-08-28", "--out", str(tmp_path / "sig")])
+    assert rc == 0 and calls["close"] == 1                     # 收尾必须解钉（引擎 ★9 同契约）
+    data = json.loads((tmp_path / "sig" / "2026-08-28.json").read_text(encoding="utf-8"))
+    assert data["param_hash"] == saved[0]["param_hash"]
+    assert data["data_snapshot_id"] == "snap-1"
+    sp.main(["--as-of", "2026-08-28", "--out", str(tmp_path / "sig")])
+    assert "幂等覆盖" in capsys.readouterr().out               # 同参重发 = 覆盖并出声，不是新实验
+
+
+def test_default_config_shares_fingerprint_with_validation_backtest():
+    """start/end 钉在 P2 验收窗的全部意义：清单指纹 == 验证过这套参数的回测指纹（D7 连续性）。"""
+    from ashare.factors.base import list_factors, ALPHA_CATEGORIES
+    ref = BacktestConfig(start=D(2010, 1, 1), end=D(2019, 12, 31),
+                         factors=tuple((s.name, 1.0) for s in list_factors()
+                                       if s.category in ALPHA_CATEGORIES))
+    cfg = sp.default_config()
+    assert cfg.param_hash() == ref.param_hash()
+    assert sp.default_config(top_n=30).constraints.top_n == 30
+    assert sp.default_config(top_n=30).param_hash() != cfg.param_hash()   # 改参数 = 新指纹

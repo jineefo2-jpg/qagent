@@ -16,15 +16,20 @@ CLI 收尾要自己 `query.close_db()`（与引擎 ★9 同一条契约）。
 """
 from __future__ import annotations
 
+import argparse
 import datetime as _dt
+import json
 import math
-from typing import Dict, List, Optional
+import pathlib
+from dataclasses import replace as _dc_replace
+from typing import Dict, List, Optional, Sequence
 
 import pandas as pd
 
 from ashare.backtest.portfolio import build_targets
+from ashare.backtest.types import BacktestConfig, PortfolioConstraints
 from ashare.data import ledger_store, query
-from ashare.factors.base import compute_panel, get_factor
+from ashare.factors.base import ALPHA_CATEGORIES, compute_panel, get_factor, list_factors
 from ashare.factors.base import combine as _combine
 from .macro import macro_score
 
@@ -165,3 +170,61 @@ def build_rebalance_plan(as_of_date, config) -> dict:
             "warnings": plan_warns,
             "strategy_version": STRATEGY_VERSION,
             "param_hash": config.param_hash(), "data_snapshot_id": snapshot}
+
+
+# ══════════════ CLI（Task 4）—— 唯一写库点 ══════════════
+_VALIDATION_WINDOW = (_dt.date(2010, 1, 1), _dt.date(2019, 12, 31))
+
+
+def default_config(*, macro_timing: bool = False, top_n: Optional[int] = None,
+                   position_cap: Optional[float] = None) -> BacktestConfig:
+    """默认策略配置：全部 alpha 因子等权 + 组合约束默认值。
+
+    ★ start/end 有意钉在 **P2 验收窗口（2010–2019）**：BacktestConfig 的 param_hash
+    覆盖 start/end，钉死后清单的指纹与「验证过这套参数」的那次回测**同指纹** ——
+    D7 的连续性从回测台账一路接到清单台账。改窗口 = 另一套策略 = 新指纹，这是特性。"""
+    alphas = tuple((s.name, 1.0) for s in list_factors() if s.category in ALPHA_CATEGORIES)
+    kw: dict = {"start": _VALIDATION_WINDOW[0], "end": _VALIDATION_WINDOW[1],
+                "factors": alphas, "macro_timing": macro_timing}
+    if top_n is not None:
+        kw["constraints"] = _dc_replace(PortfolioConstraints(), top_n=top_n)
+    if position_cap is not None:
+        kw["position_cap"] = position_cap
+    return BacktestConfig(**kw)
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    ap = argparse.ArgumentParser(
+        prog="python -m ashare.strategy.plan",
+        description="生成 §6.3 调仓清单：落 ledger 库 + 导出 JSON。落库只发生在这里（L4）。")
+    ap.add_argument("--as-of", required=True, help="信号日（T，收盘后），YYYY-MM-DD")
+    ap.add_argument("--macro-timing", action="store_true", help="启用宏观择时层（默认恒定 position_cap）")
+    ap.add_argument("--top-n", type=int, default=None)
+    ap.add_argument("--position-cap", type=float, default=None)
+    ap.add_argument("--out", default="out/signals", help="JSON 导出目录")
+    a = ap.parse_args(argv)
+
+    cfg = default_config(macro_timing=a.macro_timing, top_n=a.top_n, position_cap=a.position_cap)
+    query.open_db()
+    try:
+        plan = build_rebalance_plan(a.as_of, cfg)
+        overwrote = ledger_store.save_signal_plan(plan)
+        out_dir = pathlib.Path(a.out)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        f = out_dir / f"{plan['as_of']}.json"
+        f.write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"[plan] {plan['as_of']} → 执行 {plan['execute_on']}  π={plan['target_position']}")
+        print(f"[plan] 订单 {len(plan['orders'])} 笔 / 剔除 {len(plan['excluded'])} 只"
+              f" / 校准={'是' if plan['position_calibrated'] else '否'}")
+        for w in plan["warnings"]:
+            print(f"[plan] {w}")
+        if overwrote:
+            print(f"[plan] ⚠ 同 (as_of, param_hash) 已存在，幂等覆盖旧行（参数没变，这不是新实验）")
+        print(f"[plan] 已落库 ledger + 导出 {f}")
+        return 0
+    finally:
+        query.close_db()        # 解钉（引擎 ★9 同一条契约：钉子活得比 build 长，调用方收尾）
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
