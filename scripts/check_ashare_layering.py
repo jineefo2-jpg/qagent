@@ -5,7 +5,8 @@
   L2 首参名  ：ashare/data/query.py 的公开函数首参必须是 as_of_date（白名单除外）
   L3 因子签名：ashare/factors/{price,fundamental,flow,risk}.py 的公开函数前两个位置参数
                必须是 (as_of_date, universe)
-  L4 写操作  ：ashare/report/**、ashare/agent_tools.py 不得出现 DML 字符串（D1）
+  L4 写操作  ：ashare/report/**、ashare/agent_tools.py、ashare/strategy/** 不得出现 DML 字符串（D1；
+               strategy 的落库只准走 CLI → ashare.data.ledger_store）
   L5 复权逃逸：ashare/data/** 之外不得传 adjust="none"（D8：后复权是唯一真值）
   L6 私有绕过：ashare/data/** 之外不得从 ashare.data.* 导入下划线开头的名字
                （_PRELOAD 里有原始价、limit_up 与未掩码的停牌行，绕过 get_bars/get_tradable_mask 的全部保护）
@@ -23,11 +24,12 @@ DUCKDB_ALLOWED_PREFIX = ("data/",)
 #   norm_date —— 纯日期归一，不返回行情。公开是因为 data 层之外要用（L6 挡私有名）
 QUERY_FIRST_PARAM_WHITELIST = {"get_tradable_mask", "open_db", "preload", "industry_source",
                                "norm_date"}
-READONLY_LAYERS = ("report/", "agent_tools.py")
+READONLY_LAYERS = ("report/", "agent_tools.py", "strategy/")   # strategy 写库只准经 CLI→ledger_store
 DML = ("INSERT ", "UPDATE ", "DELETE ", "CREATE ", "DROP ", "ALTER ", "REPLACE ")
 FACTOR_FILES = {"price.py", "fundamental.py", "flow.py", "risk.py"}
 # L6 的属性访问检查认这些模块名（`from ashare.data import query` 之后的绑定名）
-_DATA_MODULE_ALIASES = {"query", "validate", "ingest", "promote", "limits", "derived_store"}
+_DATA_MODULE_ALIASES = {"query", "validate", "ingest", "promote", "limits", "derived_store",
+                        "ledger_store"}
 
 
 def _rel(path: pathlib.Path, root: pathlib.Path) -> str:
