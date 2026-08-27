@@ -605,10 +605,8 @@ MOCK_QUOTES = {
                "volume_m": 38.4,  "pe": 72.4, "market_cap_b": 2920},
     "TSLA":   {"name": "Tesla Inc.",      "price": 248.50, "change_pct": -1.85,
                "volume_m": 95.2,  "pe": 65.8, "market_cap_b": 791},
-    "600519": {"name": "贵州茅台",         "price": 1685.0, "change_pct": +0.68,
-               "volume_m": 2.4,   "pe": 22.3, "market_cap_b": 2117},
-    "000858": {"name": "五粮液",           "price": 142.30, "change_pct": -0.35,
-               "volume_m": 8.7,   "pe": 18.6, "market_cap_b": 552},
+    # ★ A 股条目已全部移除（2026-08-27 用户裁决：全量 A 股量化，不许有任何预设/写死的股票）。
+    #   A 股数据源全挂时走诚实失败，绝不端出编造的价格 —— 假数据比没数据坏。
 }
 
 
@@ -760,7 +758,7 @@ def market_quote(symbol: str, skip_cache: bool = False) -> dict:
         "error_type": "all_sources_failed",
         "error": f"代码 '{symbol}' 在所有数据源都未找到",
         "sources_tried": sources_tried,
-        "hint": "确认代码格式：美股 AAPL / A股 600519 / 港股 0700",
+        "hint": "确认代码格式：美股 AAPL / A股 6位代码 / 港股 0700",
     }
 
 
@@ -778,10 +776,8 @@ MOCK_FACTOR_RAW = {
                "quality": 88, "technical": 85},
     "TSLA":   {"value": 25,  "growth": 65,  "momentum": 48,
                "quality": 72, "technical": 35},
-    "600519": {"value": 58,  "growth": 62,  "momentum": 55,
-               "quality": 98, "technical": 60},
-    "000858": {"value": 65,  "growth": 48,  "momentum": 42,
-               "quality": 88, "technical": 50},
+    # ★ A 股条目已全部移除（同 MOCK_QUOTES 的 2026-08-27 裁决）。A 股因子本就被拦截
+    #   引导到本地因子库（get_factor_exposure），这里不留任何预设分数的回退路径。
 }
 
 # ─────────────────────────────────────────────
@@ -1892,7 +1888,7 @@ def market_news_search(query: str, max_results: int = 5) -> dict:
             "market_detected": market,
             "sources_tried": sources_tried,
             "error": f"所有数据源都未找到 '{query}' 相关资讯",
-            "hint": "确认代码格式：AAPL / 600519 / 0700.HK；中文公司名也可",
+            "hint": "确认代码格式：AAPL / A股6位代码 / 0700.HK；中文公司名也可",
         }
 
     return {
@@ -2786,7 +2782,7 @@ def stock_announcements(symbol: str, days: int = 30) -> dict:
 
     return {"success": False,
             "error": f"未识别市场: {symbol}",
-            "hint": "支持 A股(600519) / 美股(AAPL)"}
+            "hint": "支持 A股(6位代码) / 美股(AAPL)"}
 
 
 # ─── Tool 17: 持仓追踪（按设备隔离）────────────────────
@@ -2805,7 +2801,7 @@ def portfolio_manage(action: str,
             'remove' 删单只
             'list'  查看
             'summary' 含估值的汇总（自动拉行情）
-    holdings (set 用): [{"symbol": "600519", "qty": 100, "cost": 1600}]
+    holdings (set 用): [{"symbol": "<6位代码>", "qty": 100, "cost": <成本价>}]
     """
     key = _portfolio_key(device_id)
     holdings_cur = cache.get(key) or []
@@ -2913,7 +2909,7 @@ def alert_manage(action: str,
         if not symbol or not condition:
             return {"success": False,
                     "error": "create 需 symbol + condition",
-                    "example": "create symbol='600519' condition='price>=1500'"}
+                    "example": "create symbol='<6位代码>' condition='price>=1500'"}
         aid = str(int(_time.time() * 1000))
         new_alert = {
             "id": aid,
@@ -3233,7 +3229,7 @@ def historical_prices(symbol: str, days: int = 60) -> dict:
     if market == "unknown":
         return {"success": False,
                 "error": f"未识别市场代码: {symbol}",
-                "hint": "支持 600519(A)/AAPL(US)/0700(HK)"}
+                "hint": "支持 6位代码(A)/AAPL(US)/0700(HK)"}
 
     cache_key = f"quant:price:{symbol.upper()}:{days}"
     cached = cache.get(cache_key)
@@ -3306,7 +3302,7 @@ def historical_prices(symbol: str, days: int = 60) -> dict:
             "error": "所有数据源都失败",
             "sources_tried": sources_tried,
             "hint": ("1) 检查 HTTP_PROXY/HTTPS_PROXY 环境变量；"
-                     "2) 确认代码格式（A股 600519 / 美股 AAPL / 港股 0700）；"
+                     "2) 确认代码格式（A股 6位代码 / 美股 AAPL / 港股 0700）；"
                      "3) 等几分钟避开 Yahoo 限流"),
         }
 
@@ -4026,7 +4022,7 @@ TOOL_SCHEMAS = [
         "description": """实时行情快照（多源：新浪财经 → MOCK 兜底）。
 返回：现价、涨跌幅、开高低、成交量/额、数据源标注。
 支持代码：
-  - A 股: 600519（自动转 sh600519）/ 000858（自动 sz）
+  - A 股: 6 位数字代码（自动加 sh/sz 前缀；全量 A 股，无预设名单）
   - 港股: 0700 / 00700
   - 美股: AAPL / NVDA / TSLA
 data_source 字段会标明实际来源，看到 [MOCK DATA] 时必须警示用户。""",

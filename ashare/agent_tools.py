@@ -133,7 +133,7 @@ processed 为全市场横截面 z 分（未乘 direction）。非调仓日无值
             "type": "object",
             "properties": {
                 "as_of": {"type": "string", "description": "交易日，YYYY-MM-DD"},
-                "ts_code": {"type": "string", "description": "可选，如 600519.SH"},
+                "ts_code": {"type": "string", "description": "可选，######.SH/.SZ/.BJ 格式的 ts_code"},
                 "factor": {"type": "string", "description": "可选，因子名，如 reversal_20"},
                 "top": {"type": "integer", "description": "factor 模式下的排名条数，默认 20"},
             },
