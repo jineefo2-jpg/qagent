@@ -54,7 +54,7 @@ tests/ashare/test_strategy_*.py
 
 | # | 裁决 | 理由 |
 |---|---|---|
-| V1 | `signal_plan` / `position_ledger` 落 **derived 库**，随 schema v3 迁移建表 | market 库被 promote 原子替换，用户持仓/信号跟着换 = 数据丢失；derived 只有本侧写。P1 欠账（规格 §6.4 说建表在 P1，实际没建）本期补 |
+| V1 | ~~落 derived 库~~ **修正（2026-08-27 Task 0 实施时）：新立第三库 `data/ashare_ledger.duckdb`**（带 market 同款 schema_version 守卫） | 初稿只排除了 market（promote 整体替换），漏看了 derived 的既有契约「缓存，可随时 rm 重算」（derived_schema.sql 头注释）—— 信号/持仓是**不可重算的用户资产**，放缓存库等于埋数据丢失雷。P1 欠账（规格 §6.4）随本库补上 |
 | V2 | 分位 → 0/0.5/1 的切点定 **30% / 70%** | 规格只说「按分位映射」没给数。30/70 让中档（0.5）覆盖 40% 历史状态 —— 择时层的仓位波动被天然抑制，与「统计功效最低的模块拿最小的权力」同向 |
 | V3 | `north_flow_60` 口径 = **Σ₆₀ Δ(hk_hold_ratio × circ_mv) / circ_mv**（全市场加总） | 库里存的是持股**比率**不是流量；用 60 日持股市值变化近似净流入。规格公式的字面直译 |
 | V4 | 限价带用**原始价**（交易所真实价格），ATR20 同口径 | 用户按清单去券商 App 下单，后复权价没法输入。这是 D8「后复权唯一真值」的**既定豁免通道**（与涨跌停价同类：交易执行层用原始价），出口走 `get_tradable_mask` 的扩展列，不开新的 `adjust="none"` 后门 |
