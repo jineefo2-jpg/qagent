@@ -242,8 +242,7 @@ def run_backtest(config: BacktestConfig, *, on_progress: Optional[Callable[[int,
     if not cfg.factors:
         raise ValueError("config.factors 为空：没有因子就没有合成分数")
     weights = dict(cfg.factors)
-    pi = float(cfg.position_cap)            # macro_timing=False → 恒定满仓（§7.1）
-    macro_short: set = set()
+    pi, macro_short = float(cfg.position_cap), set()   # macro_timing=False → 恒定满仓（§7.1）
     if cfg.macro_timing:                    # 惰性导入避环：strategy→backtest 方向的依赖已存在
         from ..strategy.macro import position_for
     rng = None if cfg.shuffle_seed is None else np.random.default_rng(cfg.shuffle_seed)
@@ -254,21 +253,22 @@ def run_backtest(config: BacktestConfig, *, on_progress: Optional[Callable[[int,
     dates = query.get_trade_dates(cfg.end, start=cfg.start, freq="W")
     use_store and factor_store.preload_window({n: get_factor(n).param_hash() for n, _ in cfg.factors}, dates)
 
-    cash = float(cfg.initial_capital)
+    cash, warns = float(cfg.initial_capital), []
     holdings = pd.Series(dtype=float, name="shares").rename_axis("ts_code")
-    warns: list = []
     marks: list = []            # (exec_date, cash, holdings) —— 日频盯市的台阶（★10）
     diag: list = []             # compute_diagnostics=True 时逐期的诊断入参（★11）
-    pos_frames: list = []
-    trade_frames: list = []
-    blocked_frames: list = []
-    used: dict = {}
+    pos_frames, trade_frames, blocked_frames, used = [], [], [], {}
+    data_end = query.last_data_date()        # 循环外一次：日历比行情长（预拉 +90 天），见该函数注
 
     for i, t in enumerate(dates, 1):
         exec_date = query.next_trade_date(t)
         if exec_date is None:
             warns.append(f"{t}: 日历末端没有下一个交易日，回测在此结束"
                          f"（D6：T 日收盘算信号、T+1 开盘成交）")
+            break
+        if data_end is not None and exec_date > data_end:
+            warns.append(f"{t}: 执行日 {exec_date} 超出行情覆盖（数据止于 {data_end}），该信号丢弃、"
+                         f"回测在此结束 —— 没有行情就没有成交价（超出 end 但有数据的照常成交）")
             break
         universe = query.get_universe(t)
         if not universe:

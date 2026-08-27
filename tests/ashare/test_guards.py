@@ -850,6 +850,9 @@ class _GuardQuery:
     def preload(self, start, end, tables=()):
         pass
 
+    def last_data_date(self):
+        return _G_DAYS[-1]          # 这个假世界里日历与行情同长
+
     def get_trade_dates(self, as_of_date, *, start=None, freq="D"):
         days = [d for d in _G_DAYS if d <= as_of_date and (start is None or d >= start)]
         return days if freq == "D" else [d for d in _G_WEEKLY if d in days]

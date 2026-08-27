@@ -145,3 +145,22 @@ def test_daily_basic_uses_preload(q):
     one = q.get_daily_basic("2024-01-05", ["A00001.SZ", "B00002.SZ"])
     assert list(one.index) == ["A00001.SZ", "B00002.SZ"] and one.loc["A00001.SZ", "total_mv"] == 1e6
     q.clear_preload()
+
+
+def test_preload_invalidates_the_wide_panel_cache(q):
+    """同一进程连跑两次回测（`gate1` 的 IS→OOS 就是）：第二次 `preload` 换了窗，
+    宽面板缓存必须跟着失效 —— 否则第二次回测读到的是**第一次那个窗**的价格面板，
+    新窗里的日期整段缺失、新窗才上市的票整列不存在，价格静默变 NaN。
+    2026-08-27 样本外仪式实测：burn 死在这里（prev_weights 含 NaN，全是 2020 后上市的票）。"""
+    days = q.get_trade_dates("2024-01-12", start="2024-01-02")
+    early, late = days[:2], days[-2:]
+    q.preload(early[0], early[-1], tables=("daily_bar",))
+    first = q.get_price_panel(early[-1], ["A00001.SZ"], "close", lookback=2)
+    assert first.notna().to_numpy().any()          # 第一个窗：正常建面板
+
+    q.preload(late[0], late[-1], tables=("daily_bar",))
+    second = q.get_price_panel(late[-1], ["A00001.SZ"], "close", lookback=2)
+    q.clear_preload()
+    assert list(second.index) and second.notna().to_numpy().any(), (
+        "第二个 preload 窗读回空/NaN —— _PRELOAD_WIDE 仍是上一个窗的面板")
+    assert second.index[-1] == late[-1]

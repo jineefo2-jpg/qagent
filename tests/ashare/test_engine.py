@@ -144,6 +144,10 @@ class FakeQuery:
         later = [d for d in DAYS if d > as_of_date]
         return later[n - 1] if len(later) >= n else None
 
+    def last_data_date(self):
+        """行情覆盖到哪一天。真实日历比数据多（ingest 预拉 +90 天），两者不是一回事。"""
+        return getattr(self, "data_end", DAYS[-1])
+
     # ── 池 / 元数据 ──
     def get_universe(self, as_of_date, **k):
         return list(self.universe.get(as_of_date, CODES))
@@ -1417,3 +1421,23 @@ def test_swapping_the_database_mid_run_raises_because_the_snapshot_is_pinned(
 
     with pytest.raises(QueryError):
         run_backtest(_real_cfg(), on_progress=swap)
+
+
+def test_a_signal_whose_exec_date_has_no_market_data_is_dropped(world):
+    """裁决 ⑦ 的【数据边缘】那一半：日历有 T+1、行情没有（日历预拉 +90 天，数据止于昨天）。
+    这种信号必须丢弃并告警 —— 拿一个没有行情的日子去成交，`simulate` 会因为整个持仓
+    `no_quote` 而抛，一次好端端的回测死在最后一期。
+    2026-08-27 样本外仪式实测：burn 的 OOS 段（end = 数据最后一天）正是死在这里。
+    注意与 `test_the_daily_index_covers_an_exec_date_past_the_end` 的分工：
+    执行日**超出 end 但有数据**照常成交（那条测试钉着），本条只管**超出数据**。"""
+    q = world["q"]
+    q.data_end = WEEKLY[3]                    # 行情止于第 4 个调仓日当天
+    try:
+        res = run_backtest(make_cfg(end=WEEKLY[4]))
+    finally:
+        del q.data_end
+    assert any("行情" in w and "丢弃" in w for w in res.warnings), \
+        f"没有告警说明信号被静默丢弃或照样成交了；warnings={res.warnings}"
+    if len(res.trades):
+        assert res.trades["exec_date"].max() <= q.last_data_date()
+    assert res.equity.index[-1] <= WEEKLY[3] + dt.timedelta(days=7)

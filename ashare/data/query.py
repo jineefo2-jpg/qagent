@@ -320,6 +320,19 @@ def preload(start: DateLike, end: DateLike,
         df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.date
         _PRELOAD[t] = df
         _PRELOAD_POS[t] = _build_preload_pos(df)
+    # ★ 宽面板缓存必须跟着换窗失效（`_PRELOAD_WIDE` 的注释说的「随 _PRELOAD 同清」——
+    #   之前只有 open_db / close_db / clear_preload 三处真的清，preload 换窗这一路漏了）。
+    #   同进程连跑两次回测（`gate1_out_of_sample` 的 IS→OOS 正是）时，第二次会拿着
+    #   第一次那个窗的面板：新窗日期整段缺失、新窗才上市的票整列不存在 → 价格静默变 NaN。
+    _PRELOAD_WIDE.clear()
+
+
+def last_data_date() -> "_dt.date | None":
+    """行情覆盖的最后一天。**日历比它长**：`ingest_calendar` 每次预拉 today+90 天，
+    于是 `next_trade_date(最后一根 K 线那天)` 会给出一个没有任何行情的「未来交易日」。
+    回测拿它当执行日 → 整个持仓 `no_quote` → `simulate` 抛。库空返回 None。"""
+    r = _conn().execute("SELECT max(trade_date) FROM daily_bar").fetchone()
+    return None if r is None or r[0] is None else pd.Timestamp(r[0]).date()
 
 
 def clear_preload() -> None:
