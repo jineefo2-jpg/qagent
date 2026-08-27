@@ -174,18 +174,27 @@ def build_rebalance_plan(as_of_date, config) -> dict:
 
 # ══════════════ CLI（Task 4）—— 唯一写库点 ══════════════
 _VALIDATION_WINDOW = (_dt.date(2010, 1, 1), _dt.date(2019, 12, 31))
+# ★ 2026-08-28 样本外仪式的判定③ 把生产配置定死在「A 臂」：恒定仓位 0.8、不开宏观择时
+#   （宏观层因 Sharpe 未超恒定仓位而关停，规格 §6.1）。这个哈希是**过了闸 1 的那次回测**
+#   的指纹 —— 下面的 `default_config()` 必须逐位复现它，否则每晚的信号就来自一个
+#   没有通过样本外验证的配置。测试 `test_default_config_is_the_validated_arm` 钉住。
+#   D7 只给一次样本外机会且已用尽：改因子/约束/仓位 = 这个哈希对不上 = 信号失去背书，
+#   那是需要人明确承认的事，不是可以顺手改掉的默认值。
+VALIDATED_PARAM_HASH = "ab102248f1b54f7f"
+PRODUCTION_POSITION_CAP = 0.8
 
 
 def default_config(*, macro_timing: bool = False, top_n: Optional[int] = None,
                    position_cap: Optional[float] = None) -> BacktestConfig:
-    """默认策略配置：全部 alpha 因子等权 + 组合约束默认值。
+    """生产策略配置 = 样本外仪式的胜出臂（见 `VALIDATED_PARAM_HASH`）。
 
     ★ start/end 有意钉在 **P2 验收窗口（2010–2019）**：BacktestConfig 的 param_hash
     覆盖 start/end，钉死后清单的指纹与「验证过这套参数」的那次回测**同指纹** ——
     D7 的连续性从回测台账一路接到清单台账。改窗口 = 另一套策略 = 新指纹，这是特性。"""
     alphas = tuple((s.name, 1.0) for s in list_factors() if s.category in ALPHA_CATEGORIES)
     kw: dict = {"start": _VALIDATION_WINDOW[0], "end": _VALIDATION_WINDOW[1],
-                "factors": alphas, "macro_timing": macro_timing}
+                "factors": alphas, "macro_timing": macro_timing,
+                "position_cap": PRODUCTION_POSITION_CAP}
     if top_n is not None:
         kw["constraints"] = _dc_replace(PortfolioConstraints(), top_n=top_n)
     if position_cap is not None:

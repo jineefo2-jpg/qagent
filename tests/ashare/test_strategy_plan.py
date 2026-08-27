@@ -170,13 +170,20 @@ def test_cli_persists_exports_and_unpins(fake_world, tmp_path, monkeypatch, caps
     assert "幂等覆盖" in capsys.readouterr().out               # 同参重发 = 覆盖并出声，不是新实验
 
 
-def test_default_config_shares_fingerprint_with_validation_backtest():
-    """start/end 钉在 P2 验收窗的全部意义：清单指纹 == 验证过这套参数的回测指纹（D7 连续性）。"""
+def test_default_config_is_the_validated_arm():
+    """生产配置必须【逐位】等于通过样本外闸 1 的那一臂（2026-08-28 仪式判定③）。
+
+    D7 只给一次样本外机会且已用尽：这个哈希对不上 = 每晚的信号来自一个没有背书的
+    配置，而报告上看不出任何异常。红了不许改这里的期望值 —— 要么把改动退回去，
+    要么明确承认「信号不再有样本外背书」（那是人的决定，不是测试的）。"""
     from ashare.factors.base import list_factors, ALPHA_CATEGORIES
-    ref = BacktestConfig(start=D(2010, 1, 1), end=D(2019, 12, 31),
+    ref = BacktestConfig(start=D(2010, 1, 1), end=D(2019, 12, 31), position_cap=0.8,
                          factors=tuple((s.name, 1.0) for s in list_factors()
                                        if s.category in ALPHA_CATEGORIES))
     cfg = sp.default_config()
-    assert cfg.param_hash() == ref.param_hash()
+    assert cfg.position_cap == sp.PRODUCTION_POSITION_CAP == 0.8
+    assert cfg.macro_timing is False, "宏观层已按 §6.1 关停（样本外 Sharpe 未超恒定仓位）"
+    assert cfg.param_hash() == ref.param_hash() == sp.VALIDATED_PARAM_HASH, (
+        f"生产配置指纹 {cfg.param_hash()} ≠ 过闸的 {sp.VALIDATED_PARAM_HASH}")
     assert sp.default_config(top_n=30).constraints.top_n == 30
     assert sp.default_config(top_n=30).param_hash() != cfg.param_hash()   # 改参数 = 新指纹
