@@ -67,7 +67,7 @@ class FakeRun:
     equity: object = None
 
 
-def fake_run(cfg, *, sharpe=1.0, ir=0.5, warnings=(), engine_version="p2-engine-1",
+def fake_run(cfg, *, use_store=False, sharpe=1.0, ir=0.5, warnings=(), engine_version="p2-engine-1",
              equity=None) -> FakeRun:
     return FakeRun(metrics={"sharpe": sharpe, "information_ratio": ir},
                    warnings=list(warnings), param_hash=cfg.param_hash(),
@@ -120,11 +120,15 @@ def runner(monkeypatch):
 
 
 class _Spec:
-    """`get_factor` 的最小替身：闸 2/闸 5 只问 `default_params`（θ* 的注册默认值）。"""
+    """`get_factor` 的最小替身：闸 2/闸 5 只问 `default_params`（θ* 的注册默认值）；
+    闸接 use_store 后引擎的 preload_window 还会问 `param_hash`（给个稳定桩即可）。"""
 
     def __init__(self, **default_params):
         self.default_params = dict(default_params)
         self.lookback_days = 250
+
+    def param_hash(self) -> str:
+        return "spec-" + "-".join(f"{k}{v}" for k, v in sorted(self.default_params.items()))
 
 
 @pytest.fixture(autouse=True)

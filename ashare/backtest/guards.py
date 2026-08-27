@@ -237,8 +237,8 @@ def gate1_out_of_sample(cfg: BacktestConfig) -> GateResult:
 
     is_cfg = _bare(cfg, end=OOS_CUTOFF)
     oos_cfg = _bare(cfg, start=OOS_CUTOFF + _ONE_DAY)
-    is_res = run_backtest(is_cfg)
-    oos_res = run_backtest(oos_cfg)
+    is_res = run_backtest(is_cfg, use_store=True)
+    oos_res = run_backtest(oos_cfg, use_store=True)
 
     warns = _uniq(list(is_res.warnings) + list(oos_res.warnings))
     sr_is, sr_oos = _sharpe(is_res), _sharpe(oos_res)
@@ -356,7 +356,7 @@ def gate2_walk_forward(cfg: BacktestConfig, train_years: int = 5, test_years: in
     # 样本内那一次 —— 与闸 1 的 is_cfg 逐位相同。先跑它：算不出 / 不为正时，
     # 5 折 × g 个候选的折内运行全部免掉（同闸 3「真实 Sharpe 都没有就不跑对照」的先例）。
     is_cfg = _bare(cfg, end=end)
-    is_res = run_backtest(is_cfg)
+    is_res = run_backtest(is_cfg, use_store=True)
     runw: list = list(is_res.warnings)
     sr_is = _sharpe(is_res)
     detail: dict = {"in_sample": _stamp(is_cfg, is_res), "ratio_required": _OOS_SR_RATIO,
@@ -380,7 +380,7 @@ def gate2_walk_forward(cfg: BacktestConfig, train_years: int = 5, test_years: in
     for tr_s, tr_e, te_s, te_e in folds:
         scored: list = []
         for point, pcfg in points:
-            r = run_backtest(_bare(pcfg, start=tr_s, end=tr_e))
+            r = run_backtest(_bare(pcfg, start=tr_s, end=tr_e), use_store=True)
             runw += r.warnings
             scored.append((point, _sharpe(r), pcfg))
         ok = [s for s in scored if _finite(s[1])]
@@ -391,7 +391,7 @@ def gate2_walk_forward(cfg: BacktestConfig, train_years: int = 5, test_years: in
                          "theta": None, "train_sharpe": None, "test_sharpe": None})
             continue
         point, sr, pcfg = max(ok, key=lambda s: s[1])
-        tr = run_backtest(_bare(pcfg, start=te_s, end=te_e))
+        tr = run_backtest(_bare(pcfg, start=te_s, end=te_e), use_store=True)
         runw += tr.warnings
         eq = pd.Series(tr.equity, dtype=float)
         if len(eq) >= 2:
@@ -472,7 +472,7 @@ def gate3_shuffle(cfg: BacktestConfig, n: int = 200, seed: int = 0) -> GateResul
         # ⚠ 前缀是承重的：_note 只把 ⚠ 级顶到 note 上，闸自己喊的降级不该比引擎的低一级。
         own.append(f"⚠ 传入的 config 自带 shuffle_seed={cfg.shuffle_seed}（那已经是一次置换对照，"
                    f"不是真回测），基线已按 shuffle_seed=None 重跑")
-    real = run_backtest(base_cfg)
+    real = run_backtest(base_cfg, use_store=True)
     runw: list = list(real.warnings)
     sr_real = _sharpe(real)
     detail: dict = {"n": n, "seed": seed, "alpha": _SHUFFLE_ALPHA,
@@ -489,7 +489,7 @@ def gate3_shuffle(cfg: BacktestConfig, n: int = 200, seed: int = 0) -> GateResul
     null: list = []
     n_ge = n_bad = 0
     for b in range(n):
-        r = run_backtest(_dc.replace(base_cfg, shuffle_seed=seed + b))
+        r = run_backtest(_dc.replace(base_cfg, shuffle_seed=seed + b), use_store=True)
         runw += r.warnings
         s = _sharpe(r)
         null.append(_num(s))
@@ -547,7 +547,7 @@ def gate4_cost_stress(cfg: BacktestConfig, multiplier: float = 2.0) -> GateResul
                           f"×{multiplier} 之后 D7 指纹一字未变（param_hash={base_hash}）：成本根本没被加压，"
                           f"这次跑的就是基线本身（CostConfig.multiplier 没进 param_hash？）")
 
-    res = run_backtest(stressed)
+    res = run_backtest(stressed, use_store=True)
     warns = _uniq(res.warnings)
     ir = _num(res.metrics.get("information_ratio"))
     detail = {"multiplier": multiplier, "baseline_param_hash": base_hash,
@@ -591,7 +591,7 @@ def gate5_param_plateau(cfg: BacktestConfig,
         return GateResult("gate5", False, {}, f"参数网格无效：{e}")
 
     star_hash = star_cfg.param_hash()
-    star_res = run_backtest(star_cfg)
+    star_res = run_backtest(star_cfg, use_store=True)
     runw: list = list(star_res.warnings)
     sr_star = _sharpe(star_res)
 
@@ -599,7 +599,7 @@ def gate5_param_plateau(cfg: BacktestConfig,
     for point, pcfg in points:
         if pcfg.param_hash() == star_hash:      # 网格里的 θ* 自己，不重复跑也不进邻域
             continue
-        r = run_backtest(pcfg)
+        r = run_backtest(pcfg, use_store=True)
         runw += r.warnings
         nb[_label(point)] = _num(_sharpe(r))
 
