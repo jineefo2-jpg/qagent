@@ -54,51 +54,45 @@ def test_to_month_last_takes_last_obs_and_labels_month_end():
 # ══════════════ 合成世界全链路 ══════════════
 @pytest.fixture()
 def synthetic_world(monkeypatch):
-    """两只票、月频宏观 2013-01 起、日频指数 2012 起 —— 足够把 60 个月窗填满。"""
+    """两只票、月频宏观 2013-01 起（次月 15 日可见）、日频指数 2012 起。缓存逐测清空。"""
+    macro._CACHE.clear(); macro._SCORE_MEMO.clear()
     months = pd.date_range("2013-01-31", "2019-06-30", freq="ME").date
     days = [d.date() for d in pd.bdate_range("2012-01-02", "2019-06-28")]
+    monkeypatch.setattr(query, "snapshot_id", lambda *, pin=False: "snap-syn")
 
     def fake_get_macro(as_of, inds, lookback_periods=60):
         as_of = query.norm_date(as_of)
         out = {}
         for i in inds:
             if i == "cn10y":
-                out[i] = pd.Series(3.0, index=[d for d in days if d <= as_of])
-            elif i == "m1_yoy":
-                out[i] = pd.Series([5.0 + k % 7 for k in range(len(months))], index=months)
-            elif i == "m2_yoy":
-                out[i] = pd.Series(8.0, index=months)
-            elif i == "tsf_stock_yoy":
-                out[i] = pd.Series([10.0 + 0.1 * k for k in range(len(months))], index=months)
-        df = pd.DataFrame(out)
-        return df[df.index <= as_of]
+                idx = [d for d in days if d <= as_of]
+                out[i] = pd.Series(3.0, index=idx)
+                out[f"{i}__publish_date"] = pd.Series(idx, index=idx)      # 日频当日可见
+            else:
+                vals = {"m1_yoy": [5.0 + k % 7 for k in range(len(months))],
+                        "m2_yoy": [8.0] * len(months),
+                        "tsf_stock_yoy": [10.0 + 0.1 * k for k in range(len(months))]}[i]
+                out[i] = pd.Series(vals, index=months, dtype=float)
+                out[f"{i}__publish_date"] = pd.Series(
+                    [m + dt.timedelta(days=15) for m in months], index=months)   # 次月中旬可见
+        return pd.DataFrame(out)      # 可见性由缓存层按 __publish_date 切，这里给全量
 
     def fake_index_bars(as_of, code, lookback=250, fields=()):
         as_of = query.norm_date(as_of)
         idx = [d for d in days if d <= as_of]
         n = len(idx)
-        return pd.DataFrame({"close": [100.0 + 0.01 * k for k in range(n)],   # 缓慢上行 → trend > 1
+        return pd.DataFrame({"close": [100.0 + 0.01 * k for k in range(n)],
                              "pe_ttm": [20.0] * n}, index=pd.Index(idx, name="trade_date"))
 
-    def fake_trade_dates(as_of, *, start=None, freq="D"):
+    def fake_north(as_of):
         as_of = query.norm_date(as_of)
-        return [d for d in days if d <= as_of]
-
-    def fake_stock_basic(as_of, ts_codes=None):
-        return pd.DataFrame(index=pd.Index(["A.SH", "B.SZ"], name="ts_code"))
-
-    def fake_money_flow(d, codes, fields, lookback=1):
-        k = days.index(query.norm_date(d))
-        mi = pd.MultiIndex.from_product([codes, [d]], names=["ts_code", "trade_date"])
-        return pd.DataFrame({"hk_hold_ratio": [min(50.0, 0.01 * k)] * len(codes)}, index=mi)
-
-    def fake_daily_basic(d, codes, fields, lookback=1):
-        return pd.DataFrame({"circ_mv": [1000.0] * len(codes)},
-                            index=pd.Index(codes, name="ts_code"))
+        idx = [d for d in days if d <= as_of]
+        return pd.DataFrame({"north_mv": [0.2 * k for k in range(len(idx))],   # 2 票 × 0.01k%/100 × 1000
+                             "circ_mv_total": [2000.0] * len(idx)},
+                            index=pd.Index(idx, name="trade_date"))
 
     for name, fn in (("get_macro", fake_get_macro), ("get_index_bars", fake_index_bars),
-                     ("get_trade_dates", fake_trade_dates), ("get_stock_basic", fake_stock_basic),
-                     ("get_money_flow", fake_money_flow), ("get_daily_basic", fake_daily_basic)):
+                     ("get_north_aggregate", fake_north)):
         monkeypatch.setattr(query, name, fn)
     return {"days": days, "months": list(months)}
 
@@ -116,17 +110,11 @@ def test_indicator_math_on_synthetic_world(synthetic_world):
 
 
 def test_north_telescope_matches_hand_computation(synthetic_world):
-    days = synthetic_world["days"]
-    df = macro.macro_indicators("2019-06-28")
-    s = df["north_flow_60"].dropna()
-    label = s.index[-1]
-    tds = [d for d in days if d <= D(2019, 6, 28)]
-    ends = [d for d in tds if d.month != (tds[tds.index(d) + 1].month if tds.index(d) + 1 < len(tds) else 0)]
-    t = max(d for d in tds if macro._month_end(d) == label)
-    k_t, k_p = days.index(t), days.index(tds[tds.index(t) - 60])
-    # N(d) = 2 只票 × ratio%/100 × 1000；C = 2000 → 望远镜差 / C
-    n = lambda k: 2 * (min(50.0, 0.01 * k) / 100.0) * 1000.0
-    assert s.loc[label] == pytest.approx((n(k_t) - n(k_p)) / 2000.0)
+    """N 匀速爬升 0.2/日 → 任何月末的 (N(t)−N(t−60))/C 恒为 0.2×60/2000。"""
+    s = macro.macro_indicators("2019-06-28")["north_flow_60"].dropna()
+    assert len(s) > 12
+    assert s.iloc[-1] == pytest.approx(0.2 * 60 / 2000.0)
+    assert s.std() == pytest.approx(0.0, abs=1e-12)
 
 
 def test_score_boxes_and_position_formula(synthetic_world):
@@ -161,3 +149,39 @@ def test_smoke_on_real_db():
     assert 0.2 <= got["position"] <= 1.0
     # 北向 2016-12 起，2019-06 只有 ~31 个月 → 必然在窗不足名单里
     assert "north_flow_60" in got["window_short"]
+
+
+def test_monthly_value_invisible_before_publish_date(synthetic_world):
+    """PIT：2019-05 的月频值 6 月 15 日才可见 —— 6 月 10 日查最新可见必须是 2019-04。"""
+    df = macro.macro_indicators("2019-06-10")
+    assert df["m1_m2_gap"].dropna().index.max() == D(2019, 4, 30)
+    df2 = macro.macro_indicators("2019-06-16")
+    assert df2["m1_m2_gap"].dropna().index.max() == D(2019, 5, 31)
+
+
+def test_warm_cache_slice_equals_cold_rebuild(synthetic_world):
+    """增量缓存的唯一契约：暖缓存切片 == 冷重建，逐位相同（任何 as_of）。"""
+    macro.macro_indicators("2019-06-28")            # 以 2019-06-28 为终点建缓存
+    warm = macro.macro_indicators("2015-06-30")     # 暖：切片
+    macro._CACHE.clear(); macro._SCORE_MEMO.clear()
+    cold = macro.macro_indicators("2015-06-30")     # 冷：以 2015-06-30 为终点重建
+    pd.testing.assert_frame_equal(warm, cold)
+
+
+@pytest.mark.skipif(not _MARKET.exists(), reason="真实 market 库不存在")
+def test_perf_sequential_scores_are_millisecond_scale():
+    """性能钉（2026-08-27 用户裁决：不许逐调用全量重建）：预热后连打 20 个交易日的
+    macro_score 合计 < 1.5s —— 回测 511 期的宏观开销因此进秒级。"""
+    import time
+    query.close_db(); query.open_db(str(_MARKET))
+    try:
+        macro._CACHE.clear(); macro._SCORE_MEMO.clear()
+        macro.macro_score("2019-06-28")                       # 预热（建缓存）
+        dates = query.get_trade_dates("2019-06-28", freq="W")[-20:]
+        t0 = time.monotonic()
+        for d in dates:
+            macro.macro_score(d)
+        el = time.monotonic() - t0
+        assert el < 1.5, f"20 次逐期评分耗时 {el:.2f}s —— 缓存没生效"
+    finally:
+        query.close_db()

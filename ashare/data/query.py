@@ -1001,6 +1001,25 @@ def get_macro(as_of_date: DateLike,
     return out[cols]
 
 
+def get_north_aggregate(as_of_date: DateLike) -> pd.DataFrame:
+    """全市场北向持仓市值与流通市值的逐日合计（宏观层 north_flow_60 的唯一原料）。
+    index=trade_date ≤ as_of，columns：north_mv（Σ ratio%/100 × circ_mv，缺持仓记录 = 未持有 = 0
+    —— 这是【加总】不是逐股因子，B5 的「不填 0」不适用）、circ_mv_total（Σ circ_mv）。
+    一条 SQL 聚合全历史（P3 Task 8 增量缓存的地基：逐月末 3 次横截面查询 × 511 个调仓日
+    的老路径是小时级瓶颈）。日频行情当日可得，PIT 语义即 trade_date ≤ as_of。"""
+    as_of = norm_date(as_of_date)
+    _check_in_calendar(as_of)
+    df = _conn().execute(
+        "SELECT d.trade_date, "
+        "       sum(coalesce(m.hk_hold_ratio, 0) / 100.0 * d.circ_mv) AS north_mv, "
+        "       sum(d.circ_mv) AS circ_mv_total "
+        "FROM daily_basic d LEFT JOIN money_flow m "
+        "  ON m.ts_code = d.ts_code AND m.trade_date = d.trade_date "
+        "WHERE d.trade_date <= ? GROUP BY 1 ORDER BY 1", [as_of]).fetchdf()
+    df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.date
+    return df.set_index("trade_date")
+
+
 _MONEY_FLOW_FIELDS = ("hk_hold_ratio",)
 
 
