@@ -228,8 +228,7 @@ def run_backtest(config: BacktestConfig, *, on_progress: Optional[Callable[[int,
 
     Args:
         config: 策略口径。`param_hash()` 是它的 D7 指纹。
-        on_progress: 每个调仓日调一次 `(已完成期数, 总期数)`；use_store: 因子缓存快路径开关，
-            透传 combine 与诊断 compute_panel（补裁 ①：kwarg 不进 config/指纹）。
+        on_progress: 每期一次 `(已完成, 总)`；use_store: 缓存快路径（补裁 ①：kwarg 不进 config/指纹）。
 
     Returns:
         `BacktestResult`。`equity` 是**日频净值指数**（初始 1.0），其余是逐期明细，
@@ -237,18 +236,16 @@ def run_backtest(config: BacktestConfig, *, on_progress: Optional[Callable[[int,
 
     Raises:
         `query.QueryError`: 运行途中数据库被换掉（快照钉住）或首尾快照不一致。
-        `ValueError`: `macro_timing=True`（宏观择时层属 P3，还不存在）。
     """
     cfg = config
-    started_at = _dt.datetime.now()
-    t0 = time.perf_counter()
-    if cfg.macro_timing:
-        raise ValueError("macro_timing=True 需要 P3 的宏观择时层（§7.1），本期未实现。"
-                         "静默退化成满仓 = param_hash 写着择时而跑的是恒定仓位（D7 台账失真）")
+    started_at, t0 = _dt.datetime.now(), time.perf_counter()
     if not cfg.factors:
         raise ValueError("config.factors 为空：没有因子就没有合成分数")
     weights = dict(cfg.factors)
     pi = float(cfg.position_cap)            # macro_timing=False → 恒定满仓（§7.1）
+    macro_short: set = set()
+    if cfg.macro_timing:                    # 惰性导入避环：strategy→backtest 方向的依赖已存在
+        from ..strategy.macro import position_for
     rng = None if cfg.shuffle_seed is None else np.random.default_rng(cfg.shuffle_seed)
 
     # ★ 先钉住，再取任何数（模块头 ★9）。钉住之后本函数不再 open_db。
@@ -295,6 +292,8 @@ def run_backtest(config: BacktestConfig, *, on_progress: Optional[Callable[[int,
         equity_t = cash + float((holdings * px_t).sum())
         prev_w = (holdings * px_t / equity_t).rename(None) if held else pd.Series(dtype=float)
 
+        if cfg.macro_timing:                # π 变化照常消耗换手预算（P3 计划 V5：择时降仓就是卖出）
+            pi, _ws = position_for(t, floor=cfg.position_floor, cap=cfg.position_cap); macro_short.update(_ws)
         targets, intended, w2 = build_targets(scores, pi, prev_w, industry, cfg.constraints)
         warns += w2
 
@@ -387,6 +386,7 @@ def run_backtest(config: BacktestConfig, *, on_progress: Optional[Callable[[int,
         ic, layers, attribution, wd = _diagnose(diag, positions)
         warns += wd
 
+    macro_short and warns.append(f"宏观择时：{sorted(macro_short)} 分位窗不足 5 年，按 0.5 中性参与打分")
     result = BacktestResult(
         config=cfg, param_hash=cfg.param_hash(), data_snapshot_id=snapshot,
         engine_version=ENGINE_VERSION, started_at=started_at,

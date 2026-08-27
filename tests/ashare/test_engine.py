@@ -898,10 +898,32 @@ def test_engine_version_is_recorded_beside_the_hash_never_inside_it(world, monke
 
 # ══════════════ 13 · 没有调仓频率参数 ══════════════
 
-def test_macro_timing_is_refused_rather_than_silently_degraded(world):
-    """静默退化成恒定满仓 = param_hash 写着择时、跑的却是另一个策略（D7 台账失真）。"""
-    with pytest.raises(ValueError, match="macro_timing"):
-        run_backtest(make_cfg(macro_timing=True))
+def test_macro_timing_drives_position_and_stays_in_hash(world, monkeypatch):
+    """P3 Task 2 接线（替换 P2 的「拒绝」契约）：score 恒 0 → π 恒 floor；
+    False 的指纹与 P2 现状完全一致（字段自 P2 就在 hash 里），True 是另一个指纹。"""
+    assert make_cfg().param_hash() == make_cfg(macro_timing=False).param_hash()
+    assert make_cfg(macro_timing=True).param_hash() != make_cfg().param_hash()
+
+    import ashare.strategy.macro as m
+    monkeypatch.setattr(m, "macro_score",
+                        lambda d: {"score": 0.0, "position": 0.2, "scores": {}, "window_short": []})
+    res = run_backtest(make_cfg(macro_timing=True))
+    # intended_weight 是换手裁剪【之前】的 π 满额目标 —— π 的直接证据（★6）
+    iw = res.positions.groupby(level=0)["intended_weight"].sum()
+    assert len(iw) and (iw <= 0.2 + 1e-9).all()
+    assert not any("窗不足" in w for w in res.warnings)
+
+
+def test_macro_floor_cap_generalise_the_spec_formula(world, monkeypatch):
+    """π = floor + (cap−floor)×score：score=1 → π=cap；窗不足旗跨期聚合成【一条】告警。"""
+    import ashare.strategy.macro as m
+    monkeypatch.setattr(m, "macro_score",
+                        lambda d: {"score": 1.0, "position": 1.0, "scores": {},
+                                   "window_short": ["north_flow_60"]})
+    res = run_backtest(make_cfg(macro_timing=True, position_cap=0.5, position_floor=0.1))
+    iw = res.positions.groupby(level=0)["intended_weight"].sum()
+    assert iw.iloc[0] == pytest.approx(0.5, abs=1e-6)
+    assert sum("窗不足" in w for w in res.warnings) == 1
 
 
 def test_run_backtest_takes_no_rebalance_frequency_argument():

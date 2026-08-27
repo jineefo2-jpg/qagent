@@ -124,6 +124,14 @@ def _box(pct: float) -> float:
     return 0.0 if pct < _LO else (0.5 if pct <= _HI else 1.0)
 
 
+def position_for(as_of_date, *, floor: float = 0.2, cap: float = 1.0) -> "tuple[float, list]":
+    """引擎接口（P3 Task 2）：π = floor + (cap − floor) × score。默认参数即规格 §6.1 的
+    `20% + 80% × score`；floor/cap 来自 BacktestConfig（两者都在 param_hash 里）。
+    返回 (π, window_short) —— 旗子由引擎跨期汇总成一条告警，不逐期刷屏。"""
+    got = macro_score(as_of_date)
+    return float(floor) + (float(cap) - float(floor)) * got["score"], got["window_short"]
+
+
 def macro_score(as_of_date) -> Dict:
     """{"scores": {指标: 0|0.5|1}, "score": 均值, "position": 0.2+0.8×score,
     "window_short": [窗不足记 0.5 的指标], "percentiles": {指标: 分位或 None}}"""
