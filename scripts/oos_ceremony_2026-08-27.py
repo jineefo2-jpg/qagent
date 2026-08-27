@@ -14,6 +14,8 @@ import pathlib
 import sys
 import time
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))   # 按文件跑时根目录可导入
+
 from ashare.backtest import guards
 from ashare.backtest.types import BacktestConfig
 from ashare.data import query
