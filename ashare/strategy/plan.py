@@ -243,6 +243,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 print(f"[plan] nightly：{today} 非交易日，跳过"); return 0
             if query.get_trade_dates(today, freq="W")[-1] != today:
                 print(f"[plan] nightly：{today} 非周频调仓日，跳过"); return 0
+            # ★ 今天的行情必须已入库才谈得上出清单。不查这一条的后果不是「跳过」而是
+            #   崩在因子计算深处（universe 为空），运维看到的是一句与病因无关的报错
+            #   （2026-08-28 实测）。这里【失败】而不是跳过：定时链里 nightly 紧跟在
+            #   当日增量之后，数据不在 = 增量真出了问题，必须出声；手动早跑（收盘前）
+            #   撞到同一条，消息也说得清为什么。绝不拿昨天的数据出今天的清单 ——
+            #   那会让执行日整体错位一天。
+            data_end = query.last_data_date()
+            if data_end is None or data_end < today:
+                print(f"[plan] nightly：{today} 的行情尚未入库（数据止于 {data_end}）——"
+                      f"先跑 scripts/ashare_daily_update.sh 的当日 pass（收盘后），再出清单")
+                return 1
             as_of = str(today)
             from ashare.factors import store as _fstore     # 惰性：仅 nightly 需要
             counts, bw = _fstore.build([n for n, _ in cfg.factors], [today])

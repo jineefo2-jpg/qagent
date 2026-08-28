@@ -206,3 +206,19 @@ def test_live_mode_does_not_exclude_the_whole_universe(fake_world):
     assert any("尚无行情" in w for w in got["warnings"])
     # T 日一字封死仍然剔除 —— 那是「次日预期」的可得预测，不是「未知」
     assert "C.SH" in {e["ts_code"] for e in got["excluded"]}
+
+
+def test_nightly_refuses_when_todays_bars_are_not_in_yet(monkeypatch, capsys):
+    """nightly 必须在入口查「今天的行情入库了没」。不查的后果不是跳过，而是崩在因子
+    计算深处（universe 为空），运维看到一句与病因无关的报错（2026-08-28 实测）。
+    这里【失败】而不是跳过：定时链里 nightly 紧跟当日增量之后，数据不在 = 增量真出了
+    问题，必须出声。绝不拿昨天的数据出今天的清单 —— 执行日会整体错位一天。"""
+    today = dt.date.today()
+    monkeypatch.setattr(query, "open_db", lambda *a, **k: None)
+    monkeypatch.setattr(query, "close_db", lambda: None)
+    monkeypatch.setattr(query, "get_trade_dates",
+                        lambda d, start=None, freq="D": [today])          # 今天是交易日兼调仓日
+    monkeypatch.setattr(query, "last_data_date", lambda: today - dt.timedelta(days=1))
+    rc = sp.main(["--nightly"])
+    out = capsys.readouterr().out
+    assert rc == 1 and "尚未入库" in out and str(today - dt.timedelta(days=1)) in out
