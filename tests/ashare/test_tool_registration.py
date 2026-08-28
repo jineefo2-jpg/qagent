@@ -208,3 +208,34 @@ def test_price_levels_are_measured_not_offset_from_current_price():
         if r.get("success") and not r["supports"]:
             none_cnt += 1
     assert none_cnt > 0, "股灾日一只报「无支撑」的都没有 —— 该分支是死的"
+
+
+def test_only_multi_method_levels_become_the_verdict():
+    """结论行只认多方法确认的价位。候选价位很密（实测最近的中位数只离当前价 2.2%、
+    45% 仅单一方法提名），若照收，「当前价略高于支撑」就成了结构性必然 —— 与编的一样
+    没有信息量（2026-08-28 用户指出）。strength=1 必须标 weak 且不进结论。"""
+    import pathlib, pytest as _p
+    if not pathlib.Path("data/ashare_market.duckdb").exists():
+        _p.skip("真实 market 库不存在")
+    from ashare.data import query
+    query.close_db(); query.open_db("data/ashare_market.duckdb")
+    g = ASHARE_TOOL_REGISTRY["get_price_levels"]
+    r = g("600519")
+    assert r["success"]
+    for lv in r["supports"] + r["resistances"]:
+        assert (lv["strength"] >= 2) or lv.get("weak") is True, "单一方法的价位必须标 weak"
+    import re
+    m = re.findall(r"确认支撑 ([\d.]+)", r["position"])
+    if m:                                    # 结论里的价位必须真的是 strength>=2 的那个
+        strong = [x["price"] for x in r["supports"] if x["strength"] >= 2]
+        assert float(m[0]) in strong
+
+
+def test_etf_codes_get_an_actionable_message_not_no_data():
+    """ETF/基金不在本地数仓（只有个股）。要说清楚并指路，不能只丢一句「本地库无行情」
+    ——那让人分不清是代码写错了还是没入库（2026-08-28 用户实测 512400）。"""
+    for name in ("get_price_levels", "get_stock_fundamentals", "get_factor_exposure"):
+        fn = ASHARE_TOOL_REGISTRY[name]
+        r = fn("512400") if name != "get_factor_exposure" else fn("2026-08-21", ts_code="512400")
+        assert r["success"] is False and r.get("error_type") == "not_a_stock", name
+        assert "ETF" in r["error"] and r.get("hint"), name

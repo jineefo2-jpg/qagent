@@ -26,6 +26,22 @@ def _err(e: Exception) -> dict:
     return {"success": False, "error": f"{type(e).__name__}: {e}"}
 
 
+
+_ETF_PREFIX = ("51", "15", "16", "50", "56", "58", "159")   # 沪深 ETF/LOF/基金常见前缀
+
+
+def _not_a_stock(code: str) -> Optional[dict]:
+    """本地 PIT 数仓只覆盖【股票】（stock_basic + daily_bar）。ETF/LOF/基金/可转债不在其中 ——
+    直接说清楚并指路，别让调用方对着「本地库无行情」猜是代码错了还是没入库。"""
+    c = (code or "").strip().upper().split(".")[0]
+    if c.isdigit() and len(c) == 6 and any(c.startswith(p) for p in _ETF_PREFIX):
+        return {"success": False, "error_type": "not_a_stock",
+                "error": f"{c} 是 ETF/LOF/基金，本地 A 股数仓只覆盖【个股】（含已退市），不含基金",
+                "hint": "基金/ETF 请用通用工具：historical_prices 取 K 线、market_quote 取实时价；"
+                        "本地的因子/股票池/基本面对基金不适用（它没有财报，也不进选股池）"}
+    return None
+
+
 def query_universe(as_of: str, limit: int = 50) -> dict:
     """as_of 当日的动态股票池（D5：含退市股历史、剔 ST/停牌/次新）。只读。"""
     try:
@@ -49,6 +65,10 @@ def get_factor_exposure(as_of: str, ts_code: Optional[str] = None,
     """已落库的 alpha 因子值（processed z 分，未乘 direction）。只读，不下单、
     不修改任何数据。三种用法：只给 as_of → 各因子覆盖率；给 ts_code → 该股全部
     因子暴露；给 factor → 该因子 top 排名。因子按周频调仓日预计算，非调仓日无值。"""
+    if ts_code:
+        bad = _not_a_stock(ts_code)
+        if bad:
+            return bad
     try:
         query.open_db()
         alphas = [s.name for s in list_factors() if s.category in ALPHA_CATEGORIES]
@@ -175,6 +195,9 @@ def get_stock_fundamentals(ts_code: str, as_of: Optional[str] = None) -> dict:
       财报带**公告日与滞后天数**（PIT，不是"最新财报"那种前视口径），行情是**后复权**
       （与回测同口径）。
     """
+    bad = _not_a_stock(ts_code)
+    if bad:
+        return bad
     try:
         query.open_db()
         ts = to_ts_code(ts_code) or ts_code
@@ -246,6 +269,9 @@ def get_price_levels(ts_code: str, as_of: Optional[str] = None, lookback: int = 
     单一维度的价位是噪声，三个维度同时指向同一价位才叫强 —— `confirmed_by` 就是这个证据链。
     结构在后复权序列上量（跨除权可比），报出的价按当日比例折回**未复权市场价**。
     """
+    bad = _not_a_stock(ts_code)
+    if bad:
+        return bad
     try:
         query.open_db()
         ts = to_ts_code(ts_code) or ts_code
@@ -332,15 +358,28 @@ def get_price_levels(ts_code: str, as_of: Optional[str] = None, lookback: int = 
         res = sorted(res[:6], key=lambda x: (-x["strength"], x["price"]))[:3]
         sup.sort(key=lambda x: -x["price"]); res.sort(key=lambda x: x["price"])
 
-        if not sup:
-            pos = "⚠ 当前价【低于】回看窗内全部候选价位 —— 下方无支撑可依托"
-        elif not res:
-            pos = "⚠ 当前价【高于】回看窗内全部候选价位 —— 上方无压力（创区间新高）"
+        # ★ 只有【多方法确认】的价位才当结论。实测：候选价位很密，最近的那个中位数只离
+        #   当前价 2.2%，且 45% 只有单一方法提名 —— 拿它当支撑，「当前价略高于支撑」就成了
+        #   结构性必然，与编出来的一样没有信息量（2026-08-28 用户指出）。强度 1 的仍在
+        #   列表里但标注为弱，结论行只认强度 ≥ 2。
+        s2 = [x for x in sup if x["strength"] >= 2]
+        r2 = [x for x in res if x["strength"] >= 2]
+        for x in sup + res:
+            if x["strength"] < 2:
+                x["weak"] = True
+        if not s2 and not r2:
+            pos = "⚠ 回看窗内上下都没有【多方法确认】的价位 —— 此票暂无可靠的支撑压力结构"
+        elif not s2:
+            pos = (f"⚠ 下方没有多方法确认的支撑（最近的只有单一方法提名，不足为凭）；"
+                   f"上方最近的确认压力 {r2[0]['price']}（{r2[0]['strength']} 种）")
+        elif not r2:
+            pos = (f"⚠ 上方没有多方法确认的压力；下方最近的确认支撑 {s2[0]['price']}"
+                   f"（{s2[0]['strength']} 种），距今 {(cur_raw / s2[0]['price'] - 1) * 100:.1f}%")
         else:
-            span = res[0]["price"] - sup[0]["price"]
-            pct = (cur_raw - sup[0]["price"]) / span * 100 if span > 0 else float("nan")
-            pos = (f"位于支撑 {sup[0]['price']}（{sup[0]['strength']} 种方法确认）与压力 "
-                   f"{res[0]['price']}（{res[0]['strength']} 种）之间，区间 {pct:.0f}% 位置")
+            dn = (cur_raw / s2[0]["price"] - 1) * 100
+            up = (r2[0]["price"] / cur_raw - 1) * 100
+            pos = (f"确认支撑 {s2[0]['price']}（{s2[0]['strength']} 种，下方 {dn:.1f}%）"
+                   f"｜确认压力 {r2[0]['price']}（{r2[0]['strength']} 种，上方 {up:.1f}%）")
         return {"success": True, "ts_code": ts, "as_of": str(d), "current_price": cur_raw,
                 "lookback_bars": len(df), "position": pos,
                 "supports": sup, "resistances": res,
@@ -435,8 +474,12 @@ ASHARE_TOOL_SCHEMAS.append({
     "description": """【问支撑位/压力位/买卖点必须用这个，禁止自己编数】从真实价格结构量出支撑与压力（只读，本地行情）。
 算法：找回看窗内的摆动低/高点（前后各 5 根 K 线的极值），把 1.5% 内的并成价位区，
 报出被触及次数与最近一次日期；返回**当前价下方最近的支撑**与**上方最近的压力**（已折回未复权的市场价（券商行情软件里显示的那个价））。
-★ 支撑/压力可能【不存在】：价格跌破全部近期低点时 supports 就是空列表 —— 这是真实结论，
-必须如实转述「下方没有支撑」，绝不能编一个比当前价略低的数搪塞。
+★ 结论只认【多方法确认（strength ≥ 2）】的价位：候选价位很密，最近的那个中位数只离当前价
+2.2%、且 45% 仅单一方法提名 —— 拿它当支撑，「当前价略高于支撑」就成了结构性必然、毫无信息量。
+position 字段已按此过滤；strength=1 的价位在列表里标了 weak，转述时要说明它不足为凭。
+★ 支撑/压力可能【不存在】：跌破全部近期低点、或上下都没有多方法确认的价位时，如实说
+「下方没有确认支撑」，绝不能编一个比当前价略低的数搪塞。
+★ 只覆盖【个股】：ETF/LOF/基金/可转债不在本地数仓，会返回 not_a_stock 并指路通用工具。
 这是对过去价格结构的描述性统计，不是预测。""",
     "input_schema": {
         "type": "object",
