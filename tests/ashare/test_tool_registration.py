@@ -112,3 +112,47 @@ def test_signal_list_tool_behaviour(tmp_path, monkeypatch):
     import json as _json
     assert len(_json.dumps(r, ensure_ascii=False).encode()) < 3072       # T2：< 3KB
     assert "人工执行" in r["note"]
+
+
+def test_factor_tool_falls_back_and_labels_both_degradations(monkeypatch):
+    """两层降级都必须【说出来】，不许静默替换：
+    ① 请求日不是周频调仓日 → 回退到不晚于它的最近调仓日（只向过去退，向未来退是前视）；
+    ② 因子是在旧数据快照下算的 → 标 stale + 两个快照 id。
+    为什么不能只回一句 hint 让模型自己重查：2026-08-28 实测，模型拿到 error 之后
+    没有照提示再查，而是直接编了一个答案 —— 比工具报错坏得多。"""
+    import datetime as dt
+    from ashare.data import query
+    from ashare.factors import store as fstore
+    import pandas as pd
+    req, hit = dt.date(2026, 8, 27), dt.date(2026, 8, 21)
+    monkeypatch.setattr(query, "open_db", lambda *a, **k: None)
+    monkeypatch.setattr(query, "norm_date", lambda d, **k: req if str(d) == str(req) else d)
+    monkeypatch.setattr(query, "get_trade_dates", lambda d, **k: [dt.date(2026, 8, 14), hit])
+    monkeypatch.setattr(query, "get_universe", lambda d, **k: ["A.SH", "B.SZ"])
+    monkeypatch.setattr(query, "snapshot_id", lambda **k: "NEW")
+    monkeypatch.setattr(fstore, "read_current", lambda *a, **k: ({}, []))      # 严格档全落空
+    ser = pd.Series([2.0, 1.0], index=["A.SH", "B.SZ"])
+    calls: list = []
+    def fake_any(h, d, u):
+        calls.append(d)
+        return ({"reversal_20": (ser, ser)}, "OLD", []) if d == hit else ({}, None, [])
+    monkeypatch.setattr(fstore, "read_any_snapshot", fake_any)
+
+    r = ASHARE_TOOL_REGISTRY["get_factor_exposure"]("2026-08-27", factor="reversal_20", top=2)
+    assert r["success"] is True
+    assert calls[0] == req and calls[1] == hit, f"候选顺序必须由近及远，实际 {calls}"
+    assert r["as_of"] == str(hit) and r["requested_as_of"] == str(req)     # ① 说出真正用的日期
+    assert r["stale"] is True and r["computed_under_snapshot"] == "OLD"     # ② 说出快照差异
+    assert r["current_snapshot"] == "NEW" and "回答时必须说明" in r["note"]
+    assert [x["ts_code"] for x in r["top"]] == ["A.SH", "B.SZ"]
+
+
+def test_relaxed_read_is_whitelisted_to_the_agent_layer():
+    """宽松读（无视快照）绝不许进决策路径 —— 回测/信号一律走严格的 read_current。
+    白名单钉死在这里：多一个调用方就红。"""
+    import subprocess
+    out = subprocess.run(["grep", "-rln", "read_any_snapshot\\|read_factor_values_any_snapshot",
+                          "--include=*.py", "ashare/"], capture_output=True, text=True).stdout
+    callers = {f for f in out.split() if f}
+    assert callers == {"ashare/agent_tools.py", "ashare/factors/store.py",
+                       "ashare/data/derived_store.py"}, f"宽松读出现了新调用方: {callers}"

@@ -55,17 +55,55 @@ def get_factor_exposure(as_of: str, ts_code: Optional[str] = None,
         if factor is not None and factor not in alphas:
             return {"success": False, "error": f"未知因子 {factor!r}", "available": alphas}
         names = [factor] if factor else alphas
-        universe = query.get_universe(as_of)
         hashes = {n: get_factor(n).param_hash() for n in names}
-        got, warns = factor_store.read_current(hashes, as_of, universe)
+        # 因子按【周频调仓日】预计算。请求日不是调仓日（或那天还没落库）时，回退到
+        # **不晚于**它的最近一个有值的调仓日 —— 只向过去退，PIT 安全（向未来退是前视）。
+        # 为什么不像从前那样只回一句 hint 让模型自己重查：2026-08-28 实测，模型拿到
+        # error 之后并没有照提示再查一次，而是直接编了一个答案 —— 一次失败的工具调用
+        # 换来一个看不出是编的回答，比工具本身出错坏得多。
+        # 实际用的日期原样写进 as_of，另附 requested_as_of + note，绝不静默替换。
+        req = query.norm_date(as_of)
+        # 倒序：先试请求日本身，再依次向【更近的过去】退（顺序写反会退到更早的那天）
+        cands = sorted({req, *query.get_trade_dates(req, freq="W")[-2:]}, reverse=True)
+        cands = [d for d in cands if d <= req]
+        got, warns, used, universe = {}, [], None, []
+        for d in cands:
+            universe = query.get_universe(d)
+            got, warns = factor_store.read_current(hashes, d, universe)
+            if got:
+                used = d
+                break
+        # 严格判据一个都没命中时的最后一档：读【陈旧快照】的值并刺眼标注。
+        # 为什么需要这一档：snapshot_id 是全库指纹，每日增量往尾部追加新交易日就会
+        # 让它变，于是 3000 万行历史因子集体判陈旧 —— 而 2015 年那天的因子值数值上
+        # 根本没变。重建全量要十几小时，不可能每晚做（P3 计划 V6）。
+        # 决策路径不受影响：回测与信号生成走的是严格的 read_current。
+        stale_snap = None
         if not got:
-            wk = query.get_trade_dates(as_of, freq="W")
-            hint = str(wk[-1]) if wk else "（无更早调仓日）"
+            for d in cands:
+                universe = query.get_universe(d)
+                got, stale_snap, warns = factor_store.read_any_snapshot(hashes, d, universe)
+                if got:
+                    used = d
+                    break
+        if not got:
             return {"success": False,
-                    "error": f"{as_of} 没有已落库的因子值（按周频调仓日预计算）",
-                    "hint": f"最近的周频调仓日是 {hint}，用它再查一次"}
-        out: dict = {"success": True, "as_of": str(as_of), "universe_size": len(universe),
+                    "error": f"{req} 及其之前最近的调仓日都没有算过因子",
+                    "hint": "因子按周频调仓日预计算，请确认该区间的因子已 build"}
+        out: dict = {"success": True, "as_of": str(used), "universe_size": len(universe),
                      "note": "processed 为横截面 z 分，未乘 direction；direction=+1 高分看多"}
+        if stale_snap is not None:
+            out["stale"] = True
+            out["computed_under_snapshot"] = stale_snap
+            out["current_snapshot"] = query.snapshot_id()
+            out["note"] += (f"；⚠ 这批因子是在数据快照 {stale_snap} 下算的，当前快照已是 "
+                            f"{out['current_snapshot']}（每日增量追加新交易日就会换快照）。"
+                            f"历史行情未被改写时数值仍然可用，但**回答时必须说明这一点**；"
+                            f"要拿它做决策请先重建因子库")
+        if used != req:
+            out["requested_as_of"] = str(req)
+            out["note"] += (f"；⚠ {req} 不是周频调仓日（或尚未落库），"
+                            f"以上是**回退到 {used}** 的值，回答时必须说明这个日期")
         if ts_code is not None:
             out["ts_code"] = ts_code
             out["exposures"] = {

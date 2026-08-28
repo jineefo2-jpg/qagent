@@ -213,6 +213,44 @@ def read_factor_values(param_hashes: Mapping[str, str], date, universe: Sequence
                .rename_axis(columns=None)), warns
 
 
+def read_factor_values_any_snapshot(param_hashes: Mapping[str, str], date,
+                                    universe: Sequence[str], *, processed: bool = True):
+    """**只给只读探索用**的宽松读：不管快照是不是当前的，取最近一次算出来的值，
+    返回 `(frame, snapshot_id_used, warnings)`。
+
+    ★ 存在的理由：`snapshot_id` 是**全库**指纹，分不清「尾部追加了新交易日」和
+      「历史行情被修正」。而每日增量做的是前者 —— 2015 年那天的因子值在数值上
+      依然正确，却因为指纹变了被判陈旧。严格判据对回测/信号是对的（D7 要的就是
+      「这次结果由哪批数据算出」），但它让 agent 的历史查询在每次数据更新后集体罢工。
+    ★ 严禁进决策路径：回测与信号生成一律走 `read_factor_values`（严格）。本函数的
+      调用方白名单由 tests/ashare/test_factor_store.py 钉死 —— 多一个调用方就红。
+      调用方必须把返回的 `snapshot_id_used` 显示给人看，不得静默当成当前值。"""
+    names = list(param_hashes)
+    empty = pd.DataFrame(columns=names, index=pd.Index([], name="ts_code", dtype=object), dtype=float)
+    if not names:
+        return empty, None, []
+    d = query.norm_date(date, name="date")
+    codes = _checked_universe(universe)
+    conn = _read_conn()
+    if conn is None:
+        return empty, None, _missing(param_hashes, set(), d)
+    try:
+        col = "processed_value" if processed else "raw_value"
+        got = conn.execute(
+            f"SELECT factor_name, ts_code, {col} AS value, snapshot_id FROM factor_value "
+            f"WHERE trade_date = ? AND (factor_name, param_hash) IN ({_pairs_clause(param_hashes)})",
+            [d, *_pairs_params(param_hashes)]).fetchdf()
+    finally:
+        conn.close()
+    warns = _missing(param_hashes, set(got["factor_name"]) if not got.empty else set(), d)
+    if got.empty:
+        return empty, None, warns
+    used = sorted(set(got["snapshot_id"]))
+    frame = (got.pivot(index="ts_code", columns="factor_name", values="value")
+                .reindex(index=codes, columns=names).rename_axis(columns=None))
+    return frame, (used[0] if len(used) == 1 else "/".join(used)), warns
+
+
 _WINDOW_COLS = ["factor_name", "trade_date", "ts_code", "raw_value", "processed_value"]
 
 

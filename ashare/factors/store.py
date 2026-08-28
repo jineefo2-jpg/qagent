@@ -252,3 +252,26 @@ def _long_frame(todo: Sequence[str], hashes: Mapping[str, str], d: _dt.date,
         "processed_value": pd.concat([proc[n] for n in todo], ignore_index=True),
         "snapshot_id": snap,
     })
+
+
+def read_any_snapshot(param_hashes: Mapping[str, str], as_of_date, universe: Sequence[str]
+                      ) -> "Tuple[Dict[str, pd.Series], Optional[str], List[str]]":
+    """**只给 agent 的只读探索用**：不管快照是否当前，取最近算出的 processed 值。
+    返回 `({因子: processed}, 用的 snapshot_id, warnings)`。
+
+    与 `read_current` 的分工是硬的：回测与信号生成一律走 `read_current`（严格判当前
+    快照，D7 要的就是「这次结果由哪批数据算出」）。本函数存在只因为 `snapshot_id`
+    是全库指纹、分不清「尾部追加新交易日」与「历史被修正」—— 每日增量做的是前者，
+    历史因子值数值上仍然正确，却会被集体判陈旧，让 agent 的历史查询天天罢工。
+    调用方必须把 snapshot_id 显示给人看（`ashare/agent_tools.py` 就是这么做的），
+    调用方白名单由 tests 钉死。"""
+    # 形状与 read_current 严格一致（{因子: (raw, processed)}）—— 调用方在两条路径之间
+    # 切换时不该还要记得形状不同；不一致过一次，下游 `for n, (_, proc) in ...` 当场炸。
+    proc, snap, warns = derived_store.read_factor_values_any_snapshot(
+        param_hashes, as_of_date, universe, processed=True)
+    raw, _, _ = derived_store.read_factor_values_any_snapshot(
+        param_hashes, as_of_date, universe, processed=False)
+    if proc.empty:
+        return {}, None, warns
+    return ({n: (raw[n] if n in raw.columns else proc[n] * float("nan"), proc[n])
+             for n in proc.columns if proc[n].notna().any()}, snap, warns)
