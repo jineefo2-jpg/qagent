@@ -275,3 +275,9 @@ def read_any_snapshot(param_hashes: Mapping[str, str], as_of_date, universe: Seq
         return {}, None, warns
     return ({n: (raw[n] if n in raw.columns else proc[n] * float("nan"), proc[n])
              for n in proc.columns if proc[n].notna().any()}, snap, warns)
+
+
+def covered_range(param_hashes: Mapping[str, str]) -> "Tuple[Optional[_dt.date], Optional[_dt.date]]":
+    """因子库里这批 (因子, 参数) 实际覆盖的日期区间 `(最早, 最晚)`；空库返回 (None, None)。
+    抽样核查用：日历比数据早一年，不看区间会抽到数据窗口之外的空股票池。"""
+    return derived_store.factor_date_range(param_hashes)

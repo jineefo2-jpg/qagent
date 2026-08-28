@@ -397,3 +397,20 @@ def coverage_report(names: Optional[Sequence[str]] = None) -> pd.DataFrame:
     for c in ("first_date", "last_date"):           # DATE 经 fetchdf 会变成 Timestamp
         rep[c] = pd.to_datetime(rep[c]).dt.date
     return rep
+
+
+def factor_date_range(param_hashes: Mapping[str, str]):
+    """这批 (因子, 参数) 在库里的日期区间（不管快照新旧 —— 这是「算过没有」不是「还有效吗」）。"""
+    if not param_hashes:
+        return None, None
+    conn = _read_conn()
+    if conn is None:
+        return None, None
+    try:
+        r = conn.execute(
+            f"SELECT min(trade_date), max(trade_date) FROM factor_value "
+            f"WHERE (factor_name, param_hash) IN ({_pairs_clause(param_hashes)})",
+            _pairs_params(param_hashes)).fetchone()
+    finally:
+        conn.close()
+    return (r[0], r[1]) if r else (None, None)
