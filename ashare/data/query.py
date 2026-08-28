@@ -107,7 +107,7 @@ def open_db(market_path: str | None = None, derived_path: str | None = None) -> 
     底层文件被【影子替换】（promote 用 os.replace：路径不变、inode 变）→ 自动重连；
     旧连接读的是已 unlink 的旧 inode，不重连会永远看旧数据。
     derived_path：P2 因子/回测结果库，本期未 ATTACH（预留参数）。"""
-    global _conn_obj, _conn_ident, _conn_realpath, _market_path, _CAL, _OPEN_DAYS
+    global _conn_obj, _conn_ident, _conn_realpath, _market_path, _CAL, _OPEN_DAYS, _FLOORS
     path = market_path or _market_path or os.environ.get("ASHARE_MARKET_DB") or _db.DEFAULT_MARKET_PATH
     if not pathlib.Path(path).exists():
         raise QueryError(f"market 库不存在: {path}（先跑 python -m ashare.data.pipeline full）")
@@ -128,6 +128,7 @@ def open_db(market_path: str | None = None, derived_path: str | None = None) -> 
     _conn_obj = _db.connect_read(path)
     _conn_ident, _conn_realpath, _market_path = ident, os.path.realpath(path), path
     _CAL, _OPEN_DAYS = None, None
+    _FLOORS = None
     _PRELOAD.clear()
     _PRELOAD_POS.clear()
     _PRELOAD_WIDE.clear()
@@ -138,11 +139,12 @@ def close_db() -> None:
     路径上自愈续走」（test_build_leaves_the_snapshot_pinned_until_close_db 钉着这一条，
     长驻进程 build → close → 查询自动重连新 inode 靠它）。代价：换库必须显式
     `open_db(新路径)` —— 测试里混用临时库时无参 open_db() 会回到上一个路径。"""
-    global _conn_obj, _conn_ident, _conn_realpath, _CAL, _OPEN_DAYS, _pinned_ident
+    global _conn_obj, _conn_ident, _conn_realpath, _CAL, _OPEN_DAYS, _pinned_ident, _FLOORS
     if _conn_obj is not None:
         _conn_obj.close()
     _conn_obj, _conn_ident, _conn_realpath, _CAL, _OPEN_DAYS = None, None, None, None, None
     _pinned_ident = None
+    _FLOORS = None
     _PRELOAD.clear()
     _PRELOAD_POS.clear()
     _PRELOAD_WIDE.clear()
@@ -325,6 +327,65 @@ def preload(start: DateLike, end: DateLike,
     #   同进程连跑两次回测（`gate1_out_of_sample` 的 IS→OOS 正是）时，第二次会拿着
     #   第一次那个窗的面板：新窗日期整段缺失、新窗才上市的票整列不存在 → 价格静默变 NaN。
     _PRELOAD_WIDE.clear()
+
+
+def valid_factor_snapshots(as_of_date: DateLike) -> "list[str]":
+    """`as_of` 这一天的因子值，哪些【历史快照】算出来的仍然有效。
+
+    判据（schema.sql 的 snapshot_log 注释是同一条）：一份在快照 S 下算出的因子值，
+    只要**它之后的每一次发布**影响的最早可见日期都晚于 as_of，那么 as_of 当天
+    「能看见的数据」就一行都没变过 —— 值仍然成立。
+
+    这条判据存在的理由：`snapshot_id` 是【全库】指纹，每日增量往尾部追加新交易日
+    就会让它变，于是 3300 万行历史因子集体判陈旧、要十几小时重建，每天一次。
+    有了它，日增量只影响新交易日，历史因子永远有效（2026-08-28 实测：那次增量的
+    min_affected_date 是 8-24，8-21 及更早的因子全部继续可用）。
+
+    返回值总是含当前快照。台账缺行 / min_affected_date 为 NULL（无法判定）→ 保守
+    地把那次发布之前的快照全部排除。"""
+    d = norm_date(as_of_date)
+    cur = snapshot_id()
+    floors = _snapshot_floors()             # [(snapshot_id, 它之后所有发布的 min_affected 的最小值)]
+    if floors is None:
+        return [cur]
+    # 判据等价于「后缀最小值 > as_of」。后缀最小值已预计算，这里只是一次线性筛。
+    return [cur] + [sid for sid, floor in floors if sid != cur and floor is not None and floor > d]
+
+
+_FLOORS: "tuple | None" = None              # (conn_ident, [(sid, floor)])：台账只在换库时变
+
+
+def _snapshot_floors():
+    """每个快照的「它之后所有发布的 min_affected_date 的最小值」，一趟后缀扫描 O(n)。
+
+    ★ 原实现是逐行切片 + 逐行 pd.Timestamp 的 O(n²)：评审实测 750 行台账 164 ms、
+      3000 行 2.6 s，而每个交易日要调 3 次（raw/processed/判命中）—— 足以把 use_store
+      的收益吃成负数。台账每天涨一行，三年就是 750 行。
+    ★ 按 `_conn_ident` 缓存：台账住在库文件内部，换库（promote）才可能变；
+      open_db / close_db 会清掉它（与 _CAL / _OPEN_DAYS 同一处理）。
+    ★ min_affected_date 为 NULL = 那次发布判定不了 → 后缀最小值取 None（= 负无穷），
+      它之前的快照一律排除。"""
+    global _FLOORS
+    if _FLOORS is not None and _FLOORS[0] == _conn_ident:
+        return _FLOORS[1]
+    try:
+        rows = _conn().execute(
+            "SELECT snapshot_id, min_affected_date FROM snapshot_log ORDER BY promoted_at").fetchall()
+    except Exception:                       # noqa: BLE001 — 老库还没有这张表
+        return None
+    out: list = []
+    suffix_min = None                       # 从尾往前扫；None 兼作"还没有后续发布"与"负无穷"
+    unknown = False                         # 后面出现过 NULL → 之前的一律排除
+    for sid, md in reversed(rows):
+        out.append((sid, None if (unknown or suffix_min is None) else suffix_min))
+        cur_md = None if md is None else pd.Timestamp(md).date()
+        if cur_md is None:
+            unknown = True
+        else:
+            suffix_min = cur_md if suffix_min is None else min(suffix_min, cur_md)
+    out.reverse()
+    _FLOORS = (_conn_ident, out)
+    return out
 
 
 def last_data_date() -> "_dt.date | None":

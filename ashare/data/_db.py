@@ -8,7 +8,7 @@ import pathlib
 
 import duckdb
 
-SCHEMA_VERSION = 2       # v2: + industry_member
+SCHEMA_VERSION = 3       # v2: + industry_member；v3: + snapshot_log（发布台账，见 schema.sql）
 _SCHEMA_SQL = pathlib.Path(__file__).with_name("schema.sql")
 
 DEFAULT_MARKET_PATH = "data/ashare_market.duckdb"

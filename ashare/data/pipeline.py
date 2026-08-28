@@ -157,6 +157,14 @@ def run_full(staging_path: str, src, *, start: _dt.date, end: _dt.date,
     conn = _db.connect_write(staging_path)
     try:
         _db.init_schema(conn)
+        # ★ DO NOTHING 不是 DO UPDATE：全量回补支持跨夜续跑，每晚覆盖这个戳的话，
+        #   最终 promote 只测得【最后一晚】写入的行 —— 第 1 晚重写了 2010-2015、末晚只碰
+        #   几只新股，min_affected 就会记成很晚的日期，于是那批旧因子被判「仍然有效」。
+        #   台账要防的正是这件事，方向反了。promote 成功后由 _stamp_snapshot 清除本键，
+        #   所以「一轮 ingest」= 从第一次写到发布为止（微秒精度：秒级会与同秒完成的上一轮撞车）。
+        conn.execute("INSERT INTO _meta (key, value) VALUES ('ingest_started_at', ?) "
+                     "ON CONFLICT (key) DO NOTHING",
+                     [_dt.datetime.now().isoformat(sep=" ", timespec="microseconds")])
         # ★ 多晚分批续跑时 end 必须锁定：job key 含 start 不含 end，若第二晚 --end 漂移（默认 today），
         #   第一晚已 DONE 的股票会被跳过、尾部缺行，row_completeness 必挂且无法自愈。首次运行把 end 记进 _meta。
         prev = conn.execute("SELECT value FROM _meta WHERE key='full_end'").fetchone()
@@ -213,6 +221,14 @@ def run_daily(market_path: str, staging_path: str, src, *, today: _dt.date | Non
     conn = _db.connect_write(staging_path)
     try:
         _db.init_schema(conn)
+        # ★ DO NOTHING 不是 DO UPDATE：全量回补支持跨夜续跑，每晚覆盖这个戳的话，
+        #   最终 promote 只测得【最后一晚】写入的行 —— 第 1 晚重写了 2010-2015、末晚只碰
+        #   几只新股，min_affected 就会记成很晚的日期，于是那批旧因子被判「仍然有效」。
+        #   台账要防的正是这件事，方向反了。promote 成功后由 _stamp_snapshot 清除本键，
+        #   所以「一轮 ingest」= 从第一次写到发布为止（微秒精度：秒级会与同秒完成的上一轮撞车）。
+        conn.execute("INSERT INTO _meta (key, value) VALUES ('ingest_started_at', ?) "
+                     "ON CONFLICT (key) DO NOTHING",
+                     [_dt.datetime.now().isoformat(sep=" ", timespec="microseconds")])
         ingest.ingest_calendar(conn, src, today - _dt.timedelta(days=14), today + _dt.timedelta(days=90))
         end = clamp_end(conn, min(today, until) if until else today)
         last = last_bar_date(conn)

@@ -129,3 +129,32 @@ CREATE TABLE IF NOT EXISTS _meta (
   key VARCHAR PRIMARY KEY,
   value VARCHAR
 );
+
+-- 发布台账（v3，2026-08-28）。每次 promote 追加一行，记录**这次发布影响的最早可见日期**。
+--
+-- ★ 它存在的唯一理由：`snapshot_id` 是【全库】指纹，表达不了「历史那部分没变」。
+--   每日增量只往尾部追加新交易日（实测：8-24~8-27，老数据一行没动），却会让指纹改变，
+--   于是 3300 万行历史因子集体被判陈旧、需要十几小时全量重建 —— 每天一次，不可持续。
+--   有了这张表，因子行的有效性判据变成：
+--       行有效 ⟺ 快照与当前相同  或  行的 trade_date < 它建成之后每一次发布的 min_affected_date
+--   日增量的 min_affected_date 是「新交易日」，历史因子因此不必重建。
+--
+-- ★ 一个必须说准的例外（不要写成「历史因子永远有效」）：财报按周节流全市场扫描时
+--   fin_start = start − 120 天，而 _upsert 是 INSERT OR REPLACE —— 内容没变的行也会
+--   刷新 _ingested_at，于是那一周的 min_affected 会被拽回约 120 天前，失效一个滚动
+--   四个月的尾巴（约 17 个周频日期 / 3% 的因子行）。判据本身没错（重述值确实可能变），
+--   但代价要如实说：**每周失效一个 120 天尾巴，其余永远有效**。
+--
+-- ★ 已知天花板（有意）：参考表（calendar / stock_basic / stock_status / industry_member）
+--   每次 ingest 都被整表 INSERT OR REPLACE，本判据覆盖不到它们的【历史】修正
+--   （申万成分回溯调整、namechange 补录历史 ST 段、list_date 勘误 —— 一年一两次，
+--   但后果是 processed_value 静默错，因为中性化/zscore 全是横截面统计量）。
+--   ⚠ 别按「给这四张表加 _ingested_at（schema v4）」去补 —— 那条路是错的：它们每天
+--   被整表重写，加了时间戳只会让 min_affected 每天回到 2010，整个机制当场作废。
+--   正确的补法是在 promote 时 ATTACH 上一版 market 做一次内容 diff（四张表最大 1 万行，
+--   毫秒级），把「历史行真的变了」压成那一天。见 promote._log_snapshot 的 TODO。
+CREATE TABLE IF NOT EXISTS snapshot_log (
+  snapshot_id       VARCHAR PRIMARY KEY,   -- 这次发布之后的数据指纹
+  promoted_at       TIMESTAMP NOT NULL,
+  min_affected_date DATE                   -- 本次写入影响的最早【可见】日期；NULL = 无法判定（保守：全部失效）
+);

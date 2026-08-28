@@ -190,7 +190,12 @@ def read_factor_values(param_hashes: Mapping[str, str], date, universe: Sequence
 
     d = query.norm_date(date, name="date")
     codes = _checked_universe(universe)
-    snap = query.snapshot_id()
+    # 当前快照 + 【那天可见的数据自那以后没被写过】的历史快照（query.valid_factor_snapshots）。
+    # 从前这里只认当前快照，于是每日增量往尾部追加新交易日就让 3300 万行历史因子
+    # 集体判陈旧、需十几小时重建 —— 每天一次，不可持续（2026-08-28 用户裁决）。
+    # 判据本身没有放松：接受的每一个历史快照，都经台账证明「as_of 当天能看见的数据
+    # 一行都没变」，值仍然成立。
+    snaps = query.valid_factor_snapshots(d)
     conn = _read_conn()
     if conn is None:
         return empty, _missing(param_hashes, set(), d)
@@ -199,9 +204,9 @@ def read_factor_values(param_hashes: Mapping[str, str], date, universe: Sequence
         col = "processed_value" if processed else "raw_value"
         got = conn.execute(
             f"SELECT factor_name, ts_code, {col} AS value FROM factor_value "
-            f"WHERE trade_date = ? AND snapshot_id = ? "
+            f"WHERE trade_date = ? AND snapshot_id IN ({','.join('?' * len(snaps))}) "
             f"AND (factor_name, param_hash) IN ({_pairs_clause(param_hashes)})",
-            [d, snap, *_pairs_params(param_hashes)]).fetchdf()
+            [d, *snaps, *_pairs_params(param_hashes)]).fetchdf()
     finally:
         conn.close()
 
@@ -263,16 +268,18 @@ def read_factor_window(param_hashes: Mapping[str, str], start, end) -> pd.DataFr
         return pd.DataFrame(columns=_WINDOW_COLS)
     s = query.norm_date(start, name="start")
     e = query.norm_date(end, name="end")
-    snap = query.snapshot_id()
+    # ★ 取【窗口末日】的允许集：判据是单调的（对 end 有效 ⇒ 对窗内每一天都有效，
+    #   因为 as_of 越早、"那天可见的数据"越是子集），所以这是保守且对整窗一致的那一侧。
+    snaps = query.valid_factor_snapshots(e)
     conn = _read_conn()
     if conn is None:
         return pd.DataFrame(columns=_WINDOW_COLS)
     try:
         got = conn.execute(
             f"SELECT {', '.join(_WINDOW_COLS)} FROM factor_value "
-            f"WHERE trade_date BETWEEN ? AND ? AND snapshot_id = ? "
+            f"WHERE trade_date BETWEEN ? AND ? AND snapshot_id IN ({','.join('?' * len(snaps))}) "
             f"AND (factor_name, param_hash) IN ({_pairs_clause(param_hashes)})",
-            [s, e, snap, *_pairs_params(param_hashes)]).fetchdf()
+            [s, e, *snaps, *_pairs_params(param_hashes)]).fetchdf()
     finally:
         conn.close()
     if len(got):
@@ -319,7 +326,7 @@ def current_factor_dates(param_hashes: Mapping[str, str],
     if not param_hashes or len(dates) == 0:
         return set()
     ds = [query.norm_date(d, name="trade_date") for d in dates]
-    snap = query.snapshot_id()
+    snaps = query.valid_factor_snapshots(max(ds))    # 同窗口读：取最晚那天的允许集，保守且一致
     conn = _read_conn()
     if conn is None:
         return set()
@@ -329,8 +336,8 @@ def current_factor_dates(param_hashes: Mapping[str, str],
             f"WHERE trade_date IN ({', '.join(['?'] * len(ds))}) "
             f"AND (factor_name, param_hash) IN ({_pairs_clause(param_hashes)}) "
             f"GROUP BY factor_name, param_hash, trade_date "
-            f"HAVING bool_and(snapshot_id = ?)",
-            [*ds, *_pairs_params(param_hashes), snap]).fetchall()
+            f"HAVING bool_and(snapshot_id IN ({','.join('?' * len(snaps))}))",
+            [*ds, *_pairs_params(param_hashes), *snaps]).fetchall()
     finally:
         conn.close()
     return {(n, d) for n, d in rows}

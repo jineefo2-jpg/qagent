@@ -105,6 +105,10 @@ class FakeSrc:
         # 按 [start, end] 生成"工作日开市"日历（元旦 01-01 休市），足够覆盖 pipeline 要求的前后余量
         s = start if hasattr(start, "year") else dt.date.fromisoformat(str(start))
         e = end if hasattr(end, "year") else dt.date.fromisoformat(str(end))
+        # ★ pretrade_date 必须与【请求窗口无关】—— 真实 trade_cal 是逐行返回该字段的。
+        #   从窗口内起算的话，同一天在长窗口与短窗口下会拿到不同的前一交易日，日历内容
+        #   于是随每次重拉而变（2026-08-28：参考表 diff 忠实地报了出来，是替身失真不是生产行为）。
+        s = min(s, dt.date(2000, 1, 1))
         days, d = [], s
         while d <= e:
             days.append(d); d += dt.timedelta(days=1)
@@ -114,9 +118,12 @@ class FakeSrc:
             pres.append(pre.strftime("%Y%m%d") if pre else None)
             if o:
                 pre = x
-        return _to_date(pd.DataFrame({"exchange": ["SSE"] * len(days),
-                                      "cal_date": [x.strftime("%Y%m%d") for x in days],
-                                      "is_open": is_open, "pretrade_date": pres}))
+        req_s = start if hasattr(start, "year") else dt.date.fromisoformat(str(start))
+        keep = [i for i, x in enumerate(days) if x >= req_s]
+        return _to_date(pd.DataFrame({"exchange": ["SSE"] * len(keep),
+                                      "cal_date": [days[i].strftime("%Y%m%d") for i in keep],
+                                      "is_open": [is_open[i] for i in keep],
+                                      "pretrade_date": [pres[i] for i in keep]}))
     def stock_basic(self):
         return _to_date(pd.DataFrame({"ts_code": ["600519.SH", "000001.SZ"], "symbol": ["600519", "000001"],
                                       "name": ["贵州茅台", "平安银行"], "area": [None] * 2, "industry": ["白酒", "银行"],
@@ -361,3 +368,164 @@ def test_promote_clears_the_full_backfill_marker(tmp_path):
     # 第二次撞上 s2：能正常返回就说明守卫没有误报（中间没 promote，所以窗口相同、不该 skip）
     again = pipeline.run_daily(str(market), str(s2), src, today=D(2024, 1, 8), indices=(), allow_static_industry=True)
     assert again["start"] == D(2024, 1, 8) and again["validation"] == "passed"
+
+
+# ══════════════ 发布台账：让历史因子不被每日增量误杀（2026-08-28 用户裁决）══════════════
+def _log(market) -> list:
+    c = _db.connect_read(str(market))
+    try:
+        return c.execute("SELECT snapshot_id, min_affected_date FROM snapshot_log "
+                         "ORDER BY promoted_at").fetchall()
+    finally:
+        c.close()
+
+
+def test_promote_records_the_earliest_affected_visible_date(tmp_path):
+    """每次发布要记下「本次写入影响的最早可见日期」。这是把「尾部追加新交易日」与
+    「历史被改」分开的唯一依据 —— 没有它，snapshot_id 这个全库指纹会让 3300 万行
+    历史因子在每次日增量后集体判陈旧、要十几小时重建（2026-08-28 实测）。"""
+    staging, market = tmp_path / "s.duckdb", tmp_path / "m.duckdb"
+    src = FakeSrc()
+    pipeline.run_full(str(staging), src, start=D(2024, 1, 2), end=D(2024, 1, 5),
+                      indices=(), allow_static_industry=True)
+    promote.promote(str(staging), str(market))
+    # 全量：影响起点 ≤ 回补起点（财报按 ann_date 可见，回看窗比行情更早）
+    assert _log(market)[0][1] <= D(2024, 1, 2)
+
+    s2 = tmp_path / "s2.duckdb"
+    pipeline.run_daily(str(market), str(s2), src, today=D(2024, 1, 8), indices=(), allow_static_industry=True)
+    promote.promote(str(s2), str(market))
+    rows = _log(market)
+    assert len(rows) == 2 and rows[1][1] == D(2024, 1, 8), rows   # 增量：只影响新交易日
+
+
+def test_daily_promote_leaves_old_factor_dates_valid(tmp_path, monkeypatch):
+    """判据的正题：日增量之后，**早于影响起点**的因子快照仍然有效（不必重建），
+    而影响起点当天及之后的失效。"""
+    from ashare.data import query as q
+    staging, market = tmp_path / "s.duckdb", tmp_path / "m.duckdb"
+    src = FakeSrc()
+    pipeline.run_full(str(staging), src, start=D(2024, 1, 2), end=D(2024, 1, 5),
+                      indices=(), allow_static_industry=True)
+    promote.promote(str(staging), str(market))
+    q.close_db(); q.open_db(str(market))
+    old_snap = q.snapshot_id()
+
+    s2 = tmp_path / "s2.duckdb"
+    pipeline.run_daily(str(market), str(s2), src, today=D(2024, 1, 8), indices=(), allow_static_industry=True)
+    promote.promote(str(s2), str(market))
+    q.close_db(); q.open_db(str(market))
+    try:
+        assert q.snapshot_id() != old_snap                       # 指纹确实变了
+        assert old_snap in q.valid_factor_snapshots("2024-01-05")   # 旧日期：仍有效 ★
+        assert old_snap not in q.valid_factor_snapshots("2024-01-08")  # 影响起点当天：失效
+    finally:
+        q.close_db()
+
+
+def test_unknown_affected_date_falls_back_to_conservative(tmp_path, monkeypatch):
+    """台账里 min_affected_date 为 NULL（判定不了，例如手工造的库直接 promote）→
+    保守：那之前的快照一律失效。「判定不了」绝不能被当成「没影响」。"""
+    from ashare.data import query as q
+    market = tmp_path / "m.duckdb"
+    _mk_db(market, "v1", days=3)
+    try:
+        c = _db.connect_write(str(market))          # 直接构造两条台账：旧的 + 一条 NULL
+        c.execute("INSERT INTO snapshot_log VALUES ('OLD', TIMESTAMP '2024-01-01', DATE '2024-01-01')")
+        c.execute("INSERT INTO snapshot_log VALUES ('NEW', TIMESTAMP '2024-01-02', NULL)")
+        c.close()
+        q.close_db(); q.open_db(str(market))
+        assert "OLD" not in q.valid_factor_snapshots("2020-01-01")
+    finally:
+        q.close_db()
+
+
+def test_multi_night_resume_reports_the_first_nights_start(tmp_path):
+    """R1（架构师评审 2026-08-28，唯一指向「误判为有效」的缺陷）：全量回补支持跨夜续跑，
+    若每晚覆盖 ingest_started_at，最终 promote 只测得【最后一晚】写入的行 —— 第 1 晚
+    重写了远期历史、末晚只碰几只新股，min_affected 就会记成很晚的日期，那批旧因子
+    于是被判「仍然有效」。必须保留第一晚的戳。"""
+    staging, market = tmp_path / "s.duckdb", tmp_path / "m.duckdb"
+    src = FakeSrc()
+    pipeline.run_full(str(staging), src, start=D(2024, 1, 2), end=D(2024, 1, 5),
+                      indices=(), allow_static_industry=True)
+    c = _db.connect_read(str(staging))
+    first = c.execute("SELECT value FROM _meta WHERE key='ingest_started_at'").fetchone()[0]
+    c.close()
+    pipeline.run_full(str(staging), src, start=D(2024, 1, 2), end=D(2024, 1, 5),   # 第二晚续跑
+                      indices=(), allow_static_industry=True)
+    c = _db.connect_read(str(staging))
+    again = c.execute("SELECT value FROM _meta WHERE key='ingest_started_at'").fetchone()[0]
+    c.close()
+    assert again == first, "续跑覆盖了起始戳 —— min_affected 会只反映最后一晚"
+
+    promote.promote(str(staging), str(market))
+    assert _log(market)[0][1] <= D(2024, 1, 2)          # 影响起点仍覆盖第一晚写的历史
+    c = _db.connect_read(str(market))
+    left = c.execute("SELECT value FROM _meta WHERE key='ingest_started_at'").fetchone()
+    c.close()
+    assert left is None, "发布后必须清掉起始戳，否则手工 promote 会拿上一轮的戳编出 min_affected"
+
+
+def test_promote_without_any_ingest_is_conservative(tmp_path):
+    """没有 ingest 起始戳（手工改库后直接发布）→ min_affected 必须是 NULL（保守全失效），
+    而不是拿别处的戳算出一个像模像样的日期。"""
+    from ashare.data import query as q
+    market, staging = tmp_path / "m.duckdb", tmp_path / "s.duckdb"
+    _mk_db(market, "v1", days=2)
+    _mk_db(staging, "v2", days=3)
+    promote.promote(str(staging), str(market))
+    assert _log(market)[0][1] is None
+    q.close_db(); q.open_db(str(market))
+    try:
+        assert q.valid_factor_snapshots("2020-01-01") == [q.snapshot_id()]   # 只剩当前快照
+    finally:
+        q.close_db()
+
+
+def test_reference_table_history_edit_invalidates_old_factors(tmp_path):
+    """参考表（股票池/行业归属）的【历史】修正必须被侦测到 —— 它们一变，当天整个
+    横截面的 processed_value 都变（去极值/中性化/zscore 全是横截面统计量），而这四张表
+    每天被整表重写、_ingested_at 恒等于今天，只能与上一版比内容（架构师评审 §3）。"""
+    staging, market = tmp_path / "s.duckdb", tmp_path / "m.duckdb"
+    src = FakeSrc()
+    pipeline.run_full(str(staging), src, start=D(2024, 1, 2), end=D(2024, 1, 5),
+                      indices=(), allow_static_industry=True)
+    promote.promote(str(staging), str(market))
+
+    # 造一版「历史被改」的 staging：把某只票的上市日改早到 2001 年之前
+    s2 = tmp_path / "s2.duckdb"
+    import shutil; shutil.copyfile(str(market), str(s2))
+    c = _db.connect_write(str(s2))
+    c.execute("INSERT INTO _meta VALUES ('ingest_started_at', ?) ON CONFLICT (key) "
+              "DO UPDATE SET value = excluded.value", ["2099-01-01 00:00:00.000000"])  # 无行情写入
+    # 真实 ingest 走 _upsert（INSERT OR REPLACE），会同时刷新 _ingested_at —— 这里照做，
+    # 否则 stock_basic 在快照指纹里是按 count+max(_ingested_at) 算的，指纹不变、
+    # 连"数据变了"这件事本身都测不出来（2026-08-28 自查）。
+    c.execute("UPDATE stock_basic SET list_date = DATE '1999-05-06', _ingested_at = current_timestamp "
+              "WHERE ts_code = '600519.SH'")
+    c.close()
+    promote.promote(str(s2), str(market))
+    assert _log(market)[-1][1] == D(1999, 5, 6), "历史上市日被改却没被侦测到"
+
+
+def test_reference_table_new_rows_do_not_touch_history(tmp_path):
+    """反面：日常变更（新上市 / 日历往未来延）产生的都是【新日期】的行，
+    diff 出来的最小日期落在未来，历史因子照常有效 —— 否则这道 diff 会每天误杀。"""
+    staging, market = tmp_path / "s.duckdb", tmp_path / "m.duckdb"
+    src = FakeSrc()
+    pipeline.run_full(str(staging), src, start=D(2024, 1, 2), end=D(2024, 1, 5),
+                      indices=(), allow_static_industry=True)
+    promote.promote(str(staging), str(market))
+
+    s2 = tmp_path / "s2.duckdb"
+    import shutil; shutil.copyfile(str(market), str(s2))
+    c = _db.connect_write(str(s2))
+    c.execute("INSERT INTO _meta VALUES ('ingest_started_at', ?) ON CONFLICT (key) "
+              "DO UPDATE SET value = excluded.value", ["2099-01-01 00:00:00.000000"])
+    c.execute("INSERT INTO stock_basic (ts_code, symbol, name, market, list_date, _ingested_at) "
+              "VALUES ('301999.SZ', '301999', '新股', '创业板', DATE '2026-06-01', current_timestamp)")
+    c.close()
+    promote.promote(str(s2), str(market))
+    md = _log(market)[-1][1]
+    assert md == D(2026, 6, 1), f"新上市应只影响其上市日之后，实际 {md}"
