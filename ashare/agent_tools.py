@@ -337,14 +337,20 @@ def get_price_levels(ts_code: str, as_of: Optional[str] = None, lookback: int = 
             if groups and abs(v - groups[-1]["sum"] / groups[-1]["n"]) / max(v, 1e-9) <= _CLUSTER_PCT:
                 g = groups[-1]
                 g["sum"] += v; g["n"] += 1
+                g["lo"] = min(g["lo"], v); g["hi"] = max(g["hi"], v)
                 g["tags"][tag] = g["tags"].get(tag, 0) + 1
                 g["last"] = max(g["last"], dt_)
             else:
-                groups.append({"sum": v, "n": 1, "tags": {tag: 1}, "last": dt_})
+                groups.append({"sum": v, "n": 1, "lo": v, "hi": v, "tags": {tag: 1}, "last": dt_})
 
         def render(g):
             by = [(f"{t}×{c}" if c > 1 else t) for t, c in sorted(g["tags"].items(), key=lambda kv: -kv[1])]
+            # ★ 报【区间】而不只是中心价：支撑本来就是一个带（1.5% 内归并而成）。
+            #   只给一个数的话，「在 X 买」和「跌破 X 走」会用上同一个数字 —— 容错为零、
+            #   没法执行（2026-08-28 用户指出的矛盾）。有了 zone，买在带内、止损放在
+            #   带的下沿之下，两件事才分得开。
             return {"price": round(g["sum"] / g["n"] * ratio, 2),
+                    "zone": [round(g["lo"] * ratio, 2), round(g["hi"] * ratio, 2)],
                     "strength": len(g["tags"]),           # 被几种【独立方法】指认 —— 强弱看这个
                     "confirmed_by": by[:4], "last_seen": g["last"]}
 
@@ -385,7 +391,9 @@ def get_price_levels(ts_code: str, as_of: Optional[str] = None, lookback: int = 
                 "supports": sup, "resistances": res,
                 "note": ("四个独立维度交叉确认：摆动点 / 成交密集区 / 均线 / 区间极值。"
                          "strength = 被几种方法同时指认（1 = 单一来源，多半是噪声；≥3 才算强）。"
-                         "这是对过去价格结构的描述性统计，不是预测。价格已折回未复权的市场价（券商行情软件里显示的那个价）。"
+                         "每个价位带 zone=[下沿,上沿]：支撑是一个【带】不是一条线。谈买点用带内，谈破位用下沿之下"
+                         "（留 1-2% 缓冲、且需放量收于其下才算破位）—— 同一个数字既当买点又当止损是没法执行的。"
+                         "这是对过去价格结构的描述性统计，不是预测。价格已折回未复权市场价。"
                          "列表为空就是【真的没有】，不要自行编造一个数。")}
     except Exception as e:                     # noqa: BLE001 — T1
         return _err(e)

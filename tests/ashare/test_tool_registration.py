@@ -239,3 +239,21 @@ def test_etf_codes_get_an_actionable_message_not_no_data():
         r = fn("512400") if name != "get_factor_exposure" else fn("2026-08-21", ts_code="512400")
         assert r["success"] is False and r.get("error_type") == "not_a_stock", name
         assert "ETF" in r["error"] and r.get("hint"), name
+
+
+def test_levels_expose_a_zone_so_entry_and_stop_can_differ():
+    """支撑是一个【带】：只报中心价会让「在 X 买」和「跌破 X 走」用上同一个数字，
+    容错为零、没法执行（2026-08-28 用户指出的矛盾）。zone 必须包住中心价且有宽度。"""
+    import pathlib, pytest as _p
+    if not pathlib.Path("data/ashare_market.duckdb").exists():
+        _p.skip("真实 market 库不存在")
+    from ashare.data import query
+    query.close_db(); query.open_db("data/ashare_market.duckdb")
+    r = ASHARE_TOOL_REGISTRY["get_price_levels"]("600519")
+    assert r["success"]
+    for lv in r["supports"] + r["resistances"]:
+        lo, hi = lv["zone"]
+        assert lo <= lv["price"] <= hi, f"中心价 {lv['price']} 不在带 {lv['zone']} 内"
+    multi = [lv for lv in r["supports"] + r["resistances"] if lv["strength"] >= 2]
+    assert any(lv["zone"][1] > lv["zone"][0] for lv in multi), \
+        "多方法确认的价位带宽度全为 0 —— 那还是一条线，买点与止损仍会撞在一起"
