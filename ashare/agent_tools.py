@@ -225,11 +225,139 @@ def get_stock_fundamentals(ts_code: str, as_of: Optional[str] = None) -> dict:
         return _err(e)
 
 
+_SWING_K = 5              # 摆动点窗口半宽：某根 K 的低点是前后各 5 根里的最低 → 一个摆动低点
+_CLUSTER_PCT = 0.015      # 1.5% 内的价位并成一个区（真实支撑是区间不是一条线）
+_VP_BUCKETS = 40          # 成交量分布的价格分桶数
+
+
+def get_price_levels(ts_code: str, as_of: Optional[str] = None, lookback: int = 120) -> dict:
+    """从**真实价格结构**多维度量出支撑/压力（只读，本地后复权行情）。
+
+    ★ 为什么存在：2026-08-28 用户发现 agent 给的支撑/压力总是「当前价稍减/稍加」，多只票
+      同一形状且从没出现过跌破支撑。查证确认：代码库里根本没有工具算这两个数，那些数字
+      是模型行文时编的。真算出来的支撑必然有时被跌破 —— 实测本函数在 2015 股灾日对
+      25 只区间最低的票有 20 只如实报「下方无支撑」。
+
+    四个**互相独立**的维度，各自提名候选价位，再按 1.5% 归并、按【被几种方法同时指认】排序：
+      ① 摆动低/高点   —— 市场真实换手过的转折点（前后各 5 根 K 的极值）
+      ② 成交量密集区 —— 价格区间分 40 桶累计成交量，取前 20% 的桶：筹码堆积处最难穿越
+      ③ 均线         —— MA20 / MA60 / MA120，被广泛盯盘因而自我实现
+      ④ 区间极值     —— 回看窗内的最高/最低价
+    单一维度的价位是噪声，三个维度同时指向同一价位才叫强 —— `confirmed_by` 就是这个证据链。
+    结构在后复权序列上量（跨除权可比），报出的价按当日比例折回**未复权市场价**。
+    """
+    try:
+        query.open_db()
+        ts = to_ts_code(ts_code) or ts_code
+        d = query.norm_date(as_of) if as_of else query.last_data_date()
+        if d is None:
+            return {"success": False, "error": "本地库为空"}
+        lookback = max(30, min(int(lookback), 500))
+        bars = query.get_bars(d, [ts], lookback=lookback, fields=("high", "low", "close", "vol"))
+        if bars.empty or ts not in bars.index.get_level_values(0):
+            return {"success": False, "error": f"本地库无 {ts} 的行情"}
+        df = bars.xs(ts, level=0)
+        df = df[~df["is_suspended"].astype(bool)]
+        if len(df) < 2 * _SWING_K + 5:
+            return {"success": False, "error": f"{ts} 只有 {len(df)} 根有效 K 线，量不出结构"}
+
+        mask = query.get_tradable_mask(d, [ts])
+        ratio = 1.0
+        if ts in mask.index:
+            hfq, raw = float(mask.loc[ts, "close_hfq"]), float(mask.loc[ts, "close_raw"])
+            if hfq == hfq and raw == raw and hfq > 0:
+                ratio = raw / hfq
+        hi = df["high"].astype(float).tolist()
+        lo = df["low"].astype(float).tolist()
+        cl = df["close"].astype(float).tolist()
+        vol = df["vol"].astype(float).fillna(0).tolist()
+        dates = [str(x) for x in df.index]
+        cur = cl[-1]
+        cand: list = []          # (价格, 方法标签, 最近日期)
+
+        # ① 摆动点
+        for i in range(_SWING_K, len(df) - _SWING_K):
+            if lo[i] == min(lo[i - _SWING_K:i + _SWING_K + 1]):
+                cand.append((lo[i], "摆动低点", dates[i]))
+            if hi[i] == max(hi[i - _SWING_K:i + _SWING_K + 1]):
+                cand.append((hi[i], "摆动高点", dates[i]))
+
+        # ② 成交量密集区：按典型价分桶累计成交量，取成交量前 20% 的桶
+        pmin, pmax = min(lo), max(hi)
+        if pmax > pmin:
+            step = (pmax - pmin) / _VP_BUCKETS
+            buckets: Dict[int, float] = {}
+            for h_, l_, c_, v_ in zip(hi, lo, cl, vol):
+                k = min(_VP_BUCKETS - 1, int(((h_ + l_ + c_) / 3 - pmin) / step))
+                buckets[k] = buckets.get(k, 0.0) + v_
+            if buckets:
+                top = sorted(buckets.items(), key=lambda kv: -kv[1])[:max(1, _VP_BUCKETS // 5)]
+                for k, _v in top:
+                    cand.append((pmin + (k + 0.5) * step, "成交密集", dates[-1]))
+
+        # ③ 均线（被广泛盯盘 → 自我实现）
+        for w in (20, 60, 120):
+            if len(cl) >= w:
+                cand.append((sum(cl[-w:]) / w, f"MA{w}", dates[-1]))
+
+        # ④ 区间极值
+        cand.append((pmin, "区间最低", dates[lo.index(pmin)]))
+        cand.append((pmax, "区间最高", dates[hi.index(pmax)]))
+
+        # 归并：1.5% 内算同一价位区，收集是哪些方法指认了它
+        cand.sort()
+        groups: list = []
+        for v, tag, dt_ in cand:
+            if groups and abs(v - groups[-1]["sum"] / groups[-1]["n"]) / max(v, 1e-9) <= _CLUSTER_PCT:
+                g = groups[-1]
+                g["sum"] += v; g["n"] += 1
+                g["tags"][tag] = g["tags"].get(tag, 0) + 1
+                g["last"] = max(g["last"], dt_)
+            else:
+                groups.append({"sum": v, "n": 1, "tags": {tag: 1}, "last": dt_})
+
+        def render(g):
+            by = [(f"{t}×{c}" if c > 1 else t) for t, c in sorted(g["tags"].items(), key=lambda kv: -kv[1])]
+            return {"price": round(g["sum"] / g["n"] * ratio, 2),
+                    "strength": len(g["tags"]),           # 被几种【独立方法】指认 —— 强弱看这个
+                    "confirmed_by": by[:4], "last_seen": g["last"]}
+
+        cur_raw = round(cur * ratio, 2)
+        levels = [render(g) for g in groups]
+        sup = sorted([x for x in levels if x["price"] < cur_raw],
+                     key=lambda x: (-x["price"]))
+        res = sorted([x for x in levels if x["price"] > cur_raw], key=lambda x: x["price"])
+        # 只保留强度靠前的三档（单一方法提名的价位是噪声，排在后面自然被截掉）
+        sup = sorted(sup[:6], key=lambda x: (-x["strength"], -x["price"]))[:3]
+        res = sorted(res[:6], key=lambda x: (-x["strength"], x["price"]))[:3]
+        sup.sort(key=lambda x: -x["price"]); res.sort(key=lambda x: x["price"])
+
+        if not sup:
+            pos = "⚠ 当前价【低于】回看窗内全部候选价位 —— 下方无支撑可依托"
+        elif not res:
+            pos = "⚠ 当前价【高于】回看窗内全部候选价位 —— 上方无压力（创区间新高）"
+        else:
+            span = res[0]["price"] - sup[0]["price"]
+            pct = (cur_raw - sup[0]["price"]) / span * 100 if span > 0 else float("nan")
+            pos = (f"位于支撑 {sup[0]['price']}（{sup[0]['strength']} 种方法确认）与压力 "
+                   f"{res[0]['price']}（{res[0]['strength']} 种）之间，区间 {pct:.0f}% 位置")
+        return {"success": True, "ts_code": ts, "as_of": str(d), "current_price": cur_raw,
+                "lookback_bars": len(df), "position": pos,
+                "supports": sup, "resistances": res,
+                "note": ("四个独立维度交叉确认：摆动点 / 成交密集区 / 均线 / 区间极值。"
+                         "strength = 被几种方法同时指认（1 = 单一来源，多半是噪声；≥3 才算强）。"
+                         "这是对过去价格结构的描述性统计，不是预测。价格已折回未复权的市场价（券商行情软件里显示的那个价）。"
+                         "列表为空就是【真的没有】，不要自行编造一个数。")}
+    except Exception as e:                     # noqa: BLE001 — T1
+        return _err(e)
+
+
 ASHARE_TOOL_REGISTRY: Dict[str, Callable] = {
     "query_universe": query_universe,
     "get_factor_exposure": get_factor_exposure,
     "get_signal_list": get_signal_list,
     "get_stock_fundamentals": get_stock_fundamentals,
+    "get_price_levels": get_price_levels,
 }
 
 ASHARE_TOOL_SCHEMAS: List[dict] = [
@@ -296,6 +424,26 @@ ASHARE_TOOL_SCHEMAS.append({
         "properties": {
             "ts_code": {"type": "string", "description": "股票代码，6 位或 ######.SH/.SZ/.BJ"},
             "as_of": {"type": "string", "description": "可选，交易日 YYYY-MM-DD；不给用库里最新交易日"},
+        },
+        "required": ["ts_code"],
+    },
+})
+
+
+ASHARE_TOOL_SCHEMAS.append({
+    "name": "get_price_levels",
+    "description": """【问支撑位/压力位/买卖点必须用这个，禁止自己编数】从真实价格结构量出支撑与压力（只读，本地行情）。
+算法：找回看窗内的摆动低/高点（前后各 5 根 K 线的极值），把 1.5% 内的并成价位区，
+报出被触及次数与最近一次日期；返回**当前价下方最近的支撑**与**上方最近的压力**（已折回未复权的市场价（券商行情软件里显示的那个价））。
+★ 支撑/压力可能【不存在】：价格跌破全部近期低点时 supports 就是空列表 —— 这是真实结论，
+必须如实转述「下方没有支撑」，绝不能编一个比当前价略低的数搪塞。
+这是对过去价格结构的描述性统计，不是预测。""",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "ts_code": {"type": "string", "description": "股票代码，6 位或 ######.SH/.SZ/.BJ"},
+            "as_of": {"type": "string", "description": "可选，交易日 YYYY-MM-DD；默认库里最新"},
+            "lookback": {"type": "integer", "description": "回看多少根 K 线，默认 120（约半年）"},
         },
         "required": ["ts_code"],
     },

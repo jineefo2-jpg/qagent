@@ -175,3 +175,36 @@ def test_fundamentals_tool_is_local_pit_and_within_budget(monkeypatch):
     assert len(json.dumps(r, ensure_ascii=False).encode()) < 3072
     bad = ASHARE_TOOL_REGISTRY["get_stock_fundamentals"]("AAPL")
     assert bad["success"] is False                      # 非 A 股安静失败，不乱猜
+
+
+def test_price_levels_are_measured_not_offset_from_current_price():
+    """支撑/压力必须是从价格结构量出来的，不能是「当前价 ±固定比例」。
+    2026-08-28 用户抓到的正是后者：多只票同一形状、从没跌破过支撑 —— 那是编的。
+    两条判据：① 不同票的支撑距离必须显著不同；② 真跌破时必须如实报「无支撑」。"""
+    import pathlib, pytest as _p
+    if not pathlib.Path("data/ashare_market.duckdb").exists():
+        _p.skip("真实 market 库不存在")
+    from ashare.data import query
+    query.close_db(); query.open_db("data/ashare_market.duckdb")
+    g = ASHARE_TOOL_REGISTRY["get_price_levels"]
+
+    gaps = []
+    for code in ("600519", "000001", "300750"):
+        r = g(code)
+        assert r["success"] and r["supports"], code
+        for lv in r["supports"] + r["resistances"]:
+            assert lv["strength"] >= 1 and lv["confirmed_by"], "每个价位必须带证据链"
+        gaps.append(abs(r["supports"][0]["price"] / r["current_price"] - 1))
+    assert max(gaps) - min(gaps) > 0.01, \
+        f"三只票的支撑距离几乎相同（{gaps}）—— 像是按当前价固定偏移生成的"
+
+    # ② 真实暴跌日必须能报出「下方无支撑」
+    none_cnt = 0
+    uni = query.get_universe("2015-08-26")[:200]
+    p = query.get_price_panel("2015-08-26", uni, "close", lookback=120).ffill()
+    rank = ((p.iloc[-1] - p.min()) / (p.max() - p.min())).dropna().sort_values()
+    for code in rank.index[:10]:
+        r = g(code, as_of="2015-08-26")
+        if r.get("success") and not r["supports"]:
+            none_cnt += 1
+    assert none_cnt > 0, "股灾日一只报「无支撑」的都没有 —— 该分支是死的"
