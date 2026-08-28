@@ -48,10 +48,12 @@ CFG = BacktestConfig(start=D(2019, 1, 4), end=D(2019, 12, 31),
 
 @pytest.fixture()
 def fake_world(monkeypatch):
-    state = {"positions": (None, []), "prior": None,
+    state = {"positions": (None, []), "prior": None, "data_end": D(2026, 8, 31),
              "targets": pd.Series({"A.SH": 0.5, "C.SH": 0.5, "D.SZ": 0.0})}
     monkeypatch.setattr(query, "snapshot_id", lambda *, pin=False: "snap-1")
     monkeypatch.setattr(query, "next_trade_date", lambda d, n=1: D(2026, 8, 31))
+    # 默认行情覆盖到 τ → 历史回放路径；实盘用例自己把它调早
+    monkeypatch.setattr(query, "last_data_date", lambda: state["data_end"])
     monkeypatch.setattr(query, "get_universe", lambda d, **k: ["A.SH", "B.SZ", "C.SH"])
     monkeypatch.setattr(query, "get_industry", lambda d, **k: pd.Series("行业", index=["A.SH", "B.SZ", "C.SH"]))
     monkeypatch.setattr(query, "get_stock_basic",
@@ -64,6 +66,7 @@ def fake_world(monkeypatch):
         "pre_close_raw":  [100.0, 50.0, 20.0],
         "limit_up_raw":   [110.0, 55.0, 22.0],
         "limit_down_raw": [90.0, 45.0, 18.0],
+        "close_raw":      [101.0, 51.0, 21.0],      # τ 的前收（实盘模式用它）
     }, index=pd.Index(["A.SH", "C.SH", "D.SZ"], name="ts_code"))
     monkeypatch.setattr(query, "get_tradable_mask", lambda d, codes: mask.reindex(codes))
     monkeypatch.setattr(sp, "_combine",
@@ -187,3 +190,19 @@ def test_default_config_is_the_validated_arm():
         f"生产配置指纹 {cfg.param_hash()} ≠ 过闸的 {sp.VALIDATED_PARAM_HASH}")
     assert sp.default_config(top_n=30).constraints.top_n == 30
     assert sp.default_config(top_n=30).param_hash() != cfg.param_hash()   # 改参数 = 新指纹
+
+
+def test_live_mode_does_not_exclude_the_whole_universe(fake_world):
+    """实盘出清单时 τ 在未来、那天没有任何行情。掩码若按 τ 求值会全判 no_quote 而剔光
+    整个池子 —— 2026-08-28 实测 0 笔订单 / 50 只剔除，报告读起来却像「策略今天什么都
+    不该买」。把「未知」当成「不可交易」是错的：掩码改在 T 日求值（§6.2「预期」二字），
+    限价带用 T 收盘且不夹涨跌停（τ 的板由 T 收盘推出，按 T 自己的板夹会夹错）。"""
+    fake_world["data_end"] = D(2026, 8, 28)          # 行情止于 T，τ=08-31 在未来
+    got = sp.build_rebalance_plan("2026-08-28", CFG)
+    by = {o["ts_code"]: o for o in got["orders"]}
+    assert by, "实盘模式把整个池子剔光了 —— 正是本用例要挡的回归"
+    assert by["A.SH"]["limit_price_range"] == [98.98, 103.02]     # 101.0 × (1 ± 0.02)，未夹
+    assert "尚未确定" in by["A.SH"]["price_basis"]
+    assert any("尚无行情" in w for w in got["warnings"])
+    # T 日一字封死仍然剔除 —— 那是「次日预期」的可得预测，不是「未知」
+    assert "C.SH" in {e["ts_code"] for e in got["excluded"]}

@@ -8,7 +8,7 @@ from ashare.data import _db, query
 
 D = dt.date
 COLS = ["can_buy", "can_sell", "reason", "open_hfq", "close_hfq", "amount", "amplitude",
-        "pre_close_raw", "limit_up_raw", "limit_down_raw"]   # 末三列：P3 V4 执行层原始价通道
+        "pre_close_raw", "limit_up_raw", "limit_down_raw", "close_raw"]   # 末三列：P3 V4 执行层原始价通道
 
 
 @pytest.fixture

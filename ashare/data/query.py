@@ -721,7 +721,7 @@ def get_index_bars(as_of_date: DateLike,
 
 # ══════════════ 执行时点专用（D6）—— 唯一首参不是 as_of_date 的函数 ══════════════
 _MASK_COLS = ["can_buy", "can_sell", "reason", "open_hfq", "close_hfq", "amount", "amplitude",
-              "pre_close_raw", "limit_up_raw", "limit_down_raw"]     # 末三列见 get_tradable_mask 注
+              "pre_close_raw", "limit_up_raw", "limit_down_raw", "close_raw"]   # 末四列见函数注
 
 
 def get_tradable_mask(exec_date: DateLike,
@@ -731,8 +731,9 @@ def get_tradable_mask(exec_date: DateLike,
     与 ashare/strategy/**（P3 V4 修订：清单的限价带要给用户真实可输入的价格）可以调。
 
     index=ts_code；columns：can_buy / can_sell / reason / open_hfq / close_hfq / amount /
-    amplitude / pre_close_raw / limit_up_raw / limit_down_raw。
-    末三列是【原始价】（P3 V4 的执行层豁免通道）：只供把清单换算成券商可输入的限价，
+    amplitude / pre_close_raw / limit_up_raw / limit_down_raw / close_raw。
+    末四列是【原始价】（P3 V4 的执行层豁免通道）：只供把清单换算成券商可输入的限价
+    （`close_raw` 是**次日**的前收 —— 实盘出清单时 τ 尚无行情，限价带只能由它推），
     因子与回测数学仍然禁用（D8 —— 复权价与原始价互比是 bug 温床，L5 静态守卫不变）。
     判定（全部用【原始价】在函数内部完成，判定中间量不外泄）：
       停牌 / 无行情              → 两侧 False（suspended / no_quote）
@@ -809,9 +810,9 @@ def get_tradable_mask(exec_date: DateLike,
             out.append((code, True, False, "limit_down_seal", o_h, c_h, amt, amp)); continue
         out.append((code, True, True, "", o_h, c_h, amt, amp))
     df = pd.DataFrame(out, columns=["ts_code", *_MASK_COLS[:7]]).set_index("ts_code")
-    raw = {c: (r[5], r[8], r[9]) for c, r in by_code.items()}    # pre_close / limit_up / limit_down
+    raw = {c: (r[5], r[8], r[9], r[4]) for c, r in by_code.items()}   # pre_close/limit_up/limit_down/close
     for i, col in enumerate(_MASK_COLS[7:]):
-        df[col] = pd.Series([raw.get(c, (None, None, None))[i] for c in df.index],
+        df[col] = pd.Series([raw.get(c, (None,) * 4)[i] for c in df.index],
                             index=df.index, dtype=float)
     return df
 

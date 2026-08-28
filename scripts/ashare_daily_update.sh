@@ -7,10 +7,18 @@
 #      下次开机/登录这一步就把欠账补齐；没有欠账时它是秒级 no-op。
 #   ② 当日 pass（仅 21 点后）：21:30 的依据 —— 日线/复权 ~15:30、daily_basic ~17-18 点、
 #      北向披露 ~19-21 点，全部落齐后再拉当日。
-# TUSHARE_TOKEN 从 .env 读（pipeline 只认环境变量，这里 source 进来）。
+# TUSHARE_TOKEN 从 .env 单独取（不 source 全文，见下方注释）。
 set -uo pipefail
 cd /Users/jineefo/Documents/AI-Agent/demo
-set -a; source .env; set +a
+# 只取 TUSHARE_TOKEN，不 source 整个 .env（2026-08-28 实测：某行的值带空格时 source 会把
+# 后半截当命令执行，脚本从此走偏；且每日更新没有理由持有券商/OAuth/邮箱密钥 —— 最小权限）
+mkdir -p logs
+TUSHARE_TOKEN=$(sed -n 's/^TUSHARE_TOKEN=//p' .env | tail -1 | tr -d '\r' | tr -d '"' | tr -d "'" | tr -d ' ')
+export TUSHARE_TOKEN
+if [ -z "${TUSHARE_TOKEN:-}" ]; then
+  echo "$(date '+%F %T') .env 里读不到 TUSHARE_TOKEN，本次不跑" >> logs/ashare_daily.log
+  exit 1
+fi
 LOG=logs/ashare_daily.log
 
 notify_fail() {

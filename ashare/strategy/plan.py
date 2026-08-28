@@ -84,6 +84,7 @@ def build_rebalance_plan(as_of_date, config) -> dict:
     直接抛 —— 一份基于中断数据的清单比没有清单更坏。"""
     as_of = query.norm_date(as_of_date)
     snapshot = query.snapshot_id(pin=True)
+    data_end = query.last_data_date()
     tau = query.next_trade_date(as_of)
     if tau is None:
         raise ValueError(f"{as_of} 之后没有交易日历覆盖：定不出执行日（先跑 daily 增量补日历）")
@@ -108,11 +109,18 @@ def build_rebalance_plan(as_of_date, config) -> dict:
         calibrated = led_date is not None and led_date >= query.norm_date(prior["as_of"])
     held = {r["ts_code"]: float(r["shares"]) for r in led_rows}
 
-    mask = query.get_tradable_mask(tau, sorted(set(universe) | set(held)))
+    # ★ 实盘出清单时执行日 τ 在【未来】，那天没有任何行情：掩码若按 τ 求值会把整个股票池
+    #   判成 no_quote 而全数剔除 —— 2026-08-28 实测 0 笔订单 / 50 只剔除，而报告读起来像
+    #   「策略今天什么都不该买」。把「未知」当成「不可交易」是错的。
+    #   改在 T 日求值，这正是 §6.2「剔除次日【预期】一字涨停」里「预期」二字的落点 ——
+    #   T 日一字封死是次日一字最好的可得预测。历史回放（τ 已有行情）路径分毫不动。
+    live = data_end is not None and tau > data_end
+    mask = query.get_tradable_mask(as_of if live else tau, sorted(set(universe) | set(held)))
+    px_col = "close_raw" if live else "pre_close_raw"      # 两者都是【τ 的前收】
     cur_w: Dict[str, float] = {}
     if held:
-        vals = {c: sh * float(mask.loc[c, "pre_close_raw"]) for c, sh in held.items()
-                if c in mask.index and mask.loc[c, "pre_close_raw"] == mask.loc[c, "pre_close_raw"]}
+        vals = {c: sh * float(mask.loc[c, px_col]) for c, sh in held.items()
+                if c in mask.index and mask.loc[c, px_col] == mask.loc[c, px_col]}
         total = sum(vals.values())
         if total > 0:
             cur_w = {c: v / total for c, v in vals.items()}
@@ -147,19 +155,27 @@ def build_rebalance_plan(as_of_date, config) -> dict:
         urgency, note = "normal", None
         if action != "BUY" and m is not None and not bool(m["can_sell"]):
             urgency, note = "blocked", f"τ 日不可卖（{m['reason']}），顺延执行"
-        band = None if m is None else _band(float(m["pre_close_raw"]), float(atr.get(code, float("nan"))),
-                                            float(m["limit_down_raw"]), float(m["limit_up_raw"]))
+        # 实盘不夹涨跌停：τ 的涨跌停由 T 收盘推出，此刻按 T 自己的板去夹会夹错。
+        # ATR 带（典型 ±1~2%）几乎不可能越过 ±10%，越过也由券商侧拒单，不至于成交在坏价。
+        lo_lim, hi_lim = ((float("nan"), float("nan")) if live or m is None
+                          else (float(m["limit_down_raw"]), float(m["limit_up_raw"])))
+        band = None if m is None else _band(float(m[px_col]), float(atr.get(code, float("nan"))),
+                                            lo_lim, hi_lim)
         orders.append({"ts_code": code,
                        "name": str(names.get(code, "?")),
                        "action": action,
                        "current_weight": round(cur, 6),
                        "target_weight": round(tgt, 6),
                        "limit_price_range": band,
-                       "price_basis": "前收 ± 0.5 × ATR20，夹进当日涨跌停",
+                       "price_basis": ("前收 ± 0.5 × ATR20（执行日涨跌停尚未确定，未夹）" if live
+                                       else "前收 ± 0.5 × ATR20，夹进当日涨跌停"),
                        "factor_contrib": _contrib(panel, weights, code),
                        "urgency": urgency, **({"note": note} if note else {})})
 
     plan_warns = ([] if calibrated else [UNCALIBRATED_WARNING]) + [w for w in warns if w.lstrip().startswith("⚠")]
+    if live:
+        plan_warns.append(f"执行日 {tau} 尚无行情：可交易性与限价带按 {as_of} 收盘推断"
+                          f"（次日一字涨停/停牌属预测，非事实）")
     return {"as_of": str(as_of), "as_of_note": AS_OF_NOTE,
             "execute_on": f"{tau}T09:15:00+08:00", "execute_note": EXECUTE_NOTE,
             "target_position": round(pi, 4),
