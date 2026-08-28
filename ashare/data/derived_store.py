@@ -363,12 +363,19 @@ def coverage_report(names: Optional[Sequence[str]] = None) -> pd.DataFrame:
         # 空列表 = 什么都没问（与 read_factor_values({}) / current_factor_dates({}) 同口径）。
         # 不挡的话 `IN ()` 会抛 duckdb.ParserException —— 一句调用方读不懂的 SQL 语法错。
         return pd.DataFrame(columns=COVERAGE_COLUMNS)
-    snap = query.snapshot_id()
+    # ★ 口径必须与 read_factor_values 一致：那边早已改成「当前快照 ∪ 台账证明未受影响的
+    #   历史快照」，这里若还按 `= 当前快照` 算，一个**能被正常读出来**的日期会被记进
+    #   n_stale_dates、cov 因 nullif(0,0) 变 NULL、mean_coverage 变 NaN ——
+    #   这张报表存在的理由就是「别把快照陈旧当成灵异事件」，它自己撒谎就没意义了。
+    #   取最新已算日期的允许集（判据单调，见 read_factor_window 的同一条理由）。
     conn = _read_conn()
     if conn is None:
         return pd.DataFrame(columns=COVERAGE_COLUMNS)
     try:
-        where, params = "", [snap, snap, snap]
+        last = conn.execute("SELECT max(trade_date) FROM factor_value").fetchone()
+        snaps = query.valid_factor_snapshots(last[0]) if last and last[0] else [query.snapshot_id()]
+        ph = ",".join("?" * len(snaps))
+        where, params = "", [*snaps, *snaps, *snaps]
         if names is not None:
             where = f"WHERE factor_name IN ({', '.join(['?'] * len(names))})"
             params += list(names)
@@ -376,9 +383,9 @@ def coverage_report(names: Optional[Sequence[str]] = None) -> pd.DataFrame:
             f"""
             WITH per_date AS (
                 SELECT factor_name, param_hash, trade_date,
-                       (count(raw_value) FILTER (WHERE snapshot_id = ?))::DOUBLE
-                           / nullif(count(*) FILTER (WHERE snapshot_id = ?), 0) AS cov,
-                       bool_and(snapshot_id = ?)                                AS is_current
+                       (count(raw_value) FILTER (WHERE snapshot_id IN ({ph})))::DOUBLE
+                           / nullif(count(*) FILTER (WHERE snapshot_id IN ({ph})), 0) AS cov,
+                       bool_and(snapshot_id IN ({ph}))                                AS is_current
                 FROM factor_value {where}
                 GROUP BY factor_name, param_hash, trade_date)
             SELECT factor_name, param_hash,

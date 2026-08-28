@@ -217,6 +217,14 @@ def run_daily(market_path: str, staging_path: str, src, *, today: _dt.date | Non
         if r:
             raise RuntimeError(f"{staging_path} 里有一次未完成的全量回补（full_end={r[0]}）。"
                                f"daily 会覆盖它。请先跑完 full 并 promote，或给 daily 指定 --staging 到别的路径。")
+    # ★ 先删残留 WAL：copyfile 覆盖 .duckdb 却不动 .wal，上一轮被硬杀（SIGKILL）留下的
+    #   WAL 会在下次 connect_write 时尝试回放 —— 与新拷贝的字节不对齐就抛「replaying WAL
+    #   failure」，每晚定时任务从此卡死直到人工删文件；对齐则更坏：静默回放上一轮的写入。
+    for _suffix in (".wal", ".tmp"):
+        try:
+            os.remove(staging_path + _suffix)
+        except FileNotFoundError:
+            pass
     shutil.copyfile(market_path, staging_path)
     conn = _db.connect_write(staging_path)
     try:

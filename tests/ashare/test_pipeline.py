@@ -529,3 +529,19 @@ def test_reference_table_new_rows_do_not_touch_history(tmp_path):
     promote.promote(str(s2), str(market))
     md = _log(market)[-1][1]
     assert md == D(2026, 6, 1), f"新上市应只影响其上市日之后，实际 {md}"
+
+
+def test_daily_removes_a_stale_staging_wal(tmp_path):
+    """copyfile 覆盖 .duckdb 却不动 .wal：上一轮被硬杀留下的 WAL 会在下次 connect_write
+    时尝试回放 —— 不对齐就抛「replaying WAL failure」，每晚定时任务从此卡死；对齐则更坏
+    （静默回放上一轮的写入）。copyfile 之前必须先删（评审 P2b）。"""
+    staging, market = tmp_path / "s.duckdb", tmp_path / "m.duckdb"
+    src = FakeSrc()
+    pipeline.run_full(str(staging), src, start=D(2024, 1, 2), end=D(2024, 1, 5),
+                      indices=(), allow_static_industry=True)
+    promote.promote(str(staging), str(market))
+    wal = pathlib.Path(str(staging) + ".wal")
+    wal.write_bytes(b"garbage-from-a-killed-run")          # 伪造残留 WAL
+    s = pipeline.run_daily(str(market), str(staging), src, today=D(2024, 1, 8),
+                           indices=(), allow_static_industry=True)
+    assert s["validation"] == "passed" and not wal.exists()

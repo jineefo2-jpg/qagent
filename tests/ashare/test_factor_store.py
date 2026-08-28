@@ -1033,3 +1033,16 @@ def test_derived_store_does_not_import_the_layers_above_it(store_env):
 
 # 反过来的那一半（`factors/store.py` 不得 import duckdb）不在这里重测：
 # `test_layering.py::test_real_codebase_passes` 对真实 ashare/ 跑 L1，已经守着了。
+
+
+def test_coverage_report_uses_the_same_validity_rule_as_reads(tmp_path, monkeypatch):
+    """报表口径必须与 read_factor_values 一致：一个能被正常读出来的日期不该被记成
+    n_stale_dates（评审 P3）。这张报表存在的理由就是「别把快照陈旧当灵异事件」，
+    它自己撒谎最坏。"""
+    from ashare.data import derived_store, query
+    seen: list = []
+    real = query.valid_factor_snapshots
+    monkeypatch.setattr(query, "valid_factor_snapshots",
+                        lambda d: seen.append(d) or real(d))
+    derived_store.coverage_report()
+    assert seen, "coverage_report 没有走 valid_factor_snapshots —— 口径与读取脱节"
