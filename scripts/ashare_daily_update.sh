@@ -9,7 +9,12 @@
 #      北向披露 ~19-21 点，全部落齐后再拉当日。
 # TUSHARE_TOKEN 从 .env 单独取（不 source 全文，见下方注释）。
 set -uo pipefail
-cd /Users/jineefo/Documents/AI-Agent/demo
+# 仓库根 = 本脚本的上一级：Mac 上是 ~/Documents/AI-Agent/demo，容器里是 /app。
+# （写死绝对路径的版本上不了云，也经不起换目录 —— 2026-08-28 部署审计）
+cd "$(cd "$(dirname "$0")/.." && pwd)"
+# 时区：ashare 用 date.today() 判交易日，容器/云主机默认 UTC 会整体错算一天
+export TZ="${TZ:-Asia/Shanghai}"
+PY="${PYTHON_BIN:-python3}"          # 容器里是 python3，Mac 上的 /usr/bin/python3 亦同
 # 只取 TUSHARE_TOKEN，不 source 整个 .env（2026-08-28 实测：某行的值带空格时 source 会把
 # 后半截当命令执行，脚本从此走偏；且每日更新没有理由持有券商/OAuth/邮箱密钥 —— 最小权限）
 mkdir -p logs
@@ -23,18 +28,20 @@ LOG=logs/ashare_daily.log
 
 notify_fail() {
   echo "$(date '+%F %T') $1 FAILED" >> $LOG
-  /usr/bin/osascript -e 'display notification "查看 logs/ashare_daily.log" with title "A 股每日更新失败"' || true
+  # 桌面通知只在 macOS 有意义；容器/Linux 上静默跳过（日志已记，cron 也会留痕）
+  [ -x /usr/bin/osascript ] && /usr/bin/osascript -e \
+    'display notification "查看 logs/ashare_daily.log" with title "A 股每日更新失败"' || true
 }
 
 YESTERDAY=$(date -v-1d +%F)
-if /usr/bin/python3 -m ashare.data.pipeline daily --until $YESTERDAY >> $LOG 2>&1; then
+if $PY -m ashare.data.pipeline daily --until $YESTERDAY >> $LOG 2>&1; then
   echo "$(date '+%F %T') catch-up(≤$YESTERDAY) OK" >> $LOG
 else
   notify_fail "catch-up"; exit 1
 fi
 
 if [ "$(date +%H)" -ge 21 ]; then
-  if /usr/bin/python3 -m ashare.data.pipeline daily >> $LOG 2>&1; then
+  if $PY -m ashare.data.pipeline daily >> $LOG 2>&1; then
     echo "$(date '+%F %T') daily OK" >> $LOG
   else
     notify_fail "daily"; exit 1
@@ -42,7 +49,7 @@ if [ "$(date +%H)" -ge 21 ]; then
   # ③ 信号链（P3 Task 6）：非交易日/非周频调仓日在 python 侧安静跳过；
   #    调仓日 = 先 build 当日因子（V6 只 build 这一天）再出清单落 ledger + 导出 JSON。
   #    信号失败不影响已 promote 的数据，但要出声。
-  if /usr/bin/python3 -m ashare.strategy.plan --nightly >> $LOG 2>&1; then
+  if $PY -m ashare.strategy.plan --nightly >> $LOG 2>&1; then
     echo "$(date '+%F %T') nightly-signal OK" >> $LOG
   else
     notify_fail "nightly-signal"; exit 1

@@ -1,43 +1,38 @@
-# 密钥
-.env
-.env.local
-*.key
-*.pem
-*.p12
-*.pfx
 
-# Python
-__pycache__/
-*.pyc
-*.pyo
-venv/
-.venv/
-
-# RAG 数据
-rag_db/
-docs/*.pdf
-
-# 运行时生成的图表 HTML(由 html_chart_render 工具产出)
-static/charts/
-
-# 凭证 SQLite (X3 起,加密存储 broker 凭证)
-# 锚定到仓库根：不加 / 会把 ashare/data/ 源码目录也吞掉
-/data/
-
-# IDE
-.vscode/
-.idea/*
+!.idea/demo.iml
+!.idea/jdk.table.xml
 !.idea/misc.xml
 !.idea/modules.xml
-!.idea/jdk.table.xml
-!.idea/demo.iml
-.DS_Store
-
 # A 股数据底座
-data/ashare_market.duckdb*
+# IDE
+# Python
+# RAG 数据
+# 凭证 SQLite (X3 起,加密存储 broker 凭证)
+# 密钥
+# 运行时生成的图表 HTML(由 html_chart_render 工具产出)
+# 锚定到仓库根：不加 / 会把 ashare/data/ 源码目录也吞掉
+*.key
+*.p12
+*.pem
+*.pfx
+*.pyc
+*.pyo
+.DS_Store
+.env
+.env.local
+.idea/*
+.venv/
+.vscode/
+/data/
+__pycache__/
 data/ashare_derived.duckdb*
-data/ashare_staging/
-data/rate_state.json
-data/parquet_export/
-logs/
 data/ashare_ledger.duckdb*
+data/ashare_market.duckdb*
+data/ashare_staging/
+data/parquet_export/
+data/rate_state.json
+docs/*.pdf
+logs/
+rag_db/
+static/charts/
+venv/
