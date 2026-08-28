@@ -27,6 +27,16 @@ def _stamp_snapshot(path: str) -> str:
         sid = _compute_snapshot(c)
         c.execute("INSERT INTO _meta (key, value) VALUES ('snapshot_id', ?) "
                   "ON CONFLICT (key) DO UPDATE SET value = excluded.value", [sid])
+        # ★ 顺手清掉全量回补的续跑标记：`full_end` 的语义是「这个 staging 里有一次
+        #   尚未发布的全量回补」，而 promote 正是「发布」——它的生命到此为止。
+        #   不清的后果不是小事：promote 用 os.replace 把 staging **变成**正式库，
+        #   标记就永久留在 market 里；之后每次 daily 把 market 拷回 staging，
+        #   run_daily 的守卫都会看到它并拒绝 = 全量成功之后每日增量永远跑不起来
+        #   （2026-08-28 实测）。清在 replace 之前，成为正式库的那个文件从来没带过它。
+        #   注意不能改在 run_full 收尾清：一次 run_full 正常返回 ≠ 整个回补完成
+        #   （跨夜续跑），那样会把 test_run_full_refuses_drifting_end_on_resume 守的
+        #   「第二晚 --end 漂移」保护一起弄没。
+        c.execute("DELETE FROM _meta WHERE key = 'full_end'")
     finally:
         c.close()
     return sid

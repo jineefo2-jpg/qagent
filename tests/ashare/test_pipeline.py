@@ -335,3 +335,29 @@ def test_financial_sweep_is_throttled_to_weekly(tmp_path):
     s2 = pipeline.run_daily(str(market), str(tmp_path / "b.duckdb"), src, today=D(2024, 1, 8),
                             indices=(), allow_static_industry=True, financials=True)
     assert s2["skipped"] is True                            # 已是最新，不再拉
+
+
+def test_promote_clears_the_full_backfill_marker(tmp_path):
+    """`full_end` 是 staging 的【断点续跑保护】，而 promote 用 os.replace 把这个文件
+    **变成**正式库 —— 标记不清就永久留在 market 里。之后每次 daily 把 market 拷回
+    staging，守卫都会看到它并拒绝：**全量回补成功之后，每日增量永远跑不起来**。
+    2026-08-28 实测：catch-up 连着两次被自己上一次留下的 staging 拦死。"""
+    staging, market = tmp_path / "s.duckdb", tmp_path / "m.duckdb"
+    src = FakeSrc()
+    pipeline.run_full(str(staging), src, start=D(2024, 1, 2), end=D(2024, 1, 5),
+                      indices=(), allow_static_industry=True)
+    promote.promote(str(staging), str(market))
+
+    c = _db.connect_read(str(market))
+    try:
+        assert c.execute("SELECT value FROM _meta WHERE key='full_end'").fetchone() is None, \
+            "promote 之后正式库仍带着全量回补的续跑标记"
+    finally:
+        c.close()
+
+    # 实盘出事的那个顺序：daily 第一次建出 staging，第二次撞上它
+    s2 = tmp_path / "s2.duckdb"
+    pipeline.run_daily(str(market), str(s2), src, today=D(2024, 1, 8), indices=(), allow_static_industry=True)
+    # 第二次撞上 s2：能正常返回就说明守卫没有误报（中间没 promote，所以窗口相同、不该 skip）
+    again = pipeline.run_daily(str(market), str(s2), src, today=D(2024, 1, 8), indices=(), allow_static_industry=True)
+    assert again["start"] == D(2024, 1, 8) and again["validation"] == "passed"
