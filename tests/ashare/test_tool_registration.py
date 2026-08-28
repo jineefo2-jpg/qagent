@@ -156,3 +156,22 @@ def test_relaxed_read_is_whitelisted_to_the_agent_layer():
     callers = {f for f in out.split() if f}
     assert callers == {"ashare/agent_tools.py", "ashare/factors/store.py",
                        "ashare/data/derived_store.py"}, f"宽松读出现了新调用方: {callers}"
+
+
+def test_fundamentals_tool_is_local_pit_and_within_budget(monkeypatch):
+    """个股基本面必须来自本地 PIT 且带公告日 —— 这正是它相对联网源的价值所在
+    （联网源给的是"最新财报"，那是前视口径）。返回体守 T2 的 3KB。"""
+    import json, pathlib
+    if not pathlib.Path("data/ashare_market.duckdb").exists():
+        import pytest as _p; _p.skip("真实 market 库不存在")
+    from ashare.data import query
+    query.close_db(); query.open_db("data/ashare_market.duckdb")
+    r = ASHARE_TOOL_REGISTRY["get_stock_fundamentals"]("600519")
+    assert r["success"] is True and r["profile"]["name"]
+    fin = r["financials"]
+    assert fin["announced_on"] and fin["report_period"] and fin["lag_days"] >= 0, \
+        "财报必须带公告日/报告期/滞后天数 —— 没有它就分不清 PIT 与前视"
+    assert r["price_60d"]["basis"].startswith("后复权")
+    assert len(json.dumps(r, ensure_ascii=False).encode()) < 3072
+    bad = ASHARE_TOOL_REGISTRY["get_stock_fundamentals"]("AAPL")
+    assert bad["success"] is False                      # 非 A 股安静失败，不乱猜

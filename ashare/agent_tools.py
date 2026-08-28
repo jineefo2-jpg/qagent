@@ -167,10 +167,69 @@ def get_signal_list(top: int = 10) -> dict:
         return _err(e)
 
 
+def get_stock_fundamentals(ts_code: str, as_of: Optional[str] = None) -> dict:
+    """个股基本面快照（只读，本地 PIT 数仓）。写「个股详细报告」的主力数据源。
+
+    ★ 补的是第一层的缺口：从前 agent 拿得到因子 z 分却拿不到 PE/ROE，只能转头去联网源
+      （2026-08-28 用户实测）。这些数据本地全有，而且比联网源多两样要紧的东西：
+      财报带**公告日与滞后天数**（PIT，不是"最新财报"那种前视口径），行情是**后复权**
+      （与回测同口径）。
+    """
+    try:
+        query.open_db()
+        ts = to_ts_code(ts_code) or ts_code
+        d = query.norm_date(as_of) if as_of else query.last_data_date()
+        if d is None:
+            return {"success": False, "error": "本地库为空"}
+        out: dict = {"success": True, "ts_code": ts, "as_of": str(d),
+                     "note": "本地 PIT 数仓；财报按公告日可见（非前视），行情为后复权"}
+
+        basic = query.get_stock_basic(d, [ts])
+        if ts not in basic.index:
+            return {"success": False, "error": f"{ts} 不在 {d} 的本地库里（代码错误或尚未上市）"}
+        row = basic.loc[ts]
+        out["profile"] = {"name": str(row.get("name", "?")),
+                          "sw_l1": str(row.get("sw_l1", "?")), "sw_l2": str(row.get("sw_l2", "?")),
+                          "list_date": str(row.get("list_date", ""))}
+
+        db = query.get_daily_basic(d, [ts], fields=("pe_ttm", "pb", "ps_ttm", "dv_ttm",
+                                                    "total_mv", "circ_mv", "turnover_rate_f"))
+        if ts in db.index:
+            v = db.loc[ts]
+            out["valuation"] = {k: _num(v.get(k)) for k in ("pe_ttm", "pb", "ps_ttm", "dv_ttm",
+                                                            "turnover_rate_f")}
+            out["market_cap_yi"] = {k: (None if _num(v.get(k)) is None else round(float(v[k]) / 1e4, 1))
+                                    for k in ("total_mv", "circ_mv")}    # 万元 → 亿元
+
+        fin = query.get_financial(d, [ts], ["revenue", "n_income_attr_p", "roe",
+                                            "grossprofit_margin", "debt_to_assets"])
+        if ts in fin.index:
+            f = fin.loc[ts]
+            out["financials"] = {
+                "revenue_yi": None if _num(f.get("revenue")) is None else round(float(f["revenue"]) / 1e8, 1),
+                "net_profit_yi": None if _num(f.get("n_income_attr_p")) is None else round(float(f["n_income_attr_p"]) / 1e8, 1),
+                "roe": _num(f.get("roe")), "gross_margin": _num(f.get("grossprofit_margin")),
+                "debt_ratio": _num(f.get("debt_to_assets")),
+                "report_period": str(f.get("end_date", "")), "announced_on": str(f.get("ann_date", "")),
+                "lag_days": int(f["lag_days"]) if f.get("lag_days") == f.get("lag_days") else None}
+
+        bars = query.get_bars(d, [ts], lookback=60, fields=("close",))
+        if not bars.empty:
+            c = bars["close"].astype(float).dropna()
+            if len(c) >= 2:
+                out["price_60d"] = {"return_pct": round((float(c.iloc[-1]) / float(c.iloc[0]) - 1) * 100, 2),
+                                    "n_bars": int(len(c)),
+                                    "basis": "后复权（与回测同口径），非可输入的挂单价"}
+        return out
+    except Exception as e:                     # noqa: BLE001 — T1
+        return _err(e)
+
+
 ASHARE_TOOL_REGISTRY: Dict[str, Callable] = {
     "query_universe": query_universe,
     "get_factor_exposure": get_factor_exposure,
     "get_signal_list": get_signal_list,
+    "get_stock_fundamentals": get_stock_fundamentals,
 }
 
 ASHARE_TOOL_SCHEMAS: List[dict] = [
@@ -220,6 +279,25 @@ ASHARE_TOOL_SCHEMAS.append({
         "type": "object",
         "properties": {"top": {"type": "integer", "description": "返回订单条数上限，默认 10"}},
         "required": [],
+    },
+})
+
+
+ASHARE_TOOL_SCHEMAS.append({
+    "name": "get_stock_fundamentals",
+    "description": """【写 A 股个股报告的主力工具，优先于任何联网源】本地 PIT 数仓的个股基本面快照（只读）。
+一次给全：名称/申万行业/上市日 + 估值(PE_TTM·PB·PS_TTM·股息率·换手) + 市值(亿元)
++ 财务(营收/归母净利/ROE/毛利率/负债率，**带报告期、公告日与滞后天数**) + 近 60 日后复权涨跌。
+比联网源多两样要紧的：财报按**公告日**可见（PIT，不是"最新财报"那种前视口径）；
+行情是**后复权**，与回测、与因子同一口径。
+配合 get_factor_exposure（该股因子暴露）即可写出完整报告；只有盘中实时价才需要 market_quote。""",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "ts_code": {"type": "string", "description": "股票代码，6 位或 ######.SH/.SZ/.BJ"},
+            "as_of": {"type": "string", "description": "可选，交易日 YYYY-MM-DD；不给用库里最新交易日"},
+        },
+        "required": ["ts_code"],
     },
 })
 
