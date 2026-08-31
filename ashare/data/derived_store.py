@@ -104,16 +104,33 @@ def write_factor_values(df: pd.DataFrame) -> int:
     if df.empty:
         return 0
 
-    rows = [(fn, ph, query.norm_date(td, name="trade_date"), tc, _num(rv), _num(pv), sid)
-            for fn, ph, td, tc, rv, pv, sid
-            in df[list(FACTOR_VALUE_COLUMNS)].itertuples(index=False, name=None)]
+    stage = df[list(FACTOR_VALUE_COLUMNS)].copy()
+    stage["trade_date"] = pd.to_datetime(stage["trade_date"]).dt.date
     conn = _derived.connect_write()
     try:
         _derived.init_schema(conn)
-        conn.executemany(_derived.UPSERT_FACTOR_VALUE, rows)
+        # ★ register + INSERT...SELECT（ingest._upsert 的同一模式），不是 executemany：
+        #   后者逐行走预处理语句，实测 62k 行要 58–98 秒（≈1k 行/秒），全量重建按它
+        #   要 19 小时，写库占 75%（2026-08-31 профил）。向量化后同一帧 <2 秒。
+        # ★ NaN→NULL 在 SQL 里做（工程约束 5，踩过三次）：register 直传 DataFrame 的话
+        #   float 列里的 NaN 会原样落库，count() 把它算进去、IS NULL 判它为假，
+        #   覆盖率闸从此形同虚设 —— executemany 时代这件事由 _num() 做，不能丢。
+        conn.register("_stage", stage)
+        conn.execute(
+            "INSERT INTO factor_value (factor_name, param_hash, trade_date, ts_code, "
+            "                          raw_value, processed_value, snapshot_id) "
+            "SELECT factor_name, param_hash, trade_date, ts_code, "
+            "       CASE WHEN raw_value IS NULL OR isnan(raw_value) THEN NULL ELSE raw_value END, "
+            "       CASE WHEN processed_value IS NULL OR isnan(processed_value) THEN NULL ELSE processed_value END, "
+            "       snapshot_id "
+            "FROM _stage "
+            "ON CONFLICT (factor_name, param_hash, trade_date, ts_code) DO UPDATE SET "
+            "  raw_value = excluded.raw_value, processed_value = excluded.processed_value, "
+            "  snapshot_id = excluded.snapshot_id")
+        conn.unregister("_stage")
     finally:
         conn.close()
-    return len(rows)
+    return len(stage)
 
 
 # ══════════════ 回测运行台账（backtest_run）══════════════
