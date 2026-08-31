@@ -93,3 +93,32 @@ def test_status_at_takes_latest_segment_on_overlap():
             {"start_date": D(2024,1,10), "end_date": D(2024,1,19), "status": "*ST"}]
     assert _status_at(rows, D(2024,1,15)) == "*ST"
     assert _status_at(rows, D(2024,1,5)) == "NORMAL"
+
+
+def test_sw_members_pages_through_the_3000_row_cap():
+    """index_member_all 单次上限 3000 行、全量约 5560 —— 不翻页会静默少掉 46%。
+    后果不是报错而是【行业中性化失真】：近一半股票没有行业归属、落进 __OTHER__ 桶，
+    被当成同一个行业做横截面回归（2026-08-31 实测：2015 年 72% 的票在 __OTHER__）。
+    另一个副作用是每次取到的"某 3000 行"不稳定，参考表 diff 天天误报。"""
+    import pandas as pd
+    from ashare.data.sources import tushare as tsrc
+
+    pages = [pd.DataFrame({"ts_code": [f"{i:06d}.SZ" for i in range(off, off + n)],
+                           "l1_name": ["食品饮料"] * n, "l2_name": ["白酒Ⅱ"] * n,
+                           "l3_name": ["白酒Ⅲ"] * n,
+                           "in_date": ["20190626"] * n, "out_date": [None] * n})
+             for off, n in ((0, 3000), (3000, 2560))]
+    seen = []
+
+    class Src(tsrc.TushareSource):
+        def __init__(self):                       # 跳过真实 token / 限频
+            pass
+        def _call(self, api, **kw):
+            seen.append(kw.get("offset"))
+            i = len(seen) - 1
+            return tsrc._to_date(pages[i]) if i < len(pages) else pd.DataFrame()
+
+    df = Src().sw_members()
+    assert len(df) == 5560, f"只取到 {len(df)} 行 —— 没有翻页"
+    assert seen[:3] == [None, 3000, 5560] or seen[0] in (None, 0), f"offset 递进不对: {seen}"
+    assert list(df.columns) == ["ts_code", "sw_l1", "sw_l2", "sw_l3", "in_date", "out_date"]

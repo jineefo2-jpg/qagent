@@ -117,7 +117,23 @@ class TushareSource:
         """申万成分历史 → 列 [ts_code, sw_l1, sw_l2, sw_l3, in_date, out_date]。
         优先 index_member_all（一次全量，含 L1/L2/L3 与进出日期）；权限不足时把异常原样抛出，
         由 ingest 决定是否降级——这里不吞。"""
-        df = self._call("index_member_all", is_new=None)
+        # ★ 必须分页：单次上限 3000 行，而全量约 5560 行 —— 不翻页会静默少掉 46%，
+        #   于是近一半股票没有行业归属、在 get_industry 里落进 __OTHER__ 桶。
+        #   后果不是报错而是【行业中性化失真】：一大桶票被当成同一个行业做横截面回归，
+        #   行业暴露剥不干净（2026-08-31 实测：2015 年 72% 的票落在 __OTHER__）。
+        #   而且每次只取"某 3000 行"，取到哪些不保证稳定 —— 参考表 diff 因此天天误报。
+        pages, off = [], 0
+        while True:
+            d = self._call("index_member_all", is_new=None, limit=5000, offset=off)
+            if d is None or not len(d):
+                break
+            pages.append(d)
+            off += len(d)
+            if off > 100000:                      # 防呆：真实量级 5-6 千行
+                break
+        df = pd.concat(pages, ignore_index=True) if pages else pd.DataFrame()
+        if df.empty:
+            return pd.DataFrame(columns=["ts_code", "sw_l1", "sw_l2", "sw_l3", "in_date", "out_date"])
         rename = {"con_code": "ts_code", "l1_name": "sw_l1", "l2_name": "sw_l2", "l3_name": "sw_l3"}
         df = df.rename(columns={k: v for k, v in rename.items() if k in df.columns})
         keep = ["ts_code", "sw_l1", "sw_l2", "sw_l3", "in_date", "out_date"]
