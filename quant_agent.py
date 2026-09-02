@@ -4195,7 +4195,7 @@ days 建议（自然日，工具内部会换算成交易日）：
         "description": """财报/业绩预告日历。
 A 股: market='A' + date='YYYYMMDD' → 该季度业绩预告（含预测变动幅度）
 美股: market='US' + symbol='AAPL' → 下次财报日 + EPS/营收预期
-适用：「下次特斯拉财报哪天」「茅台一季度预告变动」""",
+适用：「下次某公司财报哪天」「某股票一季度预告变动」""",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -4403,7 +4403,7 @@ method 选项：
         "name": "search_research_docs",
         "description": """在内部研报/财报 PDF 库中检索相关段落（RAG）。
 适用场景：
-  - 用户问「中信对茅台的最新观点」「某公司财报里写了什么」
+  - 用户问「某券商研报对某公司的最新观点」「某公司财报里写了什么」
   - 引用具体研报或财报内容时
   - 解释行业景气度、机构观点等需要权威来源的问题
 不适用：实时行情/价格（用 market_quote）、新闻动态（用 market_news_search）
