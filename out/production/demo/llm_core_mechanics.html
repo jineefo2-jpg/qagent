@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    background: #0f1117;
+    color: #e8eaf0;
+    min-height: 100vh;
+    padding: 32px 24px;
+  }
+  h1 { text-align: center; font-size: 22px; font-weight: 700; margin-bottom: 6px; color: #fff; }
+  .subtitle { text-align: center; font-size: 13px; color: #6b7280; margin-bottom: 32px; }
+  .layout {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    max-width: 860px;
+    margin: 0 auto;
+  }
+  .card {
+    background: #1a1d27;
+    border: 1px solid #2a2d3a;
+    border-radius: 14px;
+    padding: 20px 22px;
+  }
+  .card-label { font-size: 11px; font-weight: 700; letter-spacing: 1.2px; text-transform: uppercase; margin-bottom: 10px; }
+  .card-title { font-size: 16px; font-weight: 700; margin-bottom: 6px; }
+  .card-desc { font-size: 12.5px; color: #9ca3af; line-height: 1.6; }
+
+  /* TOKEN */
+  .card-token { grid-column: 1 / 3; border-color: #3b4fd8; }
+  .card-token .card-label { color: #818cf8; }
+  .card-token .card-title { color: #a5b4fc; }
+  .token-row { display: flex; flex-wrap: wrap; gap: 6px; margin: 14px 0 10px; }
+  .tok { padding: 5px 10px; border-radius: 7px; font-size: 13px; font-weight: 600; font-family: monospace; }
+  .tok-a { background: #1e3a5f; color: #60a5fa; border: 1px solid #2563eb; }
+  .tok-b { background: #1e4a3a; color: #34d399; border: 1px solid #059669; }
+  .tok-c { background: #4a1e3a; color: #f472b6; border: 1px solid #be185d; }
+  .tok-d { background: #3a3a1e; color: #fbbf24; border: 1px solid #d97706; }
+  .tok-e { background: #2d1e4a; color: #a78bfa; border: 1px solid #7c3aed; }
+  .token-tip { font-size: 11.5px; color: #6b7280; font-style: italic; }
+  .token-stats { display: flex; gap: 12px; margin-top: 12px; flex-wrap: wrap; }
+  .token-stat { background: #0f1117; border: 1px solid #2a2d3a; border-radius: 8px; padding: 8px 14px; font-size: 11.5px; }
+  .token-stat strong { color: #818cf8; display: block; font-size: 16px; }
+
+  /* CONTEXT */
+  .card-ctx { grid-column: 1 / 3; border-color: #0ea5e9; }
+  .card-ctx .card-label { color: #38bdf8; }
+  .card-ctx .card-title { color: #7dd3fc; }
+  .ctx-bar-wrap { background: #0f1117; border-radius: 8px; padding: 14px; margin: 14px 0 10px; border: 1px solid #1e2a35; }
+  .ctx-bar { height: 34px; border-radius: 6px; display: flex; overflow: hidden; gap: 2px; }
+  .ctx-seg { height: 100%; display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 600; }
+  .ctx-sys  { background: #1e3a5f; color: #60a5fa; flex: 0 0 15%; }
+  .ctx-hist { background: #1e4a3a; color: #34d399; flex: 0 0 40%; }
+  .ctx-new  { background: #4a3a1e; color: #fbbf24; flex: 0 0 20%; }
+  .ctx-free { background: #2a2d3a; color: #6b7280; flex: 1; border: 1px dashed #3b4150; }
+  .ctx-legend { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 10px; }
+  .leg { display: flex; align-items: center; gap: 6px; font-size: 11.5px; color: #9ca3af; }
+  .leg-dot { width: 10px; height: 10px; border-radius: 3px; }
+  .ctx-note { font-size: 11.5px; color: #6b7280; margin-top: 10px; padding: 8px 12px; background: #0f1117; border-left: 3px solid #0ea5e9; border-radius: 0 6px 6px 0; }
+
+  /* TEMPERATURE */
+  .card-temp { border-color: #f97316; }
+  .card-temp .card-label { color: #fb923c; }
+  .card-temp .card-title { color: #fdba74; }
+  .temp-track { height: 10px; border-radius: 9999px; background: linear-gradient(to right, #1d4ed8, #059669, #d97706, #dc2626); position: relative; margin: 14px 0 8px; }
+  .temp-pointer { position: absolute; top: -5px; width: 20px; height: 20px; border-radius: 50%; background: white; border: 3px solid #f97316; transform: translateX(-50%); transition: left 0.3s; box-shadow: 0 2px 8px rgba(0,0,0,0.5); }
+  .temp-labels { display: flex; justify-content: space-between; font-size: 10.5px; color: #6b7280; }
+  .temp-examples { display: flex; gap: 6px; margin-top: 10px; flex-wrap: wrap; }
+  .temp-btn { padding: 4px 10px; border-radius: 6px; font-size: 11.5px; font-weight: 600; cursor: pointer; border: 1px solid transparent; }
+  .tb-cold { background: #1e3a5f; color: #60a5fa; border-color: #2563eb; }
+  .tb-mid  { background: #1e4a3a; color: #34d399; border-color: #059669; }
+  .tb-hot  { background: #4a1e1e; color: #f87171; border-color: #dc2626; }
+  .temp-output { margin-top: 10px; background: #0f1117; border: 1px solid #2a2d3a; border-radius: 8px; padding: 10px 12px; font-size: 12px; color: #9ca3af; min-height: 40px; font-style: italic; line-height: 1.5; }
+
+  /* SAMPLING */
+  .card-sample { border-color: #a855f7; }
+  .card-sample .card-label { color: #c084fc; }
+  .card-sample .card-title { color: #d8b4fe; }
+  .prob-bars { display: flex; align-items: flex-end; gap: 8px; height: 100px; margin: 14px 0 6px; padding: 0 4px; }
+  .prob-col { display: flex; flex-direction: column; align-items: center; gap: 4px; flex: 1; }
+  .prob-bar-outer { width: 100%; height: 70px; display: flex; align-items: flex-end; }
+  .prob-bar-inner { width: 100%; border-radius: 4px 4px 0 0; transition: opacity 0.4s; }
+  .prob-word { font-size: 10.5px; color: #9ca3af; font-family: monospace; }
+  .prob-pct { font-size: 10px; color: #6b7280; }
+  .sampling-methods { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+  .sm-badge { padding: 3px 9px; border-radius: 5px; font-size: 11px; font-weight: 600; cursor: pointer; border: 1px solid; }
+  .sm-greedy { background: #1e3a5f; color: #60a5fa; border-color: #2563eb; }
+  .sm-topp   { background: #2d1e4a; color: #a78bfa; border-color: #7c3aed; }
+  .sm-topk   { background: #1e4a3a; color: #34d399; border-color: #059669; }
+  .sm-active { outline: 2px solid #fff; }
+  .sampling-note { font-size: 11px; color: #6b7280; margin-top: 8px; line-height: 1.5; }
+
+  /* FLOW */
+  .flow-row { grid-column: 1 / 3; display: flex; align-items: center; justify-content: center; gap: 0; padding: 4px 0 0; }
+  .flow-step { text-align: center; flex: 1; }
+  .flow-icon { font-size: 24px; display: block; margin-bottom: 4px; }
+  .flow-text { font-size: 10.5px; color: #6b7280; }
+  .flow-arrow { color: #374151; font-size: 20px; margin: 0 2px; flex-shrink: 0; }
+</style>
+</head>
+<body>
+<h1>🧠 LLM 核心机制</h1>
+<p class="subtitle">Token · Context Window · Temperature · Sampling — 一图通</p>
+
+<div class="layout">
+
+  <!-- TOKEN -->
+  <div class="card card-token">
+    <div class="card-label">① Token — 语言的最小单元</div>
+    <div class="card-title">模型看到的不是"字"，而是 Token</div>
+    <div class="token-row">
+      <span class="tok tok-a">Hello</span><span class="tok tok-b">,</span><span class="tok tok-c"> world</span><span class="tok tok-d">!</span>
+      <span class="tok tok-a"> 你好</span><span class="tok tok-b"> 世界</span>
+      <span class="tok tok-e"> Chat</span><span class="tok tok-c">GPT</span><span class="tok tok-d"> is</span>
+      <span class="tok tok-a"> un</span><span class="tok tok-b">believ</span><span class="tok tok-c">able</span>
+    </div>
+    <div class="token-tip">👆 不同颜色 = 不同 Token，英文按子词切分（BPE），中文通常每字或几字一个 Token</div>
+    <div class="token-stats">
+      <div class="token-stat"><strong>~4</strong>字符/Token（英文）</div>
+      <div class="token-stat"><strong>~1.5</strong>字符/Token（中文）</div>
+      <div class="token-stat"><strong>200K+</strong>Token 上下文（Claude）</div>
+      <div class="token-stat"><strong>按量计费</strong>输入+输出 Token</div>
+    </div>
+  </div>
+
+  <!-- CONTEXT WINDOW -->
+  <div class="card card-ctx">
+    <div class="card-label">② Context Window — 模型的"工作记忆"</div>
+    <div class="card-title">所有能被"看见"的 Token 都在这个窗口里</div>
+    <div class="ctx-bar-wrap">
+      <div class="ctx-bar">
+        <div class="ctx-seg ctx-sys">System Prompt</div>
+        <div class="ctx-seg ctx-hist">历史对话 History</div>
+        <div class="ctx-seg ctx-new">新输入 Input</div>
+        <div class="ctx-seg ctx-free">← 剩余空间（输出）</div>
+      </div>
+    </div>
+    <div class="ctx-legend">
+      <div class="leg"><div class="leg-dot" style="background:#1e3a5f;border:1px solid #2563eb"></div>System Prompt（角色/规则）</div>
+      <div class="leg"><div class="leg-dot" style="background:#1e4a3a;border:1px solid #059669"></div>历史对话（已消耗）</div>
+      <div class="leg"><div class="leg-dot" style="background:#4a3a1e;border:1px solid #d97706"></div>当前输入</div>
+      <div class="leg"><div class="leg-dot" style="background:#2a2d3a;border:1px dashed #3b4150"></div>输出空间</div>
+    </div>
+    <div class="ctx-note">⚠️ 超出窗口的内容会被截断 — 模型不会"记住"它。长对话需手动压缩或用 RAG 召回。</div>
+  </div>
+
+  <!-- TEMPERATURE -->
+  <div class="card card-temp">
+    <div class="card-label">③ Temperature — 随机性旋钮</div>
+    <div class="card-title">控制输出的"创意程度"</div>
+    <div class="card-desc">将 logits ÷ T 后再做 Softmax；T↑ → 分布更平坦 → 输出更随机</div>
+    <div class="temp-track">
+      <div class="temp-pointer" id="tempPointer" style="left:5%"></div>
+    </div>
+    <div class="temp-labels">
+      <span>0 · 确定</span><span>0.7</span><span>1.0</span><span>2.0 · 混沌</span>
+    </div>
+    <div class="temp-examples">
+      <div class="temp-btn tb-cold" onclick="setTemp('cold')">🧊 T≈0 代码/事实</div>
+      <div class="temp-btn tb-mid"  onclick="setTemp('mid')">⚖️ T=0.7 对话/分析</div>
+      <div class="temp-btn tb-hot"  onclick="setTemp('hot')">🔥 T=1.5 创意写作</div>
+    </div>
+    <div class="temp-output" id="tempOutput">点击上方按钮查看不同 Temperature 的输出示例 👆</div>
+  </div>
+
+  <!-- SAMPLING -->
+  <div class="card card-sample">
+    <div class="card-label">④ Sampling — 如何从概率中选词</div>
+    <div class="card-title">从概率分布里"抽"下一个 Token</div>
+    <div class="prob-bars" id="probBars"></div>
+    <div class="sampling-methods">
+      <div class="sm-badge sm-greedy sm-active" onclick="setSampling('greedy')" id="s-greedy">Greedy 最高概率</div>
+      <div class="sm-badge sm-topp" onclick="setSampling('topp')" id="s-topp">Top-p 核采样</div>
+      <div class="sm-badge sm-topk" onclick="setSampling('topk')" id="s-topk">Top-k 前K个</div>
+    </div>
+    <div class="sampling-note" id="samplingNote">Greedy：每次选概率最高的词。稳定但易重复，缺乏多样性。</div>
+  </div>
+
+  <!-- FLOW -->
+  <div class="flow-row">
+    <div class="flow-step"><span class="flow-icon">✍️</span><div class="flow-text">输入文本</div></div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-step"><span class="flow-icon">🔢</span><div class="flow-text">Tokenize</div></div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-step"><span class="flow-icon">🪟</span><div class="flow-text">Context Window</div></div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-step"><span class="flow-icon">🧮</span><div class="flow-text">Transformer</div></div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-step"><span class="flow-icon">🎲</span><div class="flow-text">Temperature</div></div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-step"><span class="flow-icon">🎯</span><div class="flow-text">Sampling</div></div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-step"><span class="flow-icon">💬</span><div class="flow-text">输出 Token</div></div>
+  </div>
+
+</div>
+
+<script>
+const tempOutputs = {
+  cold: ['🧊 "Python 的列表是有序、可变的数据结构。"','🧊 "水的沸点是 100°C（标准大气压下）。"','🧊 "函数返回值为 None。"'],
+  mid:  ['⚖️ "这个问题很有意思，我认为可以从两个角度来看……"','⚖️ "综合来看，方案 B 的性价比更高，但需评估风险。"'],
+  hot:  ['🔥 "月光如碎银般洒落，她的眼眸里藏着整个宇宙的秘密——"','🔥 "如果时间是一条河，那我选择逆流而上，只为见你一面。"']
+};
+function setTemp(mode) {
+  const arr = tempOutputs[mode];
+  document.getElementById('tempOutput').textContent = arr[Math.floor(Math.random()*arr.length)];
+  const pct = {cold:'5%', mid:'35%', hot:'75%'}[mode];
+  document.getElementById('tempPointer').style.left = pct;
+}
+
+const words = ['the','a','his','her','my','your','our'];
+const colors = ['#60a5fa','#34d399','#fbbf24','#f472b6','#a78bfa','#fb923c','#38bdf8'];
+const pcts = [42,22,14,9,6,4,3];
+
+function renderBars(highlight) {
+  const c = document.getElementById('probBars');
+  c.innerHTML = '';
+  words.forEach((w,i) => {
+    const op = highlight(i) ? '1' : '0.2';
+    const col = document.createElement('div');
+    col.className = 'prob-col';
+    col.innerHTML = `
+      <div class="prob-bar-outer">
+        <div class="prob-bar-inner" style="height:${pcts[i]*1.4}px;background:${colors[i]};opacity:${op}"></div>
+      </div>
+      <div class="prob-word" style="opacity:${op}">${w}</div>
+      <div class="prob-pct" style="opacity:${op}">${pcts[i]}%</div>`;
+    c.appendChild(col);
+  });
+}
+
+const notes = {
+  greedy: 'Greedy：每次选概率最高的词（"the" 42%）。稳定但易重复，缺乏多样性。',
+  topp:   'Top-p (p≈0.9)：取累积概率 ≤ 90% 的词集合（the+a+his+her=87%），再随机采样。多样且可控。',
+  topk:   'Top-k (k=3)：只保留前 3 高概率词（the/a/his），再随机抽取。限制了离奇词出现。'
+};
+
+function setSampling(mode) {
+  ['greedy','topp','topk'].forEach(m => document.getElementById('s-'+m).classList.remove('sm-active'));
+  document.getElementById('s-'+mode).classList.add('sm-active');
+  document.getElementById('samplingNote').textContent = notes[mode];
+  if (mode==='greedy') renderBars(i=>i===0);
+  else if (mode==='topp') renderBars(i=>i<4);
+  else renderBars(i=>i<3);
+}
+
+renderBars(i=>i===0);
+</script>
+</body>
+</html>

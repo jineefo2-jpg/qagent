@@ -1,0 +1,897 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>券商绑定 · QuantAgent</title>
+<style>
+  :root {
+    --bg:          #0d1117;
+    --bg-elev:     #161b22;
+    --bg-elev-2:   #1f2937;
+    --border:      #30363d;
+    --text:        #e6edf3;
+    --text-muted:  #8b949e;
+    --primary:     #00d4aa;
+    --primary-dim: #00d4aa33;
+    --danger:      #f85149;
+    --warning:     #d29922;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; font-family: -apple-system, BlinkMacSystemFont,
+                "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+               background: var(--bg); color: var(--text); line-height: 1.5; }
+  a { color: var(--primary); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  header {
+    padding: 16px 24px; border-bottom: 1px solid var(--border);
+    background: var(--bg-elev); display: flex; align-items: center; gap: 16px;
+  }
+  header h1 { font-size: 18px; font-weight: 600; }
+  header .back { color: var(--text-muted); font-size: 14px; }
+
+  main { max-width: 880px; margin: 0 auto; padding: 32px 24px; }
+
+  .section { background: var(--bg-elev); border: 1px solid var(--border);
+             border-radius: 8px; padding: 20px; margin-bottom: 24px; }
+  .section h2 { font-size: 16px; margin-bottom: 12px; font-weight: 600; }
+  .muted { color: var(--text-muted); font-size: 13px; }
+  .danger { color: var(--danger); }
+  .warn { color: var(--warning); }
+
+  /* Bindings table */
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th { text-align: left; padding: 10px 8px; border-bottom: 1px solid var(--border);
+       font-weight: 600; color: var(--text-muted); }
+  td { padding: 10px 8px; border-bottom: 1px solid var(--border); }
+  tr:last-child td { border-bottom: 0; }
+  .empty { padding: 24px; text-align: center; color: var(--text-muted); }
+
+  button {
+    background: var(--primary); color: #0d1117; border: 0;
+    padding: 8px 14px; border-radius: 6px; cursor: pointer;
+    font-weight: 600; font-size: 14px;
+  }
+  button:hover { opacity: 0.85; }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  button.secondary { background: var(--bg-elev-2); color: var(--text); }
+  button.danger-btn { background: transparent; color: var(--danger);
+                      border: 1px solid var(--danger); padding: 4px 10px; }
+
+  /* Forms */
+  .form-row { margin: 12px 0; }
+  .form-row label { display: block; font-size: 13px; margin-bottom: 4px;
+                    color: var(--text-muted); }
+  .form-row input, .form-row select, .form-row textarea {
+    width: 100%; padding: 8px 10px; background: var(--bg);
+    border: 1px solid var(--border); border-radius: 6px;
+    color: var(--text); font-family: inherit; font-size: 14px;
+  }
+  .form-row textarea {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 12px; min-height: 200px; resize: vertical;
+  }
+
+  /* ADR-0002 env radio + live badges */
+  .env-radio-group {
+    display: flex; flex-direction: column; gap: 8px;
+  }
+  .env-opt {
+    display: flex; align-items: flex-start; gap: 10px;
+    padding: 10px 12px;
+    border: 1px solid var(--border); border-radius: 6px;
+    background: var(--bg);
+    cursor: pointer;
+    transition: border-color 0.15s ease, background 0.15s ease;
+  }
+  .env-opt:has(input:checked) {
+    border-color: var(--primary);
+    background: rgba(0, 212, 170, 0.04);
+  }
+  .env-opt:has(input[value="live"]:checked) {
+    border-color: var(--danger);
+    background: rgba(248, 81, 73, 0.05);
+  }
+  .env-opt input { margin-top: 4px; flex-shrink: 0; }
+  .env-opt small { color: var(--text-muted); font-size: 12px; line-height: 1.55; }
+  .env-tag {
+    display: inline-block;
+    padding: 2px 8px; border-radius: 12px;
+    font-size: 12px; font-weight: 600;
+    margin-right: 8px;
+  }
+  .env-tag.paper { background: rgba(140, 160, 200, 0.18); color: #a6c1f0; }
+  .env-tag.live  { background: rgba(248, 81, 73, 0.18); color: #ff8a82; }
+
+  /* live badge in bindings list */
+  .live-badge {
+    display: inline-block;
+    padding: 1px 7px; border-radius: 10px;
+    font-size: 11px; font-weight: 600;
+    background: rgba(248, 81, 73, 0.18); color: #ff8a82;
+    margin-left: 6px;
+  }
+  .live-badge.enabled {
+    background: rgba(248, 81, 73, 0.28); color: #ffb0a8;
+  }
+  .live-toggle-btn {
+    background: transparent; color: var(--danger);
+    border: 1px solid var(--danger);
+    padding: 3px 9px; font-size: 12px; border-radius: 4px;
+    cursor: pointer;
+  }
+  .live-toggle-btn:hover { background: rgba(248,81,73,0.1); }
+  .live-toggle-btn.on {
+    background: var(--danger); color: var(--bg);
+  }
+
+  /* Drag-drop zone for Tiger config files */
+  .drop-zone {
+    border: 2px dashed var(--border); border-radius: 8px;
+    padding: 24px 16px; background: var(--bg);
+    text-align: center; cursor: pointer;
+    transition: all 0.15s ease;
+  }
+  .drop-zone:hover, .drop-zone:focus {
+    border-color: var(--primary); background: rgba(0, 212, 170, 0.04);
+    outline: none;
+  }
+  .drop-zone.dragover {
+    border-color: var(--primary); background: rgba(0, 212, 170, 0.1);
+    transform: scale(1.01);
+  }
+  .drop-zone .dz-main { font-size: 14px; margin-bottom: 6px; }
+  .drop-zone .dz-sub { font-size: 12px; color: var(--text-muted); }
+  .drop-zone code { background: var(--bg-elev-2); padding: 1px 5px; border-radius: 3px; }
+
+  details.how-to summary { font-weight: 500; padding: 4px 0; }
+  details.how-to[open] summary { color: var(--text); }
+  details.how-to .step-list code {
+    background: var(--bg-elev-2); padding: 1px 5px; border-radius: 3px; font-size: 12px;
+  }
+
+  /* PEM marker-wrapped textarea (Tiger 私钥) */
+  .pem-wrap {
+    border: 1px solid var(--border); border-radius: 6px;
+    background: var(--bg); overflow: hidden;
+  }
+  .pem-wrap .pem-marker {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 12px; color: var(--text-muted);
+    padding: 8px 12px; user-select: none;
+    background: rgba(255,255,255,0.02);
+  }
+  .pem-wrap textarea {
+    border: 0; border-top: 1px dashed var(--border);
+    border-bottom: 1px dashed var(--border);
+    border-radius: 0; background: transparent;
+    width: 100%; min-height: 160px;
+    padding: 10px 12px;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 12px; color: var(--text);
+    resize: vertical;
+  }
+  .pem-wrap textarea:focus { outline: none; border-color: var(--primary); }
+  .form-row input:focus, .form-row textarea:focus, .form-row select:focus {
+    outline: none; border-color: var(--primary);
+  }
+
+  .step-list { list-style: none; counter-reset: step; margin: 8px 0 12px; }
+  .step-list li { counter-increment: step; position: relative;
+                  padding: 4px 0 4px 28px; font-size: 14px; }
+  .step-list li::before {
+    content: counter(step); position: absolute; left: 0; top: 4px;
+    width: 20px; height: 20px; line-height: 20px; text-align: center;
+    background: var(--primary-dim); color: var(--primary); border-radius: 50%;
+    font-size: 12px; font-weight: 600;
+  }
+
+  .msg { padding: 10px 12px; border-radius: 6px; margin: 12px 0; font-size: 13px;
+         display: none; }
+  .msg.ok    { background: var(--primary-dim);   color: var(--primary); }
+  .msg.error { background: rgba(248,81,73,0.15); color: var(--danger); }
+  .msg.show  { display: block; }
+
+  details > summary { cursor: pointer; padding: 8px 0; user-select: none;
+                      font-weight: 600; font-size: 15px; }
+  details[open] > summary { margin-bottom: 8px; }
+
+  .actions { display: flex; gap: 8px; margin-top: 16px; }
+
+  /* Broker snapshot cards */
+  .snapshot-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+                   gap: 10px; }
+  .snap-card { background: var(--bg); border: 1px solid var(--border);
+               border-radius: 6px; padding: 12px; }
+  .snap-card .k { color: var(--text-muted); font-size: 12px; margin-bottom: 4px; }
+  .snap-card .v { font-size: 18px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .snap-card .v.small { font-size: 14px; }
+  .snap-error { color: var(--danger); font-size: 13px;
+                background: rgba(248,81,73,0.1); padding: 10px;
+                border-radius: 6px; border: 1px solid rgba(248,81,73,0.3); }
+
+  /* 安全告知条 */
+  .security-banner {
+    background: rgba(0, 212, 170, 0.08);
+    border: 1px solid var(--primary-dim);
+    border-radius: 8px;
+    padding: 12px 16px;
+    margin-bottom: 16px;
+    display: flex;
+    gap: 10px;
+    align-items: flex-start;
+    font-size: 13px;
+    line-height: 1.55;
+  }
+  .security-banner .icon { font-size: 18px; line-height: 1; flex-shrink: 0; }
+  .security-banner b { color: var(--primary); }
+  .security-banner .who { color: var(--text-muted); font-family: ui-monospace, Menlo, monospace;
+                          font-size: 12px; }
+</style>
+</head>
+<body>
+
+<header>
+  <a href="/" class="back">← 返回对话</a>
+  <h1>券商绑定</h1>
+</header>
+
+<main>
+
+<div class="security-banner">
+  <span class="icon">🔒</span>
+  <div>
+    <b>这些绑定只属于当前登录账号</b> — 切换/退出登录后,你看到的是另一个空间的绑定列表。
+    其他用户**无法**看到、读取或解绑你的凭证(SQLite 行级隔离 + Fernet 加密 + 审计日志)。
+    凭证私钥用 envelope encryption 加密落盘,服务端运行时也只在内存解密、用完即弃。
+    <div id="current-user-info" class="who" style="margin-top:4px;"></div>
+  </div>
+</div>
+
+<div class="section">
+  <h2>已绑定的账户</h2>
+  <div id="bindings-list">
+    <div class="empty">加载中…</div>
+  </div>
+</div>
+
+<div class="section" id="broker-snapshot-section">
+  <h2>当前 broker 实时状态</h2>
+  <p class="muted" style="margin-bottom:12px;">
+    由 <code>BROKER_MODE</code> + 你的绑定共同决定。绑定 / 解绑后自动刷新。
+  </p>
+  <div id="broker-snapshot">
+    <div class="empty">加载中…</div>
+  </div>
+</div>
+
+<div class="section">
+  <h2>添加新绑定</h2>
+
+  <details>
+    <summary>🐯 老虎证券 (Tiger Brokers)</summary>
+
+    <details class="how-to" open style="margin:8px 0 16px;">
+      <summary style="font-size:14px;color:var(--text-muted);">
+        📘 绑定指南(展开看 Tiger 配置文件怎么下)
+      </summary>
+      <ol class="step-list" style="margin-top:8px;">
+        <li>
+          打开
+          <a href="https://www.itigerup.com/openapi/" target="_blank">Tiger OpenAPI 控制台</a>
+          (用你的老虎账号登录)。<br>
+          <span class="muted">如果是第一次进,会要你申请 OpenAPI 权限,填一个简短的开发者信息表,
+          通常即时通过 / 1-2 天审核。</span>
+        </li>
+        <li>
+          进入 <strong>"密钥管理"</strong>(或 "OpenAPI 设置")页面 →
+          点击 <strong>"生成 RSA 密钥对"</strong>(已经有的可以"重新生成",但**老旧密钥会立刻作废**)。
+        </li>
+        <li>
+          生成后,点 <strong>"下载配置文件"</strong>。Tiger 通常给的是:
+          <ul style="margin:4px 0 0 18px;color:var(--text-muted);font-size:13px;">
+            <li><code>tiger_openapi_config.properties</code> — <strong>推荐</strong>,包含 tiger_id / 账号 / 私钥 / license 全部字段</li>
+            <li>或单独的 <code>private_key.pem</code> + 你需要去账户页面抄 <code>tiger_id</code> 和账号</li>
+          </ul>
+        </li>
+        <li>
+          <strong>把那个文件直接拖到下面的灰框</strong>,字段会自动填好。无需手抄。<br>
+          <span class="muted">支持:<code>.properties</code> / <code>.pem</code> / <code>.json</code> / <code>.txt</code></span>
+        </li>
+      </ol>
+      <p style="margin-top:8px;font-size:12px;color:var(--text-muted);line-height:1.6;">
+        ⚠️ macOS 提示:不要双击 <code>.pem</code>(会被 Keychain Access 接管);也不要用 TextEdit 编辑,
+        会偷偷存成 RTF 富文本格式让解析失败。<br>
+        🔒 这个文件全程**只在你浏览器里**解析,不上传到任何服务器(直到你点"测试 + 绑定")。
+      </p>
+    </details>
+
+    <form id="form-tiger">
+      <!-- 拖拽配置文件区 -->
+      <div class="form-row">
+        <label>① 把 Tiger 配置文件拖到这里(可选,纯客户端解析)</label>
+        <div class="drop-zone" id="tiger-drop-zone" tabindex="0">
+          <div class="dz-main">⬇ 把 <code>.properties</code> / <code>.pem</code> / <code>.json</code> 文件拖进来</div>
+          <div class="dz-sub">或者 <a href="#" id="tiger-pick-file">点击选文件</a></div>
+          <input type="file" id="tiger-file-input"
+                 accept=".properties,.pem,.json,.txt,text/plain"
+                 style="display:none;">
+        </div>
+        <div id="tiger-drop-status" class="muted" style="margin-top:6px;display:none;"></div>
+      </div>
+
+      <p style="margin:10px 0 6px;font-size:13px;color:var(--text-muted);">
+        ② 如果拖拽没解析全,或者只想手动填,下面字段都可以自己改:
+      </p>
+
+      <div class="form-row">
+        <label>账户类型(实盘需要在 ADR-0002 多层闸门下才允许下单)</label>
+        <div class="env-radio-group">
+          <label class="env-opt">
+            <input type="radio" name="env" value="paper" checked>
+            <span class="env-tag paper">📄 模拟 paper</span>
+            <small>Tiger 给的虚拟资金,U 开头账号</small>
+          </label>
+          <label class="env-opt">
+            <input type="radio" name="env" value="live">
+            <span class="env-tag live">⚠️ 实盘 live</span>
+            <small>你的真实老虎账户,真金白银。绑了之后**默认只读**,要单独打开"启用实盘下单"开关才能下单</small>
+          </label>
+        </div>
+      </div>
+      <div class="form-row">
+        <label>Label 标签(自取,用于区分多个账户)</label>
+        <input type="text" name="label" value="paper-main" required>
+      </div>
+      <div class="form-row">
+        <label>Tiger ID(开发者账号 ID,通常 8-9 位数字)</label>
+        <input type="text" name="tiger_id" required>
+      </div>
+      <div class="form-row">
+        <label>账户号(模拟通常以 U 开头;实盘账户号也填这里)</label>
+        <input type="text" name="account" required placeholder="U99999999 或 D...">
+      </div>
+      <div class="form-row">
+        <label>License 持牌主体</label>
+        <select name="license">
+          <option value="TBNZ" selected>TBNZ(新西兰,覆盖最广)</option>
+          <option value="TBAU">TBAU(澳大利亚)</option>
+          <option value="TBSG">TBSG(新加坡)</option>
+          <option value="TBHK">TBHK(香港)</option>
+        </select>
+      </div>
+      <div class="form-row">
+        <label>RSA 私钥 base64(<strong>只粘中间的 base64 内容</strong>,头尾标签下面会自动拼)</label>
+        <div class="pem-wrap">
+          <div class="pem-marker">-----BEGIN RSA PRIVATE KEY-----</div>
+          <textarea name="private_key_body" required spellcheck="false"
+                    placeholder="MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAA... 粘 base64 内容"></textarea>
+          <div class="pem-marker">-----END RSA PRIVATE KEY-----</div>
+        </div>
+        <p class="muted" style="margin-top:6px;">
+          📌 在 Tiger OpenAPI 控制台里复制时,只复制两条 <code>-----</code> 标签之间的部分;
+          整段也行,JS 会自动剥掉重复的标签。<br>
+          🔒 落盘前 Fernet 加密,KEK 在 env 不在 DB,服务端运行时只在内存解密。
+        </p>
+      </div>
+      <div class="actions">
+        <button type="submit">测试 + 绑定</button>
+      </div>
+      <div class="msg" id="msg-tiger"></div>
+    </form>
+  </details>
+
+  <details style="margin-top:16px;">
+    <summary>📈 Alpaca (Paper Trading)</summary>
+    <ol class="step-list">
+      <li>到 <a href="https://app.alpaca.markets/signup" target="_blank">Alpaca 注册</a>(走 trading API,不要走 broker-app)。</li>
+      <li>登录后切到 <strong>Paper Trading</strong> 模式 → <strong>API Keys</strong> → <strong>Generate New Key</strong>。</li>
+      <li>把 Key ID(PK 开头)和 Secret Key 填到下面提交。</li>
+    </ol>
+    <form id="form-alpaca">
+      <div class="form-row">
+        <label>Label</label>
+        <input type="text" name="label" value="paper-main" required>
+      </div>
+      <div class="form-row">
+        <label>API Key(PK 开头)</label>
+        <input type="text" name="api_key" required placeholder="PKxxxxxxxxxxxxxxxxxxxx">
+      </div>
+      <div class="form-row">
+        <label>API Secret</label>
+        <input type="password" name="api_secret" required>
+      </div>
+      <div class="actions">
+        <button type="submit">测试 + 绑定</button>
+      </div>
+      <div class="msg" id="msg-alpaca"></div>
+    </form>
+  </details>
+</div>
+
+</main>
+
+<script>
+const $ = (s) => document.querySelector(s);
+
+async function api(method, path, body) {
+  const opts = { method, headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin' };
+  if (body !== undefined) opts.body = JSON.stringify(body);
+  const r = await fetch(path, opts);
+  const text = await r.text();
+  let payload;
+  try { payload = text ? JSON.parse(text) : null; } catch (_) { payload = { detail: text }; }
+  return { ok: r.ok, status: r.status, payload };
+}
+
+function showMsg(el, kind, text) {
+  el.className = 'msg ' + kind + ' show';
+  el.textContent = text;
+}
+
+function clearMsg(el) {
+  el.className = 'msg';
+  el.textContent = '';
+}
+
+async function loadCurrentUser() {
+  const r = await api('GET', '/api/me');
+  const el = $('#current-user-info');
+  // /api/me 契约:登录返回 user dict;未登录返回 null;HTTP 始终 200
+  if (!r.ok || !r.payload) {
+    el.innerHTML = '⚠️ 未登录 — <a href="/">回到主页登录</a>后回来';
+    return false;
+  }
+  const u = r.payload;
+  el.textContent = `当前账号: ${u.email || '(无邮箱)'} · ${u.provider || ''} · user_id=${u.user_id}`;
+  return true;
+}
+
+function _fmtMoney(n, ccy) {
+  if (n === null || n === undefined) return '—';
+  return (ccy || '$') + Number(n).toLocaleString(undefined, {
+    minimumFractionDigits: 2, maximumFractionDigits: 2,
+  });
+}
+
+async function loadBrokerSnapshot() {
+  const root = $('#broker-snapshot');
+  root.innerHTML = '<div class="empty">读取中…</div>';
+
+  const [statusR, posR, ordR] = await Promise.all([
+    api('GET', '/api/broker/status'),
+    api('GET', '/api/positions'),
+    api('GET', '/api/orders?status=open&limit=100'),
+  ]);
+
+  // /api/broker/status 包装了所有错误进 200 payload,看 payload.error
+  if (!statusR.ok) {
+    if (statusR.status === 401) {
+      root.innerHTML = '<div class="empty">未登录</div>';
+    } else {
+      root.innerHTML = `<div class="snap-error">读取失败 (${statusR.status})</div>`;
+    }
+    return;
+  }
+  const s = statusR.payload || {};
+  if (s.error) {
+    // 区分两种错误:no_broker_binding 是"还没绑",中性提示;其它才用红框
+    const m = String(s.error).match(/no_broker_binding:\s*user has no (\w+) binding/);
+    if (m) {
+      const broker = m[1];
+      root.innerHTML = `<div class="empty" style="text-align:left;line-height:1.7;">
+        当前账号还没绑定 <b>${broker}</b> 账户。下方"添加新绑定"里展开 <b>${broker}</b> 区块,填好之后这里就会显示账户/持仓/订单/资金。
+      </div>`;
+    } else {
+      root.innerHTML = `<div class="snap-error">⚠️ ${s.broker || 'broker'}: ${s.error}</div>`;
+    }
+    return;
+  }
+  const acc = s.account || {};
+  const positionsCount = (posR.ok && posR.payload?.success) ? (posR.payload.count || 0) : '?';
+  const ordersCount = (ordR.ok && ordR.payload?.success) ? (ordR.payload.count || 0) : '?';
+
+  root.innerHTML = `
+    <div class="snapshot-grid">
+      <div class="snap-card">
+        <div class="k">broker</div>
+        <div class="v small">${s.broker || '—'}</div>
+      </div>
+      <div class="snap-card">
+        <div class="k">配置</div>
+        <div class="v small">${s.configured ? '✅' : '❌'} ${s.ping_ok ? 'ping ok' : ''}</div>
+      </div>
+      <div class="snap-card">
+        <div class="k">现金</div>
+        <div class="v">${_fmtMoney(acc.cash, acc.currency === 'USD' ? '$' : (acc.currency + ' '))}</div>
+      </div>
+      <div class="snap-card">
+        <div class="k">可用购买力</div>
+        <div class="v">${_fmtMoney(acc.buying_power, acc.currency === 'USD' ? '$' : (acc.currency + ' '))}</div>
+      </div>
+      <div class="snap-card">
+        <div class="k">净值</div>
+        <div class="v">${_fmtMoney(acc.equity, acc.currency === 'USD' ? '$' : (acc.currency + ' '))}</div>
+      </div>
+      <div class="snap-card">
+        <div class="k">持仓</div>
+        <div class="v">${positionsCount}</div>
+      </div>
+      <div class="snap-card">
+        <div class="k">在挂订单</div>
+        <div class="v">${ordersCount}</div>
+      </div>
+    </div>
+  `;
+}
+
+async function loadBindings() {
+  const r = await api('GET', '/api/broker/bindings');
+  const root = $('#bindings-list');
+  if (!r.ok) {
+    if (r.status === 401) {
+      root.innerHTML = '<div class="empty">未登录。<a href="/">回到对话登录</a>后再来。</div>';
+    } else {
+      root.innerHTML = `<div class="empty error">读取失败 (${r.status}): ${r.payload?.detail || ''}</div>`;
+    }
+    return;
+  }
+  const rows = r.payload || [];
+  if (rows.length === 0) {
+    root.innerHTML = '<div class="empty">还没有任何绑定。下面添加一个。</div>';
+    return;
+  }
+  let html = '<table><thead><tr>'
+    + '<th>ID</th><th>券商</th><th>Label</th><th>环境</th>'
+    + '<th>下单权限</th><th>最后使用</th><th></th>'
+    + '</tr></thead><tbody>';
+  for (const b of rows) {
+    const last = b.last_used_at ? new Date(b.last_used_at * 1000).toLocaleString() : '—';
+    const envTag = b.env === 'live'
+      ? '<span class="env-tag live">⚠️ live</span>'
+      : '<span class="env-tag paper">paper</span>';
+
+    let liveCol;
+    if (b.env === 'paper') {
+      liveCol = '<span class="muted">N/A</span>';
+    } else if (b.live_orders_enabled) {
+      liveCol = `<button class="live-toggle-btn on" data-id="${b.id}" data-on="1">已启用 · 点击关闭</button>`;
+    } else {
+      liveCol = `<button class="live-toggle-btn" data-id="${b.id}" data-on="0">只读 · 点击启用实盘</button>`;
+    }
+
+    html += '<tr>'
+      + `<td>${b.id}</td>`
+      + `<td>${b.broker_type}</td>`
+      + `<td>${b.label}</td>`
+      + `<td>${envTag}</td>`
+      + `<td>${liveCol}</td>`
+      + `<td class="muted">${last}</td>`
+      + `<td><button class="danger-btn" data-id="${b.id}" data-label="${b.label}">解绑</button></td>`
+      + '</tr>';
+  }
+  html += '</tbody></table>';
+  root.innerHTML = html;
+
+  root.querySelectorAll('button.danger-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const id = btn.dataset.id;
+      if (!confirm(`确认解绑 ${btn.dataset.label}(id=${id})?`)) return;
+      btn.disabled = true;
+      const r = await api('DELETE', `/api/broker/bindings/${id}`);
+      if (r.ok) {
+        await Promise.all([loadBindings(), loadBrokerSnapshot()]);
+      } else {
+        alert(`解绑失败: ${r.status} ${r.payload?.detail || ''}`);
+        btn.disabled = false;
+      }
+    });
+  });
+
+  // ADR-0002 Layer 2: live orders toggle
+  root.querySelectorAll('button.live-toggle-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const id = btn.dataset.id;
+      const turningOn = btn.dataset.on === '0';
+      let ack = '';
+      if (turningOn) {
+        const phrase = '我确认开启下单';
+        const typed = prompt(
+          '🚨 启用实盘下单(LLM 将能用真金白银下单)\n\n' +
+          '为确认你完全理解风险,请把下面这句话 逐字粘贴 进输入框:\n\n' +
+          phrase + '\n\n' +
+          '取消则不启用。'
+        );
+        if (typed === null) return;
+        if (typed.trim() !== phrase) {
+          alert('❌ 未启用 — 输入与要求不一致。');
+          return;
+        }
+        ack = phrase;
+      } else {
+        if (!confirm('确认关闭实盘下单?关闭后此 binding 回到只读。')) return;
+      }
+      btn.disabled = true;
+      const r = await api('POST', `/api/broker/bindings/${id}/live-orders`, {
+        enabled: turningOn,
+        acknowledge: ack,
+      });
+      if (r.ok) {
+        await loadBindings();
+      } else {
+        alert(`操作失败: ${r.status} ${r.payload?.detail || ''}`);
+        btn.disabled = false;
+      }
+    });
+  });
+}
+
+function wireForm(formId, msgId, broker_type, gatherCreds, envExtractor) {
+  const form = $(formId);
+  const msg = $(msgId);
+  form.addEventListener('submit', async (ev) => {
+    ev.preventDefault();
+    clearMsg(msg);
+    const fd = new FormData(form);
+    const env = (envExtractor ? envExtractor(fd) : 'paper') || 'paper';
+
+    // ADR-0002 Layer 4-equivalent for bind: confirm live before submit
+    if (env === 'live') {
+      const ok = confirm(
+        '⚠️ 确认绑定 实盘账户(live)?\n\n' +
+        '这是你的真实老虎账户,不是模拟资金。\n' +
+        '绑定后默认仍为只读 — 必须在绑定成功后单独打开"启用实盘下单"开关,\n' +
+        '系统才会允许 LLM 通过此绑定下单。\n\n' +
+        '继续?'
+      );
+      if (!ok) return;
+    }
+
+    const submitBtn = form.querySelector('button[type=submit]');
+    submitBtn.disabled = true;
+    submitBtn.textContent = '正在测试 + 绑定…';
+    try {
+      const body = {
+        broker_type,
+        label: fd.get('label'),
+        env,
+        credentials: gatherCreds(fd),
+      };
+      const r = await api('POST', '/api/broker/bindings', body);
+      if (r.ok) {
+        showMsg(msg, 'ok', `✅ 绑定成功 (id=${r.payload.id} · env=${env}) · 正在拉取账户快照…`);
+        form.reset();
+        // 并发刷新:列表 + 当前 broker 快照(账户/持仓/订单/资金)
+        await Promise.all([loadBindings(), loadBrokerSnapshot()]);
+        showMsg(msg, 'ok',
+          env === 'live'
+            ? `✅ 绑定成功 (id=${r.payload.id} · 实盘) · 当前只读,如要下单请在上方列表开"启用实盘下单"`
+            : `✅ 绑定成功 (id=${r.payload.id} · 模拟) · 已刷新`
+        );
+      } else {
+        showMsg(msg, 'error', `❌ ${r.status} · ${r.payload?.detail || '未知错误'}`);
+      }
+    } finally {
+      submitBtn.disabled = false;
+      submitBtn.textContent = '测试 + 绑定';
+    }
+  });
+}
+
+// ─── Tiger 配置文件解析(拖拽 / 点选) ───
+//
+// 兼容 3 种 Tiger 官方/常见格式:
+//   1. tiger_openapi_config.properties — Java properties (key=value), 包含
+//      tigerId / defaultAccount / private_key_pk1|pk8 / license / env
+//   2. private_key.pem — 只含私钥,其它字段用户手填
+//   3. tiger_config.json — 自定义 JSON
+//
+// 全程客户端解析,private_key 不会经过任何额外网络往返。
+
+function _stripPemMarkers(s) {
+  return String(s || '')
+    .split(/\r?\n/)
+    .filter(function (ln) { return !/^-----.*-----\s*$/.test(ln.trim()); })
+    .join('\n')
+    .trim();
+}
+
+function parseTigerConfig(fileName, content) {
+  var result = {};
+  var lowName = (fileName || '').toLowerCase();
+  var trimmed = String(content || '').trim();
+
+  // 1. JSON
+  if (lowName.endsWith('.json') || (trimmed.startsWith('{') && trimmed.endsWith('}'))) {
+    try {
+      var obj = JSON.parse(trimmed);
+      for (var k in obj) {
+        var lk = k.toLowerCase();
+        if (lk === 'tigerid' || lk === 'tiger_id') result.tiger_id = String(obj[k] || '');
+        else if (lk === 'defaultaccount' || lk === 'account') result.account = String(obj[k] || '');
+        else if (lk === 'license') result.license = String(obj[k] || '').toUpperCase();
+        else if (lk.indexOf('private_key') === 0 || lk === 'privatekey') {
+          result.private_key = _stripPemMarkers(obj[k]);
+        }
+      }
+      if (Object.keys(result).length > 0) return result;
+    } catch (_) { /* fall through */ }
+  }
+
+  // 2. PEM (just private key, no other fields)
+  if (lowName.endsWith('.pem') || /-----BEGIN[^-]*PRIVATE KEY-----/.test(trimmed)) {
+    if (/-----BEGIN/.test(trimmed)) {
+      result.private_key = _stripPemMarkers(trimmed);
+      return result;
+    }
+  }
+
+  // 3. Properties 格式 (Tiger 官方 tiger_openapi_config.properties)
+  var lines = String(content || '').split(/\r?\n/);
+  var i = 0;
+  while (i < lines.length) {
+    var line = lines[i];
+    var s = line.trim();
+    // skip comments / blank
+    if (!s || s.startsWith('#') || s.startsWith('!') || s.startsWith('//')) { i++; continue; }
+    var m = s.match(/^([A-Za-z_][\w.-]*)\s*[=:]\s*(.*)$/);
+    if (!m) { i++; continue; }
+    var key = m[1].toLowerCase();
+    var value = m[2];
+    // properties multiline: 行尾 \ 续行
+    while (value.endsWith('\\') && i + 1 < lines.length) {
+      value = value.slice(0, -1) + lines[++i];
+    }
+    value = value.trim();
+    if (!value) { i++; continue; }
+
+    if (key === 'tigerid' || key === 'tiger_id') {
+      result.tiger_id = value;
+    } else if (key === 'defaultaccount' || key === 'account') {
+      result.account = value;
+    } else if (key === 'license') {
+      result.license = value.toUpperCase();
+    } else if (key === 'private_key' || key === 'private_key_pk1' || key === 'private_key_pk8'
+            || key === 'privatekey') {
+      // 优先取 pk1(PKCS#1, RSA PRIVATE KEY),否则 pk8
+      if (!result.private_key || key === 'private_key_pk1') {
+        result.private_key = _stripPemMarkers(value);
+      }
+    }
+    i++;
+  }
+
+  return result;
+}
+
+function applyParsedToTigerForm(parsed) {
+  var form = document.getElementById('form-tiger');
+  if (!form) return 0;
+  var filled = 0;
+  if (parsed.tiger_id) { form.querySelector('[name=tiger_id]').value = parsed.tiger_id; filled++; }
+  if (parsed.account)  { form.querySelector('[name=account]').value = parsed.account; filled++; }
+  if (parsed.license) {
+    var sel = form.querySelector('[name=license]');
+    var opt = Array.from(sel.options).find(function (o) { return o.value === parsed.license; });
+    if (opt) { sel.value = parsed.license; filled++; }
+  }
+  if (parsed.private_key) {
+    form.querySelector('[name=private_key_body]').value = parsed.private_key;
+    filled++;
+  }
+  return filled;
+}
+
+function _readAndParseTigerFile(file) {
+  var statusEl = document.getElementById('tiger-drop-status');
+  statusEl.style.display = 'block';
+  statusEl.style.color = 'var(--text-muted)';
+  statusEl.textContent = '解析 ' + file.name + ' ...';
+
+  var reader = new FileReader();
+  reader.onload = function () {
+    try {
+      var parsed = parseTigerConfig(file.name, reader.result);
+      var n = applyParsedToTigerForm(parsed);
+      if (n === 0) {
+        statusEl.style.color = 'var(--danger)';
+        statusEl.textContent = '❌ ' + file.name + ' 里没识别到 Tiger 字段。手动填表单也行。';
+      } else {
+        statusEl.style.color = 'var(--primary)';
+        var fields = [];
+        if (parsed.tiger_id)    fields.push('tiger_id');
+        if (parsed.account)     fields.push('account');
+        if (parsed.license)     fields.push('license');
+        if (parsed.private_key) fields.push('私钥');
+        statusEl.textContent = '✅ 从 ' + file.name + ' 自动填好: ' + fields.join(' / ');
+      }
+    } catch (e) {
+      statusEl.style.color = 'var(--danger)';
+      statusEl.textContent = '❌ 解析失败: ' + e.message;
+    }
+  };
+  reader.onerror = function () {
+    statusEl.style.color = 'var(--danger)';
+    statusEl.textContent = '❌ 读文件失败: ' + reader.error;
+  };
+  reader.readAsText(file);
+}
+
+function setupTigerDropZone() {
+  var zone = document.getElementById('tiger-drop-zone');
+  var fileInput = document.getElementById('tiger-file-input');
+  var pickLink = document.getElementById('tiger-pick-file');
+  if (!zone) return;
+
+  zone.addEventListener('dragover', function (e) {
+    e.preventDefault();
+    zone.classList.add('dragover');
+  });
+  zone.addEventListener('dragleave', function () {
+    zone.classList.remove('dragover');
+  });
+  zone.addEventListener('drop', function (e) {
+    e.preventDefault();
+    zone.classList.remove('dragover');
+    if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0]) {
+      _readAndParseTigerFile(e.dataTransfer.files[0]);
+    }
+  });
+  zone.addEventListener('click', function () { fileInput.click(); });
+  zone.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fileInput.click(); }
+  });
+  pickLink.addEventListener('click', function (e) {
+    e.preventDefault(); e.stopPropagation(); fileInput.click();
+  });
+  fileInput.addEventListener('change', function () {
+    if (fileInput.files && fileInput.files[0]) {
+      _readAndParseTigerFile(fileInput.files[0]);
+      fileInput.value = '';  // 让同一文件可以再次选
+    }
+  });
+}
+
+
+// Tiger: 自动把 body 拼成 PEM,容错"用户粘了整段含标签"的情况
+function _buildTigerPEM(raw) {
+  // 剥任何已有的 BEGIN/END 行,把剩下的非空内容当作 body
+  const lines = (raw || '').split(/\r?\n/);
+  const bodyLines = lines.filter(ln => {
+    const s = ln.trim();
+    return s && !/^-----.*-----$/.test(s);
+  });
+  // 注意:tigeropen 实际不在乎是 PRIVATE KEY 还是 RSA PRIVATE KEY,我们用 RSA 标签
+  // 因为 Tiger 自己生成的就是 PKCS#1 (RSA PRIVATE KEY)
+  return '-----BEGIN RSA PRIVATE KEY-----\n'
+       + bodyLines.join('\n') + '\n'
+       + '-----END RSA PRIVATE KEY-----';
+}
+
+wireForm('#form-tiger', '#msg-tiger', 'tiger', (fd) => ({
+  tiger_id: fd.get('tiger_id'),
+  private_key: _buildTigerPEM(fd.get('private_key_body')),
+  account: fd.get('account'),
+  license: fd.get('license'),
+}), /*envExtractor=*/(fd) => fd.get('env') || 'paper');
+
+wireForm('#form-alpaca', '#msg-alpaca', 'alpaca', (fd) => ({
+  api_key: fd.get('api_key'),
+  api_secret: fd.get('api_secret'),
+}));
+
+(async () => {
+  setupTigerDropZone();    // 拖拽配置文件 → 自动填表单
+  const loggedIn = await loadCurrentUser();
+  await loadBindings();
+  if (loggedIn) {
+    await loadBrokerSnapshot();
+  } else {
+    $('#broker-snapshot').innerHTML = '<div class="empty">登录后看快照</div>';
+  }
+})();
+</script>
+
+</body>
+</html>

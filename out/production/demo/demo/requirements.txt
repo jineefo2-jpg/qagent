@@ -1,0 +1,40 @@
+openai>=1.40.0
+fastapi>=0.110.0
+uvicorn[standard]>=0.27.0
+pydantic>=2.0.0
+python-dotenv>=1.0.0
+python-multipart>=0.0.20
+markdown>=3.5.0
+
+# 可选：Redis（缓存 + 会话持久化）
+redis>=5.0.0
+
+# 可选：A 股深度数据
+akshare>=1.18.0
+
+# 可选：Yahoo Finance 官方认证（美股/港股 K 线最稳定）
+yfinance>=0.2.0
+
+# RAG：研报/财报 PDF 检索
+chromadb>=1.5.0
+pymupdf>=1.26.0
+sentence-transformers>=5.0.0
+
+# 可选：LangGraph 主循环（USE_LANGGRAPH=1 时启用）
+langgraph>=0.2.0
+langchain-openai>=0.2.0
+langchain-core>=0.3.0
+
+# 可选：Alpaca paper trading（半自动下单）
+alpaca-py>=0.30.0
+
+# 可选：老虎证券 (Tiger Brokers) paper trading (per ADR-0001 §5)
+# Major-pinned: Tiger 历史上有过 auth 字段重命名,大版本必须固定
+tigeropen>=3.2.0,<4.0.0
+
+# OAuth 账户登录（Google / GitHub）
+authlib>=1.3.0
+itsdangerous>=2.1.0
+
+# 凭证加密存储（broker 多租户绑定，X3 起）
+cryptography>=42.0.0

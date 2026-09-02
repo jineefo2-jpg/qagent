@@ -1,0 +1,920 @@
+{
+  "as_of": "2026-08-28",
+  "as_of_note": "T 日收盘后计算",
+  "execute_on": "2026-08-31T09:15:00+08:00",
+  "execute_note": "T+1 09:15-09:25 集合竞价阶段挂限价单，09:25 统一按开盘价撮合",
+  "target_position": 0.8,
+  "macro_score": null,
+  "position_calibrated": false,
+  "current_weight_basis": "持仓市值占比（不含现金；系统不掌握现金余额）",
+  "orders": [
+    {
+      "ts_code": "000042.SZ",
+      "name": "中洲控股",
+      "action": "BUY",
+      "current_weight": 0.0,
+      "target_weight": 0.016,
+      "limit_price_range": [
+        8.53,
+        8.85
+      ],
+      "price_basis": "前收 ± 0.5 × ATR20（执行日涨跌停尚未确定，未夹）",
+      "factor_contrib": {
+        "gross_margin": 3.0139,
+        "sue": 2.4976,
+        "np_yoy": 2.4231
+      },
+      "urgency": "normal"
+    },
+    {
+      "ts_code": "000049.SZ",
+      "name": "德赛电池",
+      "action": "BUY",
+      "current_weight": 0.0,
+      "target_weight": 0.016,
+      "limit_price_range": [
+        23.24,
+        23.82
+      ],
+      "price_basis": "前收 ± 0.5 × ATR20（执行日涨跌停尚未确定，未夹）",
+      "factor_contrib": {
+        "sp_ttm": 1.8164,
+        "np_yoy": 1.7409,
+        "bp": 1.3545
+      },
+      "urgency": "normal"
+    },
+    {
+      "ts_code": "000089.SZ",
+      "name": "深圳机场",
+      "action": "BUY",
+      "current_weight": 0.0,
+      "target_weight": 0.016,
+      "limit_price_range": [
+        6.5,
+        6.62
+      ],
+      "price_basis": "前收 ± 0.5 × ATR20（执行日涨跌停尚未确定，未夹）",
+      "factor_contrib": {
+        "sue": 2.2064,
+        "bp": 2.0386,
+        "volatility_60": 2.0253
+      },
+      "urgency": "normal"
+    },
+    {
+      "ts_code": "000415.SZ",
+      "name": "渤海租赁",
+      "action": "BUY",
+      "current_weight": 0.0,
+      "target_weight": 0.016,
+      "limit_price_range": [
+        4.43,
+        4.55
+      ],
+      "price_basis": "前收 ± 0.5 × ATR20（执行日涨跌停尚未确定，未夹）",
+      "factor_contrib": {
+        "bp": 2.9109,
+        "sp_ttm": 2.28,
+        "ep_ttm": 2.2006
+      },
+      "urgency": "normal"
+    },
+    {
+      "ts_code": "000528.SZ",
+      "name": "柳工",
+      "action": "BUY",
+      "current_weight": 0.0,
+      "target_weight": 0.016,
+      "limit_price_range": [
+        7.8,
+        7.94
+      ],
+      "price_basis": "前收 ± 0.5 × ATR20（执行日涨跌停尚未确定，未夹）",
+      "factor_contrib": {
+        "bp": 2.8944,
+        "sp_ttm": 2.2843,
+        "ep_ttm": 2.1873
+      },
+      "urgency": "normal"
+    },
+    {
+      "ts_code": "000550.SZ",
+      "name": "江铃汽车",
+      "action": "BUY",
+      "current_weight": 0.0,
+      "target_weight": 0.016,
+      "limit_price_range": [
+        16.17,
+        16.51
+      ],
+      "price_basis": "前收 ± 0.5 × ATR20（执行日涨跌停尚未确定，未夹）",
+      "factor_contrib": {
+        "ep_ttm": 1.672,
+        "sp_ttm": 1.6119,
+        "bp": 1.4615
+      },
+      "urgency": "normal"
+    },
+    {
+      "ts_code": "000589.SZ",
+      "name": "贵州轮胎",
+      "action": "BUY",
+      "current_weight": 0.0,
+      "target_weight": 0.016,
+      "limit_price_range": [
+        4.34,
+        4.4
+      ],
+      "price_basis": "前收 ± 0.5 × ATR20（执行日涨跌停尚未确定，未夹）",
+      "factor_contrib": {
+        "bp": 2.451,
+        "ep_ttm": 2.1419,
+        "np_yoy": 2.0872
+      },
+      "urgency": "normal"
+    },
+    {
+      "ts_code": "000612.SZ",
+      "name": "焦作万方",
+      "action": "BUY",
+      "current_weight": 0.0,
+      "target_weight": 0.016,
+      "limit_price_range": [
+        11.29,
+        11.63
+      ],
+      "price_basis": "前收 ± 0.5 × ATR20（执行日涨跌停尚未确定，未夹）",
+      "factor_contrib": {
+        "ep_ttm": 2.0885,
+        "np_yoy": 1.3589,
+        "sue": 1.3311
+      },
+      "urgency": "normal"
+    },
+    {
+      "ts_code": "000680.SZ",
+      "name": "山推股份",
+      "action": "BUY",
+      "current_weight": 0.0,
+      "target_weight": 0.016,
+      "limit_price_range": [
+        10.24,
+        10.52
+      ],
+      "price_basis": "前收 ± 0.5 × ATR20（执行日涨跌停尚未确定，未夹）",
+      "factor_contrib": {
+        "sp_ttm": 2.055,
+        "ep_ttm": 1.9182,
+        "roe_ttm": 1.69
+      },
+      "urgency": "normal"
+    },
+    {
+      "ts_code": "000719.SZ",
+      "name": "中原传媒",
+      "action": "BUY",
+      "current_weight": 0.0,
+      "target_weight": 0.016,
+      "limit_price_range": [
+        11.44,
+        11.76
+      ],
+      "price_basis": "前收 ± 0.5 × ATR20（执行日涨跌停尚未确定，未夹）",
+      "factor_contrib": {
+        "ep_ttm": 2.606,
+        "bp": 2.375,
+        "amihud_20": 2.0876
+      },
+      "urgency": "normal"
+    },
+    {
+      "ts_code": "000885.SZ",
+      "name": "城发环境",
+      "action": "BUY",
+      "current_weight": 0.0,
+      "target_weight": 0.016,
+      "limit_price_range": [
+        12.18,
+        12.36
+      ],
+      "price_basis": "前收 ± 0.5 × ATR20（执行日涨跌停尚未确定，未夹）",
+      "factor_contrib": {
+        "bp": 2.8739,
+        "ep_ttm": 2.6164,
+        "volatility_60": 1.9845
+      },
+      "urgency": "normal"
+    },
+    {
+      "ts_code": "000957.SZ",
+      "name": "中通客车",
+      "action": "BUY",
+      "current_weight": 0.0,
+      "target_weight": 0.016,
+      "limit_price_range": [
+        10.09,
+        10.35
+      ],
+      "price_basis": "前收 ± 0.5 × ATR20（执行日涨跌停尚未确定，未夹）",
+      "factor_contrib": {
+        "sp_ttm": 1.632,
+        "accrual": 1.5919,
+        "sue": 1.3299
+      },
+      "urgency": "normal"
+    },
+    {
+      "ts_code": "001218.SZ",
+      "name": "丽臣实业",
+      "action": "BUY",
+      "current_weight": 0.0,
+      "target_weight": 0.016,
+      "limit_price_range": [
+        23.96,
+        24.82
+      ],
+      "price_basis": "前收 ± 0.5 × ATR20（执行日涨跌停尚未确定，未夹）",
+      "factor_contrib": {
+        "ep_ttm": 2.4642,
+        "sp_ttm": 2.3308,
+        "sue": 2.2405
+      },
+      "urgency": "normal"
+    },
+    {
+      "ts_code": "001332.SZ",
+      "name": "锡装股份",
+      "action": "BUY",
+      "current_weight": 0.0,
+      "target_weight": 0.016,
+      "limit_price_range": [
+        27.65,
+        28.55
+      ],
+      "price_basis": "前收 ± 0.5 × ATR20（执行日涨跌停尚未确定，未夹）",
+      "factor_contrib": {
+        "sue": 1.8035,
+        "ep_ttm": 1.6415,
+        "reversal_20": 1.4529
+      },
+      "urgency": "normal"
+    },
+    {
+      "ts_code": "002035.SZ",
+      "name": "华帝股份",
+      "action": "BUY",
+      "current_weight": 0.0,
+      "target_weight": 0.016,
+      "limit_price_range": [
+        4.62,
+        4.74
+      ],
+      "price_basis": "前收 ± 0.5 × ATR20（执行日涨跌停尚未确定，未夹）",
+      "factor_contrib": {
+        "bp": 1.9477,
+        "ep_ttm": 1.7492,
+        "gross_margin": 1.5741
+      },
+      "urgency": "normal"
+    },
+    {
+      "ts_code": "002061.SZ",
+      "name": "浙江交科",
+      "action": "BUY",
+      "current_weight": 0.0,
+      "target_weight": 0.016,
+      "limit_price_range": [
+        3.5,
+        3.58
+      ],
+      "price_basis": "前收 ± 0.5 × ATR20（执行日涨跌停尚未确定，未夹）",
+      "factor_contrib": {
+        "ep_ttm": 2.1201,
+        "bp": 1.5816,
+        "volatility_60": 1.2321
+      },
+      "urgency": "normal"
+    },
+    {
+      "ts_code": "002073.SZ",
+      "name": "软控股份",
+      "action": "BUY",
+      "current_weight": 0.0,
+      "target_weight": 0.016,
+      "limit_price_range": [
+        5.85,
+        5.99
+      ],
+      "price_basis": "前收 ± 0.5 × ATR20（执行日涨跌停尚未确定，未夹）",
+      "factor_contrib": {
+        "bp": 2.6732,
+        "sp_ttm": 2.3074,
+        "volatility_60": 1.6164
+      },
+      "urgency": "normal"
+    },
+    {
+      "ts_code": "002170.SZ",
+      "name": "芭田股份",
+      "action": "BUY",
+      "current_weight": 0.0,
+      "target_weight": 0.016,
+      "limit_price_range": [
+        11.74,
+        12.08
+      ],
+      "price_basis": "前收 ± 0.5 × ATR20（执行日涨跌停尚未确定，未夹）",
+      "factor_contrib": {
+        "roe_ttm": 2.4335,
+        "ep_ttm": 2.1773,
+        "sue": 1.2878
+      },
+      "urgency": "normal"
+    },
+    {
+      "ts_code": "002204.SZ",
+      "name": "大连重工",
+      "action": "BUY",
+      "current_weight": 0.0,
+      "target_weight": 0.016,
+      "limit_price_range": [
+        5.2,
+        5.3
+      ],
+      "price_basis": "前收 ± 0.5 × ATR20（执行日涨跌停尚未确定，未夹）",
+      "factor_contrib": {
+        "sp_ttm": 2.2952,
+        "volatility_60": 1.7782,
+        "bp": 1.6362
+      },
+      "urgency": "normal"
+    },
+    {
+      "ts_code": "002296.SZ",
+      "name": "辉煌科技",
+      "action": "BUY",
+      "current_weight": 0.0,
+      "target_weight": 0.016,
+      "limit_price_range": [
+        8.93,
+        9.13
+      ],
+      "price_basis": "前收 ± 0.5 × ATR20（执行日涨跌停尚未确定，未夹）",
+      "factor_contrib": {
+        "gross_margin": 2.181,
+        "ep_ttm": 1.9143,
+        "volatility_60": 1.8248
+      },
+      "urgency": "normal"
+    },
+    {
+      "ts_code": "002351.SZ",
+      "name": "漫步者",
+      "action": "BUY",
+      "current_weight": 0.0,
+      "target_weight": 0.016,
+      "limit_price_range": [
+        9.94,
+        10.18
+      ],
+      "price_basis": "前收 ± 0.5 × ATR20（执行日涨跌停尚未确定，未夹）",
+      "factor_contrib": {
+        "volatility_60": 2.2453,
+        "reversal_20": 1.5851,
+        "ep_ttm": 1.5535
+      },
+      "urgency": "normal"
+    },
+    {
+      "ts_code": "002483.SZ",
+      "name": "润邦股份",
+      "action": "BUY",
+      "current_weight": 0.0,
+      "target_weight": 0.016,
+      "limit_price_range": [
+        5.32,
+        5.46
+      ],
+      "price_basis": "前收 ± 0.5 × ATR20（执行日涨跌停尚未确定，未夹）",
+      "factor_contrib": {
+        "sp_ttm": 2.3131,
+        "bp": 2.2758,
+        "ep_ttm": 1.9986
+      },
+      "urgency": "normal"
+    },
+    {
+      "ts_code": "002606.SZ",
+      "name": "大连电瓷",
+      "action": "BUY",
+      "current_weight": 0.0,
+      "target_weight": 0.016,
+      "limit_price_range": [
+        12.77,
+        13.27
+      ],
+      "price_basis": "前收 ± 0.5 × ATR20（执行日涨跌停尚未确定，未夹）",
+      "factor_contrib": {
+        "np_yoy": 2.0818,
+        "momentum_120_20": 2.0597,
+        "reversal_20": 1.5638
+      },
+      "urgency": "normal"
+    },
+    {
+      "ts_code": "002752.SZ",
+      "name": "昇兴股份",
+      "action": "BUY",
+      "current_weight": 0.0,
+      "target_weight": 0.016,
+      "limit_price_range": [
+        5.99,
+        6.13
+      ],
+      "price_basis": "前收 ± 0.5 × ATR20（执行日涨跌停尚未确定，未夹）",
+      "factor_contrib": {
+        "sue": 1.6939,
+        "sp_ttm": 1.5788,
+        "ep_ttm": 1.5236
+      },
+      "urgency": "normal"
+    },
+    {
+      "ts_code": "003000.SZ",
+      "name": "劲仔食品",
+      "action": "BUY",
+      "current_weight": 0.0,
+      "target_weight": 0.016,
+      "limit_price_range": [
+        9.75,
+        9.97
+      ],
+      "price_basis": "前收 ± 0.5 × ATR20（执行日涨跌停尚未确定，未夹）",
+      "factor_contrib": {
+        "roe_ttm": 1.7949,
+        "reversal_20": 1.7355,
+        "volatility_60": 1.6446
+      },
+      "urgency": "normal"
+    },
+    {
+      "ts_code": "300388.SZ",
+      "name": "节能国祯",
+      "action": "BUY",
+      "current_weight": 0.0,
+      "target_weight": 0.016,
+      "limit_price_range": [
+        6.97,
+        7.15
+      ],
+      "price_basis": "前收 ± 0.5 × ATR20（执行日涨跌停尚未确定，未夹）",
+      "factor_contrib": {
+        "bp": 2.4101,
+        "ep_ttm": 2.3023,
+        "volatility_60": 1.7016
+      },
+      "urgency": "normal"
+    },
+    {
+      "ts_code": "300443.SZ",
+      "name": "金雷股份",
+      "action": "BUY",
+      "current_weight": 0.0,
+      "target_weight": 0.016,
+      "limit_price_range": [
+        18.46,
+        18.9
+      ],
+      "price_basis": "前收 ± 0.5 × ATR20（执行日涨跌停尚未确定，未夹）",
+      "factor_contrib": {
+        "bp": 2.5374,
+        "reversal_20": 1.5707,
+        "ep_ttm": 1.4568
+      },
+      "urgency": "normal"
+    },
+    {
+      "ts_code": "300445.SZ",
+      "name": "康斯特",
+      "action": "BUY",
+      "current_weight": 0.0,
+      "target_weight": 0.016,
+      "limit_price_range": [
+        18.49,
+        19.07
+      ],
+      "price_basis": "前收 ± 0.5 × ATR20（执行日涨跌停尚未确定，未夹）",
+      "factor_contrib": {
+        "amihud_20": 2.6131,
+        "gross_margin": 2.3475,
+        "sue": 1.1642
+      },
+      "urgency": "normal"
+    },
+    {
+      "ts_code": "301339.SZ",
+      "name": "通行宝",
+      "action": "BUY",
+      "current_weight": 0.0,
+      "target_weight": 0.016,
+      "limit_price_range": [
+        10.98,
+        11.32
+      ],
+      "price_basis": "前收 ± 0.5 × ATR20（执行日涨跌停尚未确定，未夹）",
+      "factor_contrib": {
+        "sue": 1.4613,
+        "gross_margin": 1.3775,
+        "ep_ttm": 1.2617
+      },
+      "urgency": "normal"
+    },
+    {
+      "ts_code": "600116.SH",
+      "name": "三峡水利",
+      "action": "BUY",
+      "current_weight": 0.0,
+      "target_weight": 0.016,
+      "limit_price_range": [
+        6.27,
+        6.41
+      ],
+      "price_basis": "前收 ± 0.5 × ATR20（执行日涨跌停尚未确定，未夹）",
+      "factor_contrib": {
+        "bp": 2.2582,
+        "np_yoy": 1.9744,
+        "volatility_60": 1.5538
+      },
+      "urgency": "normal"
+    },
+    {
+      "ts_code": "600210.SH",
+      "name": "紫江企业",
+      "action": "BUY",
+      "current_weight": 0.0,
+      "target_weight": 0.016,
+      "limit_price_range": [
+        6.16,
+        6.26
+      ],
+      "price_basis": "前收 ± 0.5 × ATR20（执行日涨跌停尚未确定，未夹）",
+      "factor_contrib": {
+        "ep_ttm": 2.3735,
+        "volatility_60": 1.5714,
+        "roe_ttm": 1.4113
+      },
+      "urgency": "normal"
+    },
+    {
+      "ts_code": "600356.SH",
+      "name": "恒丰纸业",
+      "action": "BUY",
+      "current_weight": 0.0,
+      "target_weight": 0.016,
+      "limit_price_range": [
+        8.66,
+        8.92
+      ],
+      "price_basis": "前收 ± 0.5 × ATR20（执行日涨跌停尚未确定，未夹）",
+      "factor_contrib": {
+        "ep_ttm": 2.2719,
+        "bp": 2.1521,
+        "np_yoy": 1.6112
+      },
+      "urgency": "normal"
+    },
+    {
+      "ts_code": "600502.SH",
+      "name": "安徽建工",
+      "action": "BUY",
+      "current_weight": 0.0,
+      "target_weight": 0.016,
+      "limit_price_range": [
+        4.58,
+        4.68
+      ],
+      "price_basis": "前收 ± 0.5 × ATR20（执行日涨跌停尚未确定，未夹）",
+      "factor_contrib": {
+        "ep_ttm": 2.174,
+        "bp": 1.5768,
+        "amihud_20": -1.4037
+      },
+      "urgency": "normal"
+    },
+    {
+      "ts_code": "600528.SH",
+      "name": "中铁工业",
+      "action": "BUY",
+      "current_weight": 0.0,
+      "target_weight": 0.016,
+      "limit_price_range": [
+        6.93,
+        7.05
+      ],
+      "price_basis": "前收 ± 0.5 × ATR20（执行日涨跌停尚未确定，未夹）",
+      "factor_contrib": {
+        "bp": 2.8935,
+        "sp_ttm": 2.2851,
+        "ep_ttm": 2.015
+      },
+      "urgency": "normal"
+    },
+    {
+      "ts_code": "600638.SH",
+      "name": "新黄浦",
+      "action": "BUY",
+      "current_weight": 0.0,
+      "target_weight": 0.016,
+      "limit_price_range": [
+        5.0,
+        5.16
+      ],
+      "price_basis": "前收 ± 0.5 × ATR20（执行日涨跌停尚未确定，未夹）",
+      "factor_contrib": {
+        "ep_ttm": 2.0985,
+        "np_yoy": 1.3471,
+        "roe_ttm": 1.3021
+      },
+      "urgency": "normal"
+    },
+    {
+      "ts_code": "600694.SH",
+      "name": "大商股份",
+      "action": "BUY",
+      "current_weight": 0.0,
+      "target_weight": 0.016,
+      "limit_price_range": [
+        14.43,
+        14.69
+      ],
+      "price_basis": "前收 ± 0.5 × ATR20（执行日涨跌停尚未确定，未夹）",
+      "factor_contrib": {
+        "ep_ttm": 2.518,
+        "bp": 2.3325,
+        "sp_ttm": 1.5381
+      },
+      "urgency": "normal"
+    },
+    {
+      "ts_code": "600738.SH",
+      "name": "丽尚国潮",
+      "action": "BUY",
+      "current_weight": 0.0,
+      "target_weight": 0.016,
+      "limit_price_range": [
+        4.14,
+        4.26
+      ],
+      "price_basis": "前收 ± 0.5 × ATR20（执行日涨跌停尚未确定，未夹）",
+      "factor_contrib": {
+        "gross_margin": 2.545,
+        "ep_ttm": 1.8145,
+        "volatility_60": 1.6624
+      },
+      "urgency": "normal"
+    },
+    {
+      "ts_code": "600761.SH",
+      "name": "安徽合力",
+      "action": "BUY",
+      "current_weight": 0.0,
+      "target_weight": 0.016,
+      "limit_price_range": [
+        16.21,
+        16.57
+      ],
+      "price_basis": "前收 ± 0.5 × ATR20（执行日涨跌停尚未确定，未夹）",
+      "factor_contrib": {
+        "sp_ttm": 2.2865,
+        "ep_ttm": 1.9124,
+        "reversal_20": 1.5995
+      },
+      "urgency": "normal"
+    },
+    {
+      "ts_code": "600780.SH",
+      "name": "通宝能源",
+      "action": "BUY",
+      "current_weight": 0.0,
+      "target_weight": 0.016,
+      "limit_price_range": [
+        5.9,
+        6.0
+      ],
+      "price_basis": "前收 ± 0.5 × ATR20（执行日涨跌停尚未确定，未夹）",
+      "factor_contrib": {
+        "bp": 2.8697,
+        "ep_ttm": 2.6639,
+        "sp_ttm": 2.3133
+      },
+      "urgency": "normal"
+    },
+    {
+      "ts_code": "600827.SH",
+      "name": "百联股份",
+      "action": "BUY",
+      "current_weight": 0.0,
+      "target_weight": 0.016,
+      "limit_price_range": [
+        7.7,
+        7.86
+      ],
+      "price_basis": "前收 ± 0.5 × ATR20（执行日涨跌停尚未确定，未夹）",
+      "factor_contrib": {
+        "bp": 2.3596,
+        "ep_ttm": 2.1494,
+        "np_yoy": 1.9723
+      },
+      "urgency": "normal"
+    },
+    {
+      "ts_code": "601019.SH",
+      "name": "山东出版",
+      "action": "BUY",
+      "current_weight": 0.0,
+      "target_weight": 0.016,
+      "limit_price_range": [
+        6.65,
+        6.81
+      ],
+      "price_basis": "前收 ± 0.5 × ATR20（执行日涨跌停尚未确定，未夹）",
+      "factor_contrib": {
+        "bp": 2.6579,
+        "ep_ttm": 2.238,
+        "sp_ttm": 1.4726
+      },
+      "urgency": "normal"
+    },
+    {
+      "ts_code": "601098.SH",
+      "name": "中南传媒",
+      "action": "BUY",
+      "current_weight": 0.0,
+      "target_weight": 0.016,
+      "limit_price_range": [
+        9.79,
+        9.99
+      ],
+      "price_basis": "前收 ± 0.5 × ATR20（执行日涨跌停尚未确定，未夹）",
+      "factor_contrib": {
+        "ep_ttm": 2.359,
+        "bp": 1.9568,
+        "accrual": -1.9235
+      },
+      "urgency": "normal"
+    },
+    {
+      "ts_code": "601500.SH",
+      "name": "通用股份",
+      "action": "BUY",
+      "current_weight": 0.0,
+      "target_weight": 0.016,
+      "limit_price_range": [
+        3.97,
+        4.05
+      ],
+      "price_basis": "前收 ± 0.5 × ATR20（执行日涨跌停尚未确定，未夹）",
+      "factor_contrib": {
+        "bp": 1.877,
+        "sp_ttm": 1.6309,
+        "volatility_60": 1.2233
+      },
+      "urgency": "normal"
+    },
+    {
+      "ts_code": "601677.SH",
+      "name": "明泰铝业",
+      "action": "BUY",
+      "current_weight": 0.0,
+      "target_weight": 0.016,
+      "limit_price_range": [
+        16.84,
+        17.32
+      ],
+      "price_basis": "前收 ± 0.5 × ATR20（执行日涨跌停尚未确定，未夹）",
+      "factor_contrib": {
+        "bp": 2.3101,
+        "ep_ttm": 1.943,
+        "sp_ttm": 1.5554
+      },
+      "urgency": "normal"
+    },
+    {
+      "ts_code": "601900.SH",
+      "name": "南方传媒",
+      "action": "BUY",
+      "current_weight": 0.0,
+      "target_weight": 0.016,
+      "limit_price_range": [
+        11.45,
+        11.71
+      ],
+      "price_basis": "前收 ± 0.5 × ATR20（执行日涨跌停尚未确定，未夹）",
+      "factor_contrib": {
+        "ep_ttm": 2.6556,
+        "bp": 1.6745,
+        "sp_ttm": 1.5724
+      },
+      "urgency": "normal"
+    },
+    {
+      "ts_code": "603518.SH",
+      "name": "锦泓集团",
+      "action": "BUY",
+      "current_weight": 0.0,
+      "target_weight": 0.016,
+      "limit_price_range": [
+        7.97,
+        8.19
+      ],
+      "price_basis": "前收 ± 0.5 × ATR20（执行日涨跌停尚未确定，未夹）",
+      "factor_contrib": {
+        "bp": 2.8434,
+        "ep_ttm": 2.8022,
+        "gross_margin": 2.6432
+      },
+      "urgency": "normal"
+    },
+    {
+      "ts_code": "603558.SH",
+      "name": "健盛集团",
+      "action": "BUY",
+      "current_weight": 0.0,
+      "target_weight": 0.016,
+      "limit_price_range": [
+        11.81,
+        12.15
+      ],
+      "price_basis": "前收 ± 0.5 × ATR20（执行日涨跌停尚未确定，未夹）",
+      "factor_contrib": {
+        "ep_ttm": 2.2239,
+        "roe_ttm": 1.8017,
+        "momentum_120_20": 1.2729
+      },
+      "urgency": "normal"
+    },
+    {
+      "ts_code": "605098.SH",
+      "name": "行动教育",
+      "action": "BUY",
+      "current_weight": 0.0,
+      "target_weight": 0.016,
+      "limit_price_range": [
+        55.46,
+        57.64
+      ],
+      "price_basis": "前收 ± 0.5 × ATR20（执行日涨跌停尚未确定，未夹）",
+      "factor_contrib": {
+        "gross_margin": 2.7713,
+        "roe_ttm": 2.7123,
+        "sue": 2.046
+      },
+      "urgency": "normal"
+    },
+    {
+      "ts_code": "688093.SH",
+      "name": "世华科技",
+      "action": "BUY",
+      "current_weight": 0.0,
+      "target_weight": 0.016,
+      "limit_price_range": [
+        21.48,
+        22.22
+      ],
+      "price_basis": "前收 ± 0.5 × ATR20（执行日涨跌停尚未确定，未夹）",
+      "factor_contrib": {
+        "reversal_20": 2.7251,
+        "ep_ttm": 2.1583,
+        "amihud_20": 1.8809
+      },
+      "urgency": "normal"
+    },
+    {
+      "ts_code": "920017.BJ",
+      "name": "星昊医药",
+      "action": "BUY",
+      "current_weight": 0.0,
+      "target_weight": 0.016,
+      "limit_price_range": [
+        16.32,
+        16.92
+      ],
+      "price_basis": "前收 ± 0.5 × ATR20（执行日涨跌停尚未确定，未夹）",
+      "factor_contrib": {
+        "gross_margin": 2.7819,
+        "ep_ttm": 1.8741,
+        "bp": 1.5881
+      },
+      "urgency": "normal"
+    }
+  ],
+  "excluded": [],
+  "warnings": [
+    "⚠ 持仓未校准：上一期清单之后没有对账/确认记录，current_weight 按已有台账推演，可靠性下降（规格 §6.4）",
+    "执行日 2026-08-31 尚无行情：可交易性与限价带按 2026-08-28 收盘推断（次日一字涨停/停牌属预测，非事实）"
+  ],
+  "strategy_version": "p3-strategy-1",
+  "param_hash": "ab102248f1b54f7f",
+  "data_snapshot_id": "e3ff02d5319224bf"
+}

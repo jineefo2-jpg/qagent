@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "f=$(jq -r \".tool_input.file_path // empty\"); case \"$f\" in *.py) python3 -m py_compile \"$f\" 2>&1 ;; esac",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,33 @@
+# 密钥
+.env
+.env.local
+*.key
+*.pem
+*.p12
+*.pfx
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+
+# RAG 数据
+rag_db/
+docs/*.pdf
+
+# 运行时生成的图表 HTML(由 html_chart_render 工具产出)
+static/charts/
+
+# 凭证 SQLite (X3 起,加密存储 broker 凭证)
+data/
+
+# IDE
+.vscode/
+.idea/*
+!.idea/misc.xml
+!.idea/modules.xml
+!.idea/jdk.table.xml
+!.idea/demo.iml
+.DS_Store

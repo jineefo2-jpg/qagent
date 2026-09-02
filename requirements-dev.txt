@@ -6,3 +6,6 @@ pytest>=8.0
 # 把噪声因子判成有效因子的头号原因。只有 test_our_hac_matches_statsmodels 用它交叉验证
 # 两者逐位一致，防止两份实现各自演化。所以它是【测试依赖】，不是运行依赖。
 statsmodels>=0.14
+
+# LoopDemo.py / agent_demo.py（Anthropic SDK 教学脚本，非 server 主路径）
+anthropic>=0.40.0

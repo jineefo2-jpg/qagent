@@ -1,0 +1,948 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  background: #0a0c14;
+  color: #e2e8f0;
+  padding: 28px 20px 48px;
+}
+h1 { text-align: center; font-size: 21px; font-weight: 800; color: #fff; margin-bottom: 4px; }
+.subtitle { text-align: center; font-size: 12px; color: #64748b; margin-bottom: 26px; }
+
+.tabs { display: flex; gap: 6px; max-width: 1040px; margin: 0 auto 20px; flex-wrap: wrap; justify-content: center; }
+.tab { padding: 7px 16px; border-radius: 8px; font-size: 12px; font-weight: 700; cursor: pointer; border: 1.5px solid #1e2235; background: #131620; color: #64748b; transition: all 0.2s; }
+.tab:hover { color: #94a3b8; }
+.tab.active { background: #1e2235; color: #e2e8f0; border-color: #3b4fd8; }
+
+.panel { display: none; max-width: 1040px; margin: 0 auto; }
+.panel.active { display: block; }
+
+.card { background: #131620; border: 1px solid #1e2235; border-radius: 12px; padding: 20px 22px; margin-bottom: 16px; }
+.card-title { font-size: 14px; font-weight: 700; margin-bottom: 12px; }
+.sec { font-size: 10.5px; font-weight: 700; letter-spacing: 1.2px; text-transform: uppercase; color: #64748b; margin-bottom: 8px; }
+
+.code {
+  background: #060810;
+  border: 1px solid #1e2235;
+  border-radius: 8px;
+  padding: 14px 16px;
+  font-family: 'Courier New', monospace;
+  font-size: 11.5px;
+  line-height: 1.8;
+  white-space: pre;
+  overflow-x: auto;
+  color: #94a3b8;
+  position: relative;
+}
+.kw  { color: #818cf8; font-weight: 700; }
+.str { color: #34d399; }
+.key { color: #60a5fa; }
+.cmt { color: #374151; font-style: italic; }
+.hi  { color: #fbbf24; }
+.err { color: #f87171; }
+.ok  { color: #4ade80; }
+.num { color: #fb923c; }
+.tag { color: #a78bfa; }
+
+.g2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 0; }
+.g3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
+
+.flow { display: flex; align-items: stretch; gap: 0; margin: 14px 0; }
+.flow-step { flex: 1; }
+.flow-box {
+  background: #0a0c14;
+  border: 1px solid #1e2235;
+  border-radius: 8px;
+  padding: 12px 14px;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.flow-num { font-size: 10px; color: #374151; font-weight: 700; }
+.flow-name { font-size: 12.5px; font-weight: 700; }
+.flow-desc { font-size: 11px; color: #64748b; line-height: 1.5; }
+.flow-arr { display: flex; align-items: center; padding: 0 8px; color: #1e2235; font-size: 20px; flex-shrink: 0; }
+
+.badge { display: inline-block; padding: 2px 7px; border-radius: 4px; font-size: 10.5px; font-weight: 700; margin-right: 4px; }
+.b-claude { background: #1e2a5f; color: #818cf8; }
+.b-oai   { background: #1e3a2a; color: #4ade80; }
+.b-both  { background: #2a2010; color: #fbbf24; }
+
+.schema-row { display: flex; gap: 10px; margin-bottom: 8px; }
+.schema-type {
+  width: 90px; flex-shrink: 0;
+  background: #0a0c14;
+  border: 1px solid #1e2235;
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 11px;
+  font-weight: 700;
+  color: #60a5fa;
+  font-family: monospace;
+  display: flex; align-items: center;
+}
+.schema-desc { font-size: 11.5px; color: #64748b; line-height: 1.6; flex: 1; display: flex; align-items: center; }
+
+.err-row {
+  display: flex; align-items: flex-start; gap: 12px;
+  background: #0a0c14; border: 1px solid; border-radius: 8px;
+  padding: 12px 14px; margin-bottom: 8px;
+}
+.err-code { font-size: 12px; font-weight: 700; font-family: monospace; flex-shrink: 0; width: 140px; }
+.err-body { flex: 1; }
+.err-title { font-size: 12px; font-weight: 700; margin-bottom: 3px; }
+.err-desc { font-size: 11.5px; color: #64748b; line-height: 1.5; }
+.err-fix { font-size: 11px; color: #4ade80; margin-top: 4px; }
+
+.strat-card { background: #0a0c14; border: 1px solid #1e2235; border-radius: 8px; padding: 14px 16px; }
+.strat-title { font-size: 12.5px; font-weight: 700; margin-bottom: 8px; }
+.strat-body { font-size: 11.5px; color: #64748b; line-height: 1.6; }
+
+.tab2 { display: flex; gap: 6px; margin-bottom: 12px; }
+.tab2-btn { padding: 4px 12px; border-radius: 6px; font-size: 11.5px; font-weight: 700; cursor: pointer; border: 1px solid #1e2235; color: #64748b; background: #0a0c14; }
+.tab2-btn.active { background: #1e2235; color: #e2e8f0; border-color: #3b4fd8; }
+
+.copy-btn {
+  position: absolute; top: 8px; right: 8px;
+  padding: 3px 8px; border-radius: 4px; font-size: 10px; font-weight: 700;
+  cursor: pointer; border: 1px solid #1e2235; background: #131620; color: #64748b;
+}
+.copy-btn:hover { color: #94a3b8; }
+
+.checklist { list-style: none; }
+.checklist li { font-size: 12.5px; color: #94a3b8; line-height: 1.9; display: flex; align-items: flex-start; gap: 8px; }
+.checklist li::before { content: "✓"; color: #4ade80; font-weight: 700; flex-shrink: 0; }
+.checklist li.warn::before { content: "⚠"; color: #fbbf24; }
+.checklist li.bad::before  { content: "✗"; color: #f87171; }
+</style>
+</head>
+<body>
+
+<h1>🔧 Function Calling 完整协议指南</h1>
+<p class="subtitle">JSON Schema 定义 · 参数校验 · 错误处理 · Claude vs OpenAI 实现对比</p>
+
+<div class="tabs">
+  <div class="tab active" onclick="show('flow')">🔄 完整调用流程</div>
+  <div class="tab" onclick="show('schema')">📐 JSON Schema 设计</div>
+  <div class="tab" onclick="show('impl')">⚙️ 代码实现</div>
+  <div class="tab" onclick="show('validate')">✅ 参数校验</div>
+  <div class="tab" onclick="show('error')">🚨 错误处理</div>
+  <div class="tab" onclick="show('patterns')">🏗️ 生产模式</div>
+</div>
+
+<!-- ══════ FLOW ══════ -->
+<div class="panel active" id="p-flow">
+  <div class="card">
+    <div class="card-title" style="color:#60a5fa">Function Calling 完整生命周期</div>
+    <div class="flow">
+      <div class="flow-step">
+        <div class="flow-box" style="border-color:#1e2a5f">
+          <div class="flow-num">STEP 1</div>
+          <div class="flow-name" style="color:#818cf8">定义工具</div>
+          <div class="flow-desc">编写 JSON Schema，声明函数名、描述、参数类型、required 字段</div>
+        </div>
+      </div>
+      <div class="flow-arr">→</div>
+      <div class="flow-step">
+        <div class="flow-box" style="border-color:#1e3a2a">
+          <div class="flow-num">STEP 2</div>
+          <div class="flow-name" style="color:#34d399">模型决策</div>
+          <div class="flow-desc">LLM 读取 Schema，决定是否调用、调用哪个函数、传入什么参数</div>
+        </div>
+      </div>
+      <div class="flow-arr">→</div>
+      <div class="flow-step">
+        <div class="flow-box" style="border-color:#3a2e1e">
+          <div class="flow-num">STEP 3</div>
+          <div class="flow-name" style="color:#fbbf24">提取调用意图</div>
+          <div class="flow-desc">解析响应中的 tool_use / function_call 块，取出函数名和参数</div>
+        </div>
+      </div>
+      <div class="flow-arr">→</div>
+      <div class="flow-step">
+        <div class="flow-box" style="border-color:#2d1e4a">
+          <div class="flow-num">STEP 4</div>
+          <div class="flow-name" style="color:#a78bfa">参数校验</div>
+          <div class="flow-desc">用 JSON Schema / Pydantic / Zod 验证参数合法性，拦截错误调用</div>
+        </div>
+      </div>
+      <div class="flow-arr">→</div>
+      <div class="flow-step">
+        <div class="flow-box" style="border-color:#1e3a1e">
+          <div class="flow-num">STEP 5</div>
+          <div class="flow-name" style="color:#4ade80">执行函数</div>
+          <div class="flow-desc">调用真实业务逻辑（API / DB / 计算），捕获执行异常</div>
+        </div>
+      </div>
+      <div class="flow-arr">→</div>
+      <div class="flow-step">
+        <div class="flow-box" style="border-color:#1e2a3a">
+          <div class="flow-num">STEP 6</div>
+          <div class="flow-name" style="color:#38bdf8">返回结果</div>
+          <div class="flow-desc">把执行结果（或错误）封装回 tool_result，送入下一轮对话</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="g2">
+    <div class="card">
+      <div class="card-title" style="color:#4ade80">Claude Tool Use 消息结构</div>
+      <div class="code"><span class="cmt"># 第一轮：模型决定调用工具</span>
+Response.content = [
+  {
+    <span class="key">"type"</span>: <span class="str">"text"</span>,
+    <span class="key">"text"</span>: <span class="str">"好的，我来查询天气..."</span>
+  },
+  {
+    <span class="key">"type"</span>: <span class="str">"tool_use"</span>,        <span class="hi">← 关键块</span>
+    <span class="key">"id"</span>: <span class="str">"toolu_01Abc..."</span>,    <span class="hi">← 唯一ID，回传时要用</span>
+    <span class="key">"name"</span>: <span class="str">"get_weather"</span>,
+    <span class="key">"input"</span>: {
+      <span class="key">"location"</span>: <span class="str">"Dubai"</span>,
+      <span class="key">"unit"</span>: <span class="str">"celsius"</span>
+    }
+  }
+]
+
+<span class="cmt"># 第二轮：把结果送回</span>
+messages.append({
+  <span class="key">"role"</span>: <span class="str">"user"</span>,
+  <span class="key">"content"</span>: [{
+    <span class="key">"type"</span>: <span class="str">"tool_result"</span>,
+    <span class="key">"tool_use_id"</span>: <span class="str">"toolu_01Abc..."</span>,  <span class="hi">← 必须匹配</span>
+    <span class="key">"content"</span>: <span class="str">'{"temp": 38, "humid": 45}'</span>
+  }]
+})</div>
+    </div>
+    <div class="card">
+      <div class="card-title" style="color:#818cf8">OpenAI Function Call 消息结构</div>
+      <div class="code"><span class="cmt"># 第一轮：模型决定调用工具</span>
+Response.choices[0].message = {
+  <span class="key">"role"</span>: <span class="str">"assistant"</span>,
+  <span class="key">"content"</span>: <span class="kw">null</span>,
+  <span class="key">"tool_calls"</span>: [{          <span class="hi">← 关键块</span>
+    <span class="key">"id"</span>: <span class="str">"call_abc123"</span>,
+    <span class="key">"type"</span>: <span class="str">"function"</span>,
+    <span class="key">"function"</span>: {
+      <span class="key">"name"</span>: <span class="str">"get_weather"</span>,
+      <span class="key">"arguments"</span>: <span class="str">'{"location":"Dubai"}'</span>
+                               <span class="hi">← 注意：是字符串！需 json.loads</span>
+    }
+  }]
+}
+
+<span class="cmt"># 第二轮：把结果送回</span>
+messages.append({
+  <span class="key">"role"</span>: <span class="str">"tool"</span>,
+  <span class="key">"tool_call_id"</span>: <span class="str">"call_abc123"</span>,
+  <span class="key">"content"</span>: <span class="str">'{"temp": 38}'</span>
+})</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title" style="color:#fbbf24">Claude vs OpenAI — 关键差异速查</div>
+    <div style="overflow-x:auto;margin-top:8px">
+      <table style="width:100%;border-collapse:collapse;font-size:12px">
+        <tr style="background:#0a0c14">
+          <th style="padding:8px 14px;text-align:left;color:#374151;font-size:10.5px;letter-spacing:0.8px;text-transform:uppercase">维度</th>
+          <th style="padding:8px 14px;text-align:left;color:#374151;font-size:10.5px">Claude (Anthropic)</th>
+          <th style="padding:8px 14px;text-align:left;color:#374151;font-size:10.5px">OpenAI</th>
+        </tr>
+        <tr style="border-top:1px solid #1e2235">
+          <td style="padding:8px 14px;color:#64748b">定义字段</td>
+          <td style="padding:8px 14px;font-family:monospace;font-size:11px;color:#818cf8">input_schema</td>
+          <td style="padding:8px 14px;font-family:monospace;font-size:11px;color:#4ade80">parameters</td>
+        </tr>
+        <tr style="border-top:1px solid #1e2235">
+          <td style="padding:8px 14px;color:#64748b">调用块类型</td>
+          <td style="padding:8px 14px;font-family:monospace;font-size:11px;color:#818cf8">tool_use</td>
+          <td style="padding:8px 14px;font-family:monospace;font-size:11px;color:#4ade80">tool_calls[].function</td>
+        </tr>
+        <tr style="border-top:1px solid #1e2235">
+          <td style="padding:8px 14px;color:#64748b">参数格式</td>
+          <td style="padding:8px 14px;color:#94a3b8">直接 dict（已解析）</td>
+          <td style="padding:8px 14px;color:#f87171">JSON 字符串（需 json.loads）</td>
+        </tr>
+        <tr style="border-top:1px solid #1e2235">
+          <td style="padding:8px 14px;color:#64748b">结果回传 role</td>
+          <td style="padding:8px 14px;font-family:monospace;font-size:11px;color:#818cf8">user（tool_result 块）</td>
+          <td style="padding:8px 14px;font-family:monospace;font-size:11px;color:#4ade80">tool</td>
+        </tr>
+        <tr style="border-top:1px solid #1e2235">
+          <td style="padding:8px 14px;color:#64748b">强制调用</td>
+          <td style="padding:8px 14px;font-family:monospace;font-size:11px;color:#818cf8">tool_choice: {type:"tool", name:"fn"}</td>
+          <td style="padding:8px 14px;font-family:monospace;font-size:11px;color:#4ade80">tool_choice: {type:"function", function:{name:"fn"}}</td>
+        </tr>
+        <tr style="border-top:1px solid #1e2235">
+          <td style="padding:8px 14px;color:#64748b">并行调用</td>
+          <td style="padding:8px 14px;color:#94a3b8">支持（content 多个 tool_use）</td>
+          <td style="padding:8px 14px;color:#94a3b8">支持（tool_calls 数组）</td>
+        </tr>
+        <tr style="border-top:1px solid #1e2235">
+          <td style="padding:8px 14px;color:#64748b">流式工具调用</td>
+          <td style="padding:8px 14px;color:#94a3b8">支持（input_json_delta 事件）</td>
+          <td style="padding:8px 14px;color:#94a3b8">支持（tool_calls delta）</td>
+        </tr>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- ══════ SCHEMA ══════ -->
+<div class="panel" id="p-schema">
+  <div class="card">
+    <div class="card-title" style="color:#60a5fa">JSON Schema 完整字段参考</div>
+    <div class="g2" style="margin-top:4px">
+      <div>
+        <div class="sec">基础类型</div>
+        <div class="schema-row"><div class="schema-type">string</div><div class="schema-desc">文本。可加 enum / minLength / maxLength / pattern（正则）</div></div>
+        <div class="schema-row"><div class="schema-type">number</div><div class="schema-desc">浮点数。可加 minimum / maximum / multipleOf</div></div>
+        <div class="schema-row"><div class="schema-type">integer</div><div class="schema-desc">整数。约束同 number，但不含小数</div></div>
+        <div class="schema-row"><div class="schema-type">boolean</div><div class="schema-desc">true / false，无额外约束</div></div>
+        <div class="schema-row"><div class="schema-type">array</div><div class="schema-desc">列表。需配 items 定义元素类型，可加 minItems / maxItems / uniqueItems</div></div>
+        <div class="schema-row"><div class="schema-type">object</div><div class="schema-desc">嵌套对象。需配 properties，建议加 additionalProperties: false</div></div>
+        <div class="schema-row"><div class="schema-type">null</div><div class="schema-desc">空值，通常配合 anyOf: [type, null] 表示可选字段</div></div>
+      </div>
+      <div>
+        <div class="sec">关键约束字段</div>
+        <div class="schema-row"><div class="schema-type">required</div><div class="schema-desc">必填字段列表，未出现在列表中的字段均为可选</div></div>
+        <div class="schema-row"><div class="schema-type">enum</div><div class="schema-desc">枚举值，模型只能从列表中选取，用于状态/类型字段</div></div>
+        <div class="schema-row"><div class="schema-type">description</div><div class="schema-desc">⭐ 最重要！引导模型理解参数含义，影响生成质量</div></div>
+        <div class="schema-row"><div class="schema-type">default</div><div class="schema-desc">默认值，可选字段未提供时使用</div></div>
+        <div class="schema-row"><div class="schema-type">anyOf</div><div class="schema-desc">满足任一 Schema 即可，常用于联合类型</div></div>
+        <div class="schema-row"><div class="schema-type">additionalProperties</div><div class="schema-desc">false 时禁止未声明字段，生产环境推荐开启</div></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title" style="color:#34d399">完整工具定义示例 — 股票行情查询</div>
+    <div class="tab2">
+      <div class="tab2-btn active" onclick="showSchema('claude')">Claude 格式</div>
+      <div class="tab2-btn" onclick="showSchema('openai')">OpenAI 格式</div>
+    </div>
+    <div id="s-claude" class="code">{
+  <span class="key">"name"</span>: <span class="str">"get_stock_quote"</span>,
+  <span class="key">"description"</span>: <span class="str">"""查询指定股票的实时行情数据，包括价格、涨跌幅、成交量等核心指标。
+支持 A 股（沪深）、港股、美股。返回数据来自接入的行情数据源。
+当用户询问股票价格、涨跌、行情时调用此工具。"""</span>,
+  <span class="key">"input_schema"</span>: {                    <span class="hi">← Claude 用 input_schema</span>
+    <span class="key">"type"</span>: <span class="str">"object"</span>,
+    <span class="key">"properties"</span>: {
+      <span class="key">"symbol"</span>: {
+        <span class="key">"type"</span>: <span class="str">"string"</span>,
+        <span class="key">"description"</span>: <span class="str">"""股票代码。
+A股格式：'600519.SH'（上交所）或 '000858.SZ'（深交所）
+港股格式：'0700.HK'
+美股格式：'AAPL' 或 'TSLA'"""</span>,
+        <span class="key">"pattern"</span>: <span class="str">"^[A-Z0-9]{1,6}(\\.(SH|SZ|HK))?$"</span>  <span class="hi">← 正则验证</span>
+      },
+      <span class="key">"fields"</span>: {
+        <span class="key">"type"</span>: <span class="str">"array"</span>,
+        <span class="key">"description"</span>: <span class="str">"需要返回的字段列表，默认返回全部"</span>,
+        <span class="key">"items"</span>: {
+          <span class="key">"type"</span>: <span class="str">"string"</span>,
+          <span class="key">"enum"</span>: [<span class="str">"price"</span>, <span class="str">"change_pct"</span>, <span class="str">"volume"</span>,
+                   <span class="str">"market_cap"</span>, <span class="str">"pe_ratio"</span>, <span class="str">"52w_high"</span>]
+        },
+        <span class="key">"minItems"</span>: <span class="num">1</span>,
+        <span class="key">"maxItems"</span>: <span class="num">6</span>,
+        <span class="key">"default"</span>: [<span class="str">"price"</span>, <span class="str">"change_pct"</span>, <span class="str">"volume"</span>]
+      },
+      <span class="key">"currency"</span>: {
+        <span class="key">"type"</span>: <span class="str">"string"</span>,
+        <span class="key">"enum"</span>: [<span class="str">"CNY"</span>, <span class="str">"HKD"</span>, <span class="str">"USD"</span>],
+        <span class="key">"description"</span>: <span class="str">"货币单位，默认按股票所在市场"</span>,
+        <span class="key">"default"</span>: <span class="str">"CNY"</span>
+      }
+    },
+    <span class="key">"required"</span>: [<span class="str">"symbol"</span>],        <span class="hi">← 只有 symbol 是必填</span>
+    <span class="key">"additionalProperties"</span>: <span class="kw">false</span>   <span class="hi">← 禁止额外字段</span>
+  }
+}</div>
+
+    <div id="s-openai" class="code" style="display:none">{
+  <span class="key">"type"</span>: <span class="str">"function"</span>,            <span class="hi">← OpenAI 外层多一个 type</span>
+  <span class="key">"function"</span>: {
+    <span class="key">"name"</span>: <span class="str">"get_stock_quote"</span>,
+    <span class="key">"description"</span>: <span class="str">"查询指定股票的实时行情数据..."</span>,
+    <span class="key">"parameters"</span>: {              <span class="hi">← OpenAI 用 parameters</span>
+      <span class="key">"type"</span>: <span class="str">"object"</span>,
+      <span class="key">"properties"</span>: {
+        <span class="key">"symbol"</span>: {
+          <span class="key">"type"</span>: <span class="str">"string"</span>,
+          <span class="key">"description"</span>: <span class="str">"股票代码，如 '600519.SH' 或 'AAPL'"</span>,
+          <span class="key">"pattern"</span>: <span class="str">"^[A-Z0-9]{1,6}(\\.(SH|SZ|HK))?$"</span>
+        },
+        <span class="key">"fields"</span>: {
+          <span class="key">"type"</span>: <span class="str">"array"</span>,
+          <span class="key">"items"</span>: {
+            <span class="key">"type"</span>: <span class="str">"string"</span>,
+            <span class="key">"enum"</span>: [<span class="str">"price"</span>, <span class="str">"change_pct"</span>, <span class="str">"volume"</span>]
+          }
+        },
+        <span class="key">"currency"</span>: {
+          <span class="key">"type"</span>: <span class="str">"string"</span>,
+          <span class="key">"enum"</span>: [<span class="str">"CNY"</span>, <span class="str">"HKD"</span>, <span class="str">"USD"</span>]
+        }
+      },
+      <span class="key">"required"</span>: [<span class="str">"symbol"</span>],
+      <span class="key">"additionalProperties"</span>: <span class="kw">false</span>,
+      <span class="key">"strict"</span>: <span class="kw">true</span>             <span class="hi">← OpenAI Structured Output 专用</span>
+    }
+  }
+}</div>
+  </div>
+
+  <div class="card">
+    <div class="card-title" style="color:#a78bfa">Schema 设计黄金法则</div>
+    <div class="g2" style="margin-top:8px">
+      <ul class="checklist">
+        <li>description 是最重要的字段，比类型约束影响更大</li>
+        <li>状态/类型参数必须用 enum，不要用 free-form string</li>
+        <li>可选参数提供 default，减少模型猜测负担</li>
+        <li>嵌套层级控制在 3 层内，太深模型容易漏字段</li>
+        <li>加 additionalProperties: false 防止模型添加幻觉字段</li>
+        <li>description 里写调用时机（"当用户询问...时调用"）</li>
+      </ul>
+      <ul class="checklist">
+        <li class="bad">required 字段太多 → 降低调用成功率</li>
+        <li class="bad">用 string 存多个值 → 改用 array 或 enum</li>
+        <li class="bad">参数命名模糊（如 data、info）→ 用具体名</li>
+        <li class="bad">单个工具功能太多 → 拆分成多个职责单一的工具</li>
+        <li class="warn">工具数量超过 10 个 → 性能下降，考虑按场景分组</li>
+        <li class="warn">description 太长 → 保持 100 字内，重点突出</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<!-- ══════ IMPL ══════ -->
+<div class="panel" id="p-impl">
+  <div class="card">
+    <div class="card-title" style="color:#34d399">Claude — 完整 Python 实现</div>
+    <div class="code"><span class="kw">import</span> anthropic, json
+<span class="kw">from</span> typing <span class="kw">import</span> Any
+
+client = anthropic.Anthropic()
+
+<span class="cmt"># ① 工具定义</span>
+tools = [
+    {
+        <span class="key">"name"</span>: <span class="str">"get_stock_quote"</span>,
+        <span class="key">"description"</span>: <span class="str">"查询股票实时行情，支持A股/港股/美股"</span>,
+        <span class="key">"input_schema"</span>: {
+            <span class="key">"type"</span>: <span class="str">"object"</span>,
+            <span class="key">"properties"</span>: {
+                <span class="key">"symbol"</span>: {<span class="key">"type"</span>: <span class="str">"string"</span>, <span class="key">"description"</span>: <span class="str">"股票代码如 600519.SH"</span>},
+                <span class="key">"currency"</span>: {<span class="key">"type"</span>: <span class="str">"string"</span>, <span class="key">"enum"</span>: [<span class="str">"CNY"</span>,<span class="str">"USD"</span>,<span class="str">"HKD"</span>]}
+            },
+            <span class="key">"required"</span>: [<span class="str">"symbol"</span>]
+        }
+    },
+    {
+        <span class="key">"name"</span>: <span class="str">"get_financial_report"</span>,
+        <span class="key">"description"</span>: <span class="str">"获取公司最新财报数据"</span>,
+        <span class="key">"input_schema"</span>: {
+            <span class="key">"type"</span>: <span class="str">"object"</span>,
+            <span class="key">"properties"</span>: {
+                <span class="key">"symbol"</span>: {<span class="key">"type"</span>: <span class="str">"string"</span>},
+                <span class="key">"period"</span>: {<span class="key">"type"</span>: <span class="str">"string"</span>, <span class="key">"enum"</span>: [<span class="str">"Q"</span>,<span class="str">"Y"</span>], <span class="key">"default"</span>: <span class="str">"Q"</span>}
+            },
+            <span class="key">"required"</span>: [<span class="str">"symbol"</span>]
+        }
+    }
+]
+
+<span class="cmt"># ② 工具路由表（函数注册表）</span>
+<span class="kw">def</span> <span class="hi">get_stock_quote</span>(symbol: str, currency: str = <span class="str">"CNY"</span>) -> dict:
+    <span class="cmt"># 真实场景：调用行情 API</span>
+    <span class="kw">return</span> {<span class="key">"symbol"</span>: symbol, <span class="key">"price"</span>: <span class="num">1850.0</span>, <span class="key">"change_pct"</span>: <span class="str">"+2.3%"</span>, <span class="key">"currency"</span>: currency}
+
+<span class="kw">def</span> <span class="hi">get_financial_report</span>(symbol: str, period: str = <span class="str">"Q"</span>) -> dict:
+    <span class="kw">return</span> {<span class="key">"symbol"</span>: symbol, <span class="key">"revenue"</span>: <span class="str">"¥380亿"</span>, <span class="key">"net_profit"</span>: <span class="str">"¥190亿"</span>}
+
+TOOL_REGISTRY = {
+    <span class="str">"get_stock_quote"</span>: get_stock_quote,
+    <span class="str">"get_financial_report"</span>: get_financial_report,
+}
+
+<span class="cmt"># ③ 核心 Agent 循环</span>
+<span class="kw">def</span> <span class="hi">run_agent</span>(user_query: str) -> str:
+    messages = [{<span class="key">"role"</span>: <span class="str">"user"</span>, <span class="key">"content"</span>: user_query}]
+
+    <span class="kw">while True</span>:
+        response = client.messages.create(
+            model=<span class="str">"claude-sonnet-4-6"</span>,
+            max_tokens=<span class="num">4096</span>,
+            tools=tools,
+            messages=messages
+        )
+
+        <span class="cmt"># ④ 判断停止原因</span>
+        <span class="kw">if</span> response.stop_reason == <span class="str">"end_turn"</span>:
+            <span class="cmt"># 模型直接回答，无工具调用</span>
+            <span class="kw">return</span> next(b.text <span class="kw">for</span> b <span class="kw">in</span> response.content <span class="kw">if</span> b.type == <span class="str">"text"</span>)
+
+        <span class="kw">if</span> response.stop_reason != <span class="str">"tool_use"</span>:
+            <span class="kw">raise</span> RuntimeError(<span class="str">f"Unexpected stop_reason: {response.stop_reason}"</span>)
+
+        <span class="cmt"># ⑤ 提取所有 tool_use 块（支持并行调用）</span>
+        tool_uses = [b <span class="kw">for</span> b <span class="kw">in</span> response.content <span class="kw">if</span> b.type == <span class="str">"tool_use"</span>]
+        tool_results = []
+
+        <span class="kw">for</span> tool_use <span class="kw">in</span> tool_uses:
+            <span class="kw">try</span>:
+                fn = TOOL_REGISTRY[tool_use.name]
+                result = fn(**tool_use.input)    <span class="hi">← Claude 的 input 已是 dict</span>
+                tool_results.append({
+                    <span class="key">"type"</span>: <span class="str">"tool_result"</span>,
+                    <span class="key">"tool_use_id"</span>: tool_use.id,
+                    <span class="key">"content"</span>: json.dumps(result, ensure_ascii=<span class="kw">False</span>)
+                })
+            <span class="kw">except Exception as</span> e:
+                tool_results.append({
+                    <span class="key">"type"</span>: <span class="str">"tool_result"</span>,
+                    <span class="key">"tool_use_id"</span>: tool_use.id,
+                    <span class="key">"is_error"</span>: <span class="kw">True</span>,       <span class="hi">← 告诉模型执行失败</span>
+                    <span class="key">"content"</span>: <span class="str">f"Error: {str(e)}"</span>
+                })
+
+        <span class="cmt"># ⑥ 把模型回复和工具结果一起追加到 messages</span>
+        messages.append({<span class="key">"role"</span>: <span class="str">"assistant"</span>, <span class="key">"content"</span>: response.content})
+        messages.append({<span class="key">"role"</span>: <span class="str">"user"</span>, <span class="key">"content"</span>: tool_results})
+        <span class="cmt"># 继续循环，让模型基于工具结果生成最终答案</span>
+
+<span class="cmt"># 调用</span>
+answer = run_agent(<span class="str">"茅台今天涨了多少？帮我看下最新财报"</span>)
+<span class="ok">print</span>(answer)</div>
+  </div>
+
+  <div class="card">
+    <div class="card-title" style="color:#818cf8">Spring Boot WebFlux 实现（适配 ai-service）</div>
+    <div class="code"><span class="cmt">// Tool 定义（对应 Claude input_schema）</span>
+<span class="kw">record</span> <span class="hi">StockQuoteInput</span>(
+    @JsonProperty(<span class="str">"symbol"</span>) String symbol,
+    @JsonProperty(<span class="str">"currency"</span>) String currency
+) {}
+
+<span class="cmt">// 工具注册 Service</span>
+@Service
+<span class="kw">public class</span> <span class="hi">ToolExecutorService</span> {
+
+    <span class="kw">private final</span> Map&lt;String, Function&lt;Map&lt;String,Object&gt;, Mono&lt;String&gt;&gt;&gt; registry;
+
+    <span class="kw">public</span> <span class="hi">ToolExecutorService</span>(StockApiClient stockClient) {
+        registry = Map.of(
+            <span class="str">"get_stock_quote"</span>, input -> {
+                String symbol = (String) input.get(<span class="str">"symbol"</span>);
+                <span class="kw">return</span> stockClient.getQuote(symbol)
+                    .map(q -> toJson(q))
+                    .onErrorReturn(<span class="str">"""{"error":"行情服务暂时不可用"}"</span>);
+            }
+        );
+    }
+
+    <span class="kw">public</span> Mono&lt;String&gt; execute(String toolName, Map&lt;String,Object&gt; input) {
+        Function&lt;Map&lt;String,Object&gt;, Mono&lt;String&gt;&gt; fn = registry.get(toolName);
+        <span class="kw">if</span> (fn == null) {
+            <span class="kw">return</span> Mono.just(<span class="str">"""{"error":"未知工具: """ + toolName + <span class="str">"\"}"</span>);
+        }
+        <span class="kmt">// 参数校验 + 执行</span>
+        <span class="kw">return</span> Mono.fromCallable(() -> validateInput(toolName, input))
+            .flatMap(fn)
+            .timeout(Duration.ofSeconds(<span class="num">10</span>))
+            .onErrorResume(TimeoutException.<span class="kw">class</span>,
+                e -> Mono.just(<span class="str">"""{"error":"工具调用超时"}"</span>));
+    }
+}</div>
+  </div>
+</div>
+
+<!-- ══════ VALIDATE ══════ -->
+<div class="panel" id="p-validate">
+  <div class="card">
+    <div class="card-title" style="color:#a78bfa">三层参数校验架构</div>
+    <div class="g3" style="margin-top:12px">
+      <div class="strat-card" style="border-color:#1e2a5f">
+        <div class="strat-title" style="color:#818cf8">层 1 — Schema 级校验<br><span style="font-size:10.5px;color:#374151">jsonschema / Pydantic / Zod</span></div>
+        <div class="strat-body">验证类型、required、enum、pattern、min/max。在执行函数之前拦截，成本最低。</div>
+      </div>
+      <div class="strat-card" style="border-color:#1e3a2a">
+        <div class="strat-title" style="color:#34d399">层 2 — 业务级校验<br><span style="font-size:10.5px;color:#374151">在函数内部</span></div>
+        <div class="strat-body">股票代码是否在交易所存在、日期是否在有效范围、用户是否有权限调用此工具。</div>
+      </div>
+      <div class="strat-card" style="border-color:#2d1e4a">
+        <div class="strat-title" style="color:#a78bfa">层 3 — 防御级校验<br><span style="font-size:10.5px;color:#374151">注入防护 / 安全边界</span></div>
+        <div class="strat-body">拦截 Prompt Injection（工具参数里藏指令）、SQL Injection、路径穿越等攻击向量。</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title" style="color:#fbbf24">完整校验代码 — Python</div>
+    <div class="code"><span class="kw">from</span> pydantic <span class="kw">import</span> BaseModel, validator, Field
+<span class="kw">from</span> jsonschema <span class="kw">import</span> validate, ValidationError
+<span class="kw">import</span> re
+
+<span class="cmt"># ── 层 1：Pydantic Schema 校验 ──</span>
+<span class="kw">class</span> <span class="hi">StockQuoteParams</span>(BaseModel):
+    symbol: str = Field(..., description=<span class="str">"股票代码"</span>)
+    currency: str = Field(<span class="str">"CNY"</span>, description=<span class="str">"货币"</span>)
+    fields: list[str] = Field(default_factory=<span class="kw">lambda</span>: [<span class="str">"price"</span>, <span class="str">"change_pct"</span>])
+
+    <span class="hi">@validator</span>(<span class="str">"symbol"</span>)
+    <span class="kw">def</span> validate_symbol(cls, v):
+        <span class="cmt"># 层 1：格式检查</span>
+        pattern = <span class="str">r'^[A-Z0-9]{1,6}(\.(SH|SZ|HK))?$'</span>
+        <span class="kw">if not</span> re.match(pattern, v.upper()):
+            <span class="kw">raise</span> ValueError(<span class="str">f"无效股票代码格式: {v}"</span>)
+        <span class="kw">return</span> v.upper()
+
+    <span class="hi">@validator</span>(<span class="str">"currency"</span>)
+    <span class="kw">def</span> validate_currency(cls, v):
+        <span class="kw">if</span> v <span class="kw">not in</span> [<span class="str">"CNY"</span>, <span class="str">"USD"</span>, <span class="str">"HKD"</span>]:
+            <span class="kw">raise</span> ValueError(<span class="str">f"不支持的货币: {v}"</span>)
+        <span class="kw">return</span> v
+
+    <span class="hi">@validator</span>(<span class="str">"fields"</span>, each_item=<span class="kw">True</span>)
+    <span class="kw">def</span> validate_fields(cls, v):
+        allowed = {<span class="str">"price"</span>, <span class="str">"change_pct"</span>, <span class="str">"volume"</span>, <span class="str">"pe_ratio"</span>}
+        <span class="kw">if</span> v <span class="kw">not in</span> allowed:
+            <span class="kw">raise</span> ValueError(<span class="str">f"不支持的字段: {v}"</span>)
+        <span class="kw">return</span> v
+
+<span class="cmt"># ── 层 2：业务校验 ──</span>
+<span class="kw">def</span> <span class="hi">validate_business_rules</span>(params: StockQuoteParams) -> <span class="kw">None</span>:
+    <span class="cmt"># 检查股票是否在支持的交易所</span>
+    <span class="kw">if</span> params.symbol.endswith(<span class="str">".SH"</span>) <span class="kw">and</span> params.currency == <span class="str">"USD"</span>:
+        <span class="kw">raise</span> ValueError(<span class="str">"A股不支持USD计价，请使用CNY"</span>)
+    <span class="cmt"># 检查代码是否真实存在（查缓存/数据库）</span>
+    <span class="kw">if not</span> stock_code_exists(params.symbol):
+        <span class="kw">raise</span> ValueError(<span class="str">f"股票代码不存在: {params.symbol}"</span>)
+
+<span class="cmt"># ── 层 3：安全校验 ──</span>
+<span class="kw">def</span> <span class="hi">sanitize_input</span>(raw_input: dict) -> dict:
+    <span class="cmt"># 检查 Prompt Injection 特征</span>
+    dangerous_patterns = [
+        <span class="str">r'ignore.*previous.*instructions'</span>,
+        <span class="str">r'system.*prompt'</span>,
+        <span class="str">r'<script|javascript:'</span>,
+        <span class="str">r';\s*(DROP|DELETE|UPDATE)\s+TABLE'</span>   <span class="cmt"># SQL Injection</span>
+    ]
+    flat = json.dumps(raw_input).lower()
+    <span class="kw">for</span> pattern <span class="kw">in</span> dangerous_patterns:
+        <span class="kw">if</span> re.search(pattern, flat, re.IGNORECASE):
+            <span class="kw">raise</span> SecurityError(<span class="str">f"检测到潜在注入攻击: {pattern}"</span>)
+    <span class="kw">return</span> raw_input
+
+<span class="cmt"># ── 统一校验入口 ──</span>
+<span class="kw">def</span> <span class="hi">validate_tool_call</span>(tool_name: str, raw_input: dict) -> BaseModel:
+    sanitize_input(raw_input)            <span class="cmt"># 层 3</span>
+
+    VALIDATORS = {<span class="str">"get_stock_quote"</span>: StockQuoteParams}
+    model_cls = VALIDATORS.get(tool_name)
+    <span class="kw">if not</span> model_cls:
+        <span class="kw">raise</span> ValueError(<span class="str">f"未知工具: {tool_name}"</span>)
+
+    params = model_cls(**raw_input)      <span class="cmt"># 层 1（Pydantic）</span>
+    validate_business_rules(params)      <span class="cmt"># 层 2</span>
+    <span class="kw">return</span> params</div>
+  </div>
+</div>
+
+<!-- ══════ ERROR ══════ -->
+<div class="panel" id="p-error">
+  <div class="card">
+    <div class="card-title" style="color:#f87171">错误类型全景</div>
+
+    <div class="err-row" style="border-color:#dc2626">
+      <div class="err-code" style="color:#f87171">SCHEMA_MISMATCH</div>
+      <div class="err-body">
+        <div class="err-title">参数类型/格式不符</div>
+        <div class="err-desc">模型传入了 Schema 未声明的字段，或类型不对（如 string 传了 number）</div>
+        <div class="err-fix">→ 用 Pydantic / jsonschema 校验后返回 is_error:true + 错误描述，让模型重试</div>
+      </div>
+    </div>
+
+    <div class="err-row" style="border-color:#d97706">
+      <div class="err-code" style="color:#fbbf24">MISSING_REQUIRED</div>
+      <div class="err-body">
+        <div class="err-title">必填参数缺失</div>
+        <div class="err-desc">用户没提供足够信息，模型无法确定 required 字段的值</div>
+        <div class="err-fix">→ 返回错误："缺少必填参数 symbol，请提供股票代码"，模型会向用户追问</div>
+      </div>
+    </div>
+
+    <div class="err-row" style="border-color:#7c3aed">
+      <div class="err-code" style="color:#a78bfa">TOOL_NOT_FOUND</div>
+      <div class="err-body">
+        <div class="err-title">调用了不存在的工具</div>
+        <div class="err-desc">模型幻觉或 Schema 更新不同步，调用了未注册的函数名</div>
+        <div class="err-fix">→ 路由层做名称白名单校验，返回 "工具 xxx 不存在" 而非崩溃</div>
+      </div>
+    </div>
+
+    <div class="err-row" style="border-color:#059669">
+      <div class="err-code" style="color:#34d399">EXECUTION_ERROR</div>
+      <div class="err-body">
+        <div class="err-title">函数执行失败（下游异常）</div>
+        <div class="err-desc">行情 API 超时、数据库连接断开、第三方服务返回 5xx</div>
+        <div class="err-fix">→ 捕获异常，返回结构化错误；让模型决定是否重试或给用户友好提示</div>
+      </div>
+    </div>
+
+    <div class="err-row" style="border-color:#0ea5e9">
+      <div class="err-code" style="color:#38bdf8">TIMEOUT</div>
+      <div class="err-body">
+        <div class="err-title">工具调用超时</div>
+        <div class="err-desc">函数执行时间超过预设阈值（通常 5~15s），需要中断</div>
+        <div class="err-fix">→ asyncio.timeout / reactor 超时控制，返回超时错误让模型感知</div>
+      </div>
+    </div>
+
+    <div class="err-row" style="border-color:#be185d">
+      <div class="err-code" style="color:#f472b6">INFINITE_LOOP</div>
+      <div class="err-body">
+        <div class="err-title">工具调用死循环</div>
+        <div class="err-desc">模型反复调用同一工具且结果没有改善（常见于参数错误时模型不断重试）</div>
+        <div class="err-fix">→ 设置最大迭代次数（如 10 轮），超出后强制退出并告知用户</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title" style="color:#38bdf8">完整错误处理代码</div>
+    <div class="code"><span class="kw">import</span> asyncio
+<span class="kw">from</span> dataclasses <span class="kw">import</span> dataclass
+
+<span class="kw">class</span> <span class="hi">ToolError</span>(Exception):
+    <span class="kw">def</span> __init__(self, code: str, message: str, retryable: bool = <span class="kw">False</span>):
+        self.code = code
+        self.message = message
+        self.retryable = retryable
+
+<span class="cmt"># ── 错误分类处理器 ──</span>
+<span class="kw">def</span> <span class="hi">handle_tool_error</span>(tool_use_id: str, error: Exception) -> dict:
+    <span class="kw">if isinstance</span>(error, ValidationError):
+        msg = <span class="str">f"参数校验失败: {error.errors()}"</span>
+    <span class="kw">elif isinstance</span>(error, asyncio.TimeoutError):
+        msg = <span class="str">"工具调用超时（>10s），请稍后重试"</span>
+    <span class="kw">elif isinstance</span>(error, KeyError):
+        msg = <span class="str">f"工具未找到: {error}"</span>
+    <span class="kw">elif isinstance</span>(error, PermissionError):
+        msg = <span class="str">"权限不足，无法调用此工具"</span>
+    <span class="kw">else</span>:
+        msg = <span class="str">f"工具执行失败: {str(error)}"</span>
+
+    <span class="ok">print</span>(<span class="str">f"[TOOL_ERROR] {tool_use_id}: {msg}"</span>)  <span class="cmt"># 记录日志</span>
+
+    <span class="kw">return</span> {
+        <span class="key">"type"</span>: <span class="str">"tool_result"</span>,
+        <span class="key">"tool_use_id"</span>: tool_use_id,
+        <span class="key">"is_error"</span>: <span class="kw">True</span>,
+        <span class="key">"content"</span>: json.dumps({
+            <span class="key">"error"</span>: msg,
+            <span class="key">"retryable"</span>: <span class="kw">isinstance</span>(error, (asyncio.TimeoutError, ConnectionError))
+        })
+    }
+
+<span class="cmt"># ── 防死循环的 Agent 循环 ──</span>
+MAX_ITERATIONS = <span class="num">10</span>
+
+<span class="kw">async def</span> <span class="hi">safe_agent_loop</span>(user_query: str) -> str:
+    messages = [{<span class="key">"role"</span>: <span class="str">"user"</span>, <span class="key">"content"</span>: user_query}]
+    iteration = <span class="num">0</span>
+    consecutive_errors = <span class="num">0</span>
+
+    <span class="kw">while</span> iteration < MAX_ITERATIONS:
+        iteration += <span class="num">1</span>
+        response = <span class="kw">await</span> async_claude_call(messages)
+
+        <span class="kw">if</span> response.stop_reason == <span class="str">"end_turn"</span>:
+            <span class="kw">return</span> extract_text(response)
+
+        tool_results = []
+        all_failed = <span class="kw">True</span>
+
+        <span class="kw">for</span> tool_use <span class="kw">in</span> extract_tool_uses(response):
+            <span class="kw">try</span>:
+                params = validate_tool_call(tool_use.name, tool_use.input)
+                result = <span class="kw">await</span> asyncio.wait_for(
+                    execute_tool(tool_use.name, params),
+                    timeout=<span class="num">10.0</span>
+                )
+                tool_results.append(make_tool_result(tool_use.id, result))
+                all_failed = <span class="kw">False</span>
+                consecutive_errors = <span class="num">0</span>
+
+            <span class="kw">except Exception as</span> e:
+                tool_results.append(handle_tool_error(tool_use.id, e))
+                consecutive_errors += <span class="num">1</span>
+
+        <span class="cmt"># 连续 3 次全部失败，主动退出</span>
+        <span class="kw">if</span> consecutive_errors >= <span class="num">3</span>:
+            <span class="kw">return</span> <span class="str">"抱歉，工具服务暂时不可用，请稍后再试。"</span>
+
+        messages.append({<span class="key">"role"</span>: <span class="str">"assistant"</span>, <span class="key">"content"</span>: response.content})
+        messages.append({<span class="key">"role"</span>: <span class="str">"user"</span>, <span class="key">"content"</span>: tool_results})
+
+    <span class="kw">return</span> <span class="str">f"超过最大迭代次数({MAX_ITERATIONS})，任务终止。"</span></div>
+  </div>
+</div>
+
+<!-- ══════ PATTERNS ══════ -->
+<div class="panel" id="p-patterns">
+  <div class="card">
+    <div class="card-title" style="color:#4ade80">模式 1：工具选择策略（tool_choice）</div>
+    <div class="g2" style="margin-top:12px">
+      <div>
+        <div class="sec">三种模式</div>
+        <div class="code"><span class="cmt"># auto：模型自决（默认）</span>
+tool_choice={<span class="str">"type"</span>: <span class="str">"auto"</span>}
+
+<span class="cmt"># any：必须调用工具（随便选）</span>
+tool_choice={<span class="str">"type"</span>: <span class="str">"any"</span>}
+
+<span class="cmt"># tool：强制调用指定工具</span>
+<span class="cmt"># → 最强的结构化输出方式</span>
+tool_choice={
+  <span class="str">"type"</span>: <span class="str">"tool"</span>,
+  <span class="str">"name"</span>: <span class="str">"get_stock_quote"</span>
+}</div>
+      </div>
+      <div>
+        <div class="sec">使用场景</div>
+        <div class="code"><span class="cmt"># auto → 通用对话 Agent</span>
+<span class="ok">适合</span>: 用户意图多样，不确定是否需要工具
+
+<span class="cmt"># any → 必须获取实时数据时</span>
+<span class="ok">适合</span>: 明确需要调用外部系统的场景
+
+<span class="cmt"># tool → 结构化信息提取</span>
+<span class="ok">适合</span>: 替代 JSON Mode，100% 保证结构
+<span class="hi">示例</span>: 从用户话语提取股票代码、
+       日期范围、操作意图等结构化字段</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title" style="color:#fbbf24">模式 2：并行工具调用（Parallel Calls）</div>
+    <div class="code"><span class="cmt"># 用户：帮我同时看茅台和宁德时代的行情</span>
+<span class="cmt"># 模型会在一次响应里返回两个 tool_use 块</span>
+
+Response.content = [
+  {<span class="key">"type"</span>: <span class="str">"tool_use"</span>, <span class="key">"id"</span>: <span class="str">"t1"</span>, <span class="key">"name"</span>: <span class="str">"get_stock_quote"</span>,
+   <span class="key">"input"</span>: {<span class="str">"symbol"</span>: <span class="str">"600519.SH"</span>}},  <span class="hi">← 茅台</span>
+  {<span class="key">"type"</span>: <span class="str">"tool_use"</span>, <span class="key">"id"</span>: <span class="str">"t2"</span>, <span class="key">"name"</span>: <span class="str">"get_stock_quote"</span>,
+   <span class="key">"input"</span>: {<span class="str">"symbol"</span>: <span class="str">"300750.SZ"</span>}},  <span class="hi">← 宁德</span>
+]
+
+<span class="cmt"># ✅ 正确处理：并发执行，同时回传结果</span>
+<span class="kw">import</span> asyncio
+
+<span class="kw">async def</span> <span class="hi">handle_parallel</span>(tool_uses):
+    tasks = [execute_tool(t.name, t.input) <span class="kw">for</span> t <span class="kw">in</span> tool_uses]
+    results = <span class="kw">await</span> asyncio.gather(*tasks, return_exceptions=<span class="kw">True</span>)
+
+    tool_results = []
+    <span class="kw">for</span> tool_use, result <span class="kw">in</span> zip(tool_uses, results):
+        <span class="kw">if isinstance</span>(result, Exception):
+            tool_results.append(handle_tool_error(tool_use.id, result))
+        <span class="kw">else</span>:
+            tool_results.append(make_tool_result(tool_use.id, result))
+
+    <span class="kw">return</span> tool_results  <span class="cmt"># 一次性回传所有结果</span>
+
+<span class="cmt"># ❌ 错误做法：按顺序执行，性能差 2~N 倍</span>
+<span class="err">for t in tool_uses:
+    result = await execute_tool(t.name, t.input)  # 串行！</span></div>
+  </div>
+
+  <div class="card">
+    <div class="card-title" style="color:#38bdf8">模式 3：流式工具调用（Streaming）</div>
+    <div class="code"><span class="kw">import</span> anthropic, json
+
+client = anthropic.Anthropic()
+
+<span class="kw">with</span> client.messages.stream(
+    model=<span class="str">"claude-sonnet-4-6"</span>,
+    max_tokens=<span class="num">4096</span>,
+    tools=tools,
+    messages=messages
+) <span class="kw">as</span> stream:
+
+    current_tool_input = <span class="str">""</span>
+    current_tool_id = <span class="str">""</span>
+    current_tool_name = <span class="str">""</span>
+
+    <span class="kw">for</span> event <span class="kw">in</span> stream:
+        <span class="kw">if</span> event.type == <span class="str">"content_block_start"</span>:
+            <span class="kw">if</span> event.content_block.type == <span class="str">"tool_use"</span>:
+                current_tool_id = event.content_block.id
+                current_tool_name = event.content_block.name
+                current_tool_input = <span class="str">""</span>
+
+        <span class="kw">elif</span> event.type == <span class="str">"content_block_delta"</span>:
+            <span class="kw">if</span> event.delta.type == <span class="str">"input_json_delta"</span>:  <span class="hi">← 参数流式累积</span>
+                current_tool_input += event.delta.partial_json
+
+            <span class="kw">elif</span> event.delta.type == <span class="str">"text_delta"</span>:
+                <span class="ok">print</span>(event.delta.text, end=<span class="str">""</span>, flush=<span class="kw">True</span>)  <span class="cmt"># 实时展示文字</span>
+
+        <span class="kw">elif</span> event.type == <span class="str">"content_block_stop"</span>:
+            <span class="kw">if</span> current_tool_name:
+                <span class="cmt"># 工具参数流式接收完毕，执行</span>
+                params = json.loads(current_tool_input)
+                result = execute_tool_sync(current_tool_name, params)
+                <span class="cmt"># 处理结果...</span>
+                current_tool_name = <span class="str">""</span></div>
+  </div>
+
+  <div class="card">
+    <div class="card-title" style="color:#c084fc">生产环境检查清单</div>
+    <div class="g2" style="margin-top:8px">
+      <ul class="checklist">
+        <li>工具 description 写清楚"何时调用"的触发条件</li>
+        <li>所有工具参数做三层校验（Schema/业务/安全）</li>
+        <li>并行工具调用用 asyncio.gather 而非 for 循环</li>
+        <li>Agent 循环设置最大迭代次数（推荐 10-20）</li>
+        <li>每次工具调用设置超时（推荐 5-15s）</li>
+        <li>is_error: true 正确传回，让模型感知失败</li>
+      </ul>
+      <ul class="checklist">
+        <li>工具执行结果控制在合理大小（&lt;50KB）避免上下文爆炸</li>
+        <li>流式调用时用 input_json_delta 累积参数</li>
+        <li>OpenAI arguments 是字符串，记得 json.loads</li>
+        <li>production 环境监控工具调用频率和成功率</li>
+        <li class="warn">工具超过 10 个时性能下降，考虑动态注入工具</li>
+        <li class="bad">不要在工具结果里返回 Markdown 格式文本</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<script>
+function show(id) {
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.getElementById('p-'+id).classList.add('active');
+  event.target.classList.add('active');
+}
+function showSchema(id) {
+  document.querySelectorAll('[id^="s-"]').forEach(el => el.style.display='none');
+  document.querySelectorAll('.tab2-btn').forEach(t => t.classList.remove('active'));
+  document.getElementById('s-'+id).style.display='block';
+  event.target.classList.add('active');
+}
+</script>
+</body>
+</html>

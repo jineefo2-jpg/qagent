@@ -1,0 +1,712 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  background: #0a0c14;
+  color: #e2e8f0;
+  padding: 28px 20px 40px;
+  min-height: 100vh;
+}
+h1 { text-align: center; font-size: 21px; font-weight: 800; color: #fff; margin-bottom: 4px; }
+.subtitle { text-align: center; font-size: 12.5px; color: #64748b; margin-bottom: 28px; }
+
+/* NAV TABS */
+.tabs {
+  display: flex;
+  gap: 6px;
+  max-width: 900px;
+  margin: 0 auto 20px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+.tab {
+  padding: 7px 16px;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  border: 1.5px solid transparent;
+  transition: all 0.2s;
+  letter-spacing: 0.3px;
+}
+.tab:hover { filter: brightness(1.2); }
+.tab.active { color: #fff !important; }
+
+/* MAIN PANEL */
+.panel {
+  max-width: 900px;
+  margin: 0 auto;
+  display: none;
+}
+.panel.active { display: block; }
+
+.panel-header {
+  border-radius: 12px 12px 0 0;
+  padding: 18px 24px 16px;
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+}
+.panel-icon { font-size: 32px; flex-shrink: 0; margin-top: 2px; }
+.panel-meta {}
+.panel-name { font-size: 20px; font-weight: 800; margin-bottom: 4px; }
+.panel-tagline { font-size: 12.5px; opacity: 0.8; line-height: 1.5; }
+
+.panel-body {
+  background: #131620;
+  border: 1px solid #1e2235;
+  border-top: none;
+  border-radius: 0 0 12px 12px;
+  padding: 20px 24px;
+}
+
+/* SECTION */
+.section { margin-bottom: 20px; }
+.section:last-child { margin-bottom: 0; }
+.sec-label {
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 1.2px;
+  text-transform: uppercase;
+  color: #64748b;
+  margin-bottom: 8px;
+}
+
+/* PROMPT BOX */
+.prompt-box {
+  background: #0a0c14;
+  border: 1px solid #1e2235;
+  border-radius: 8px;
+  padding: 14px 16px;
+  font-family: 'Courier New', monospace;
+  font-size: 12px;
+  line-height: 1.7;
+  color: #94a3b8;
+  white-space: pre-wrap;
+}
+.hl-user   { color: #60a5fa; }
+.hl-system { color: #a78bfa; }
+.hl-think  { color: #fbbf24; font-style: italic; }
+.hl-act    { color: #34d399; }
+.hl-obs    { color: #fb923c; }
+.hl-ans    { color: #f472b6; font-weight: 700; }
+
+/* WHEN / NOT WHEN */
+.when-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.when-card { background: #0a0c14; border-radius: 8px; padding: 12px 14px; border: 1px solid; }
+.when-card ul { list-style: none; padding: 0; }
+.when-card li { font-size: 12px; color: #94a3b8; line-height: 1.8; }
+.when-card li::before { margin-right: 6px; }
+.when-card.use  { border-color: #166534; }
+.when-card.use  li::before { content: "✅"; }
+.when-card.skip { border-color: #7f1d1d; }
+.when-card.skip li::before { content: "❌"; }
+.when-title { font-size: 11px; font-weight: 700; margin-bottom: 8px; color: #64748b; letter-spacing: 0.8px; text-transform: uppercase; }
+
+/* METRICS */
+.metrics { display: flex; gap: 10px; flex-wrap: wrap; }
+.metric {
+  flex: 1;
+  min-width: 100px;
+  background: #0a0c14;
+  border: 1px solid #1e2235;
+  border-radius: 8px;
+  padding: 10px 12px;
+  text-align: center;
+}
+.metric-val { font-size: 22px; font-weight: 800; margin-bottom: 2px; }
+.metric-key { font-size: 10.5px; color: #64748b; }
+
+/* FLOW DIAGRAM */
+.flow { display: flex; align-items: center; flex-wrap: wrap; gap: 0; margin-top: 4px; }
+.flow-node {
+  padding: 7px 12px;
+  border-radius: 7px;
+  font-size: 11.5px;
+  font-weight: 600;
+  text-align: center;
+  flex-shrink: 0;
+}
+.flow-arrow { color: #374151; font-size: 16px; margin: 0 4px; flex-shrink: 0; }
+.flow-loop { font-size: 11px; color: #64748b; margin-left: 8px; font-style: italic; }
+
+/* COMPARISON TABLE */
+.cmp-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.cmp-table th { padding: 8px 12px; text-align: left; background: #0a0c14; font-size: 10.5px; font-weight: 700; letter-spacing: 0.8px; text-transform: uppercase; color: #64748b; }
+.cmp-table td { padding: 8px 12px; border-top: 1px solid #1e2235; color: #94a3b8; vertical-align: top; }
+.cmp-table tr:hover td { background: #0f1220; }
+
+/* COLORS per paradigm */
+.c1-bg  { background: linear-gradient(135deg, #1e3a5f 0%, #172543 100%); }
+.c1-tab { background: #1e3a5f; color: #60a5fa; border-color: #2563eb; }
+.c1-act { background: #1e3a5f; color: #60a5fa; }
+.c1-txt { color: #60a5fa; }
+
+.c2-bg  { background: linear-gradient(135deg, #1e4a3a 0%, #122b22 100%); }
+.c2-tab { background: #1e4a3a; color: #34d399; border-color: #059669; }
+.c2-act { background: #1e4a3a; color: #34d399; }
+.c2-txt { color: #34d399; }
+
+.c3-bg  { background: linear-gradient(135deg, #3a2e1e 0%, #231c12 100%); }
+.c3-tab { background: #3a2e1e; color: #fbbf24; border-color: #d97706; }
+.c3-act { background: #3a2e1e; color: #fbbf24; }
+.c3-txt { color: #fbbf24; }
+
+.c4-bg  { background: linear-gradient(135deg, #2d1e4a 0%, #1a1230 100%); }
+.c4-tab { background: #2d1e4a; color: #a78bfa; border-color: #7c3aed; }
+.c4-act { background: #2d1e4a; color: #a78bfa; }
+.c4-txt { color: #a78bfa; }
+
+.c5-bg  { background: linear-gradient(135deg, #1e3a2a 0%, #0f2018 100%); }
+.c5-tab { background: #1e3a2a; color: #4ade80; border-color: #16a34a; }
+.c5-act { background: #1e3a2a; color: #4ade80; }
+.c5-txt { color: #4ade80; }
+
+/* OVERVIEW TAB */
+.c0-tab { background: #1e2235; color: #94a3b8; border-color: #2a3050; }
+.overview-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; max-width: 900px; margin: 0 auto; }
+.ov-card {
+  background: #131620;
+  border: 1px solid #1e2235;
+  border-radius: 10px;
+  padding: 16px 18px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.ov-card:hover { transform: translateY(-2px); border-color: #2a3050; }
+.ov-card-head { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+.ov-icon { font-size: 22px; }
+.ov-name { font-size: 14px; font-weight: 700; }
+.ov-desc { font-size: 12px; color: #64748b; line-height: 1.55; }
+.ov-badge { font-size: 10.5px; font-weight: 700; padding: 2px 8px; border-radius: 4px; margin-top: 8px; display: inline-block; }
+
+.evolution {
+  max-width: 900px;
+  margin: 0 auto 20px;
+  background: #131620;
+  border: 1px solid #1e2235;
+  border-radius: 10px;
+  padding: 14px 18px;
+}
+.evo-title { font-size: 11px; font-weight: 700; color: #64748b; letter-spacing: 1px; text-transform: uppercase; margin-bottom: 12px; }
+.evo-flow { display: flex; align-items: center; gap: 0; flex-wrap: wrap; }
+.evo-step { text-align: center; flex: 1; min-width: 80px; }
+.evo-num { font-size: 10px; color: #64748b; margin-bottom: 3px; }
+.evo-label { font-size: 12px; font-weight: 700; }
+.evo-arrow { color: #1e2235; font-size: 18px; margin: 0 2px; flex-shrink: 0; }
+</style>
+</head>
+<body>
+
+<h1>⚡ Prompt 工程五大范式</h1>
+<p class="subtitle">Zero-shot · Few-shot · CoT · Self-Consistency · ReAct — 原理 · 示例 · 适用场景</p>
+
+<div class="tabs">
+  <div class="tab c0-tab active" onclick="showTab('overview')">📊 总览对比</div>
+  <div class="tab c1-tab" onclick="showTab('zeroshot')">① Zero-shot</div>
+  <div class="tab c2-tab" onclick="showTab('fewshot')">② Few-shot</div>
+  <div class="tab c3-tab" onclick="showTab('cot')">③ CoT</div>
+  <div class="tab c4-tab" onclick="showTab('sc')">④ Self-Consistency</div>
+  <div class="tab c5-tab" onclick="showTab('react')">⑤ ReAct</div>
+</div>
+
+<!-- ══════════ OVERVIEW ══════════ -->
+<div id="tab-overview" class="panel active">
+  <div class="evolution">
+    <div class="evo-title">能力演进路线</div>
+    <div class="evo-flow">
+      <div class="evo-step"><div class="evo-num">最简单</div><div class="evo-label c1-txt">Zero-shot</div></div>
+      <div class="evo-arrow">→</div>
+      <div class="evo-step"><div class="evo-num">加示例</div><div class="evo-label c2-txt">Few-shot</div></div>
+      <div class="evo-arrow">→</div>
+      <div class="evo-step"><div class="evo-num">加推理</div><div class="evo-label c3-txt">CoT</div></div>
+      <div class="evo-arrow">→</div>
+      <div class="evo-step"><div class="evo-num">加投票</div><div class="evo-label c4-txt">Self-Consistency</div></div>
+      <div class="evo-arrow">→</div>
+      <div class="evo-step"><div class="evo-num">加行动</div><div class="evo-label c5-txt">ReAct</div></div>
+    </div>
+  </div>
+
+  <div class="overview-grid">
+    <div class="ov-card" onclick="showTab('zeroshot')">
+      <div class="ov-card-head"><span class="ov-icon">🎯</span><span class="ov-name c1-txt">Zero-shot</span></div>
+      <div class="ov-desc">直接提问，不给任何示例。依赖模型预训练能力，成本最低。</div>
+      <div class="ov-badge c1-act">Token消耗：⭐☆☆☆☆ 最少</div>
+    </div>
+    <div class="ov-card" onclick="showTab('fewshot')">
+      <div class="ov-card-head"><span class="ov-icon">📚</span><span class="ov-name c2-txt">Few-shot</span></div>
+      <div class="ov-desc">提供 2~8 个示例，让模型学会输入→输出的模式和格式。</div>
+      <div class="ov-badge c2-act">Token消耗：⭐⭐☆☆☆ 较少</div>
+    </div>
+    <div class="ov-card" onclick="showTab('cot')">
+      <div class="ov-card-head"><span class="ov-icon">🧠</span><span class="ov-name c3-txt">Chain-of-Thought</span></div>
+      <div class="ov-desc">让模型"一步步想"，中间推理过程显式输出，大幅提升复杂推理准确率。</div>
+      <div class="ov-badge c3-act">Token消耗：⭐⭐⭐☆☆ 中等</div>
+    </div>
+    <div class="ov-card" onclick="showTab('sc')">
+      <div class="ov-card-head"><span class="ov-icon">🗳️</span><span class="ov-name c4-txt">Self-Consistency</span></div>
+      <div class="ov-desc">多次采样 CoT 路径，投票取最一致答案。牺牲成本换高准确率。</div>
+      <div class="ov-badge c4-act">Token消耗：⭐⭐⭐⭐⭐ 最多</div>
+    </div>
+    <div class="ov-card" style="grid-column:1/3" onclick="showTab('react')">
+      <div class="ov-card-head"><span class="ov-icon">🤖</span><span class="ov-name c5-txt">ReAct（Reason + Act）</span></div>
+      <div class="ov-desc">思考与行动交替：Thought → Action → Observation → Thought…，是 Agent 的核心范式。可调用外部工具（搜索/API/代码执行），解决 LLM 知识边界问题。</div>
+      <div class="ov-badge c5-act">Token消耗：⭐⭐⭐⭐☆ 多（但按需）</div>
+    </div>
+  </div>
+
+  <div style="max-width:900px;margin:16px auto 0;">
+    <div class="section">
+      <div class="sec-label">快速选型对比</div>
+      <table class="cmp-table">
+        <tr>
+          <th>范式</th><th>核心机制</th><th>适合任务</th><th>主要缺点</th>
+        </tr>
+        <tr>
+          <td class="c1-txt" style="font-weight:700">Zero-shot</td>
+          <td>直接指令</td>
+          <td>简单分类、摘要、通用问答</td>
+          <td>复杂任务准确率低</td>
+        </tr>
+        <tr>
+          <td class="c2-txt" style="font-weight:700">Few-shot</td>
+          <td>示例引导</td>
+          <td>特定格式输出、领域适配</td>
+          <td>示例质量影响大，占 Token</td>
+        </tr>
+        <tr>
+          <td class="c3-txt" style="font-weight:700">CoT</td>
+          <td>逐步推理</td>
+          <td>数学、逻辑、多步推理</td>
+          <td>输出更长，可能推理走偏</td>
+        </tr>
+        <tr>
+          <td class="c4-txt" style="font-weight:700">Self-Consistency</td>
+          <td>多路径投票</td>
+          <td>高精度要求的推理任务</td>
+          <td>成本 N 倍放大</td>
+        </tr>
+        <tr>
+          <td class="c5-txt" style="font-weight:700">ReAct</td>
+          <td>思考+工具调用</td>
+          <td>Agent、实时信息、多步操作</td>
+          <td>延迟高，需要工具支持</td>
+        </tr>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════ ZERO-SHOT ══════════ -->
+<div id="tab-zeroshot" class="panel">
+  <div class="panel-header c1-bg">
+    <div class="panel-icon">🎯</div>
+    <div class="panel-meta">
+      <div class="panel-name c1-txt">Zero-shot Prompting</div>
+      <div class="panel-tagline">不给任何示例，直接让模型完成任务。<br>依赖预训练时学到的通用能力，最简单也最常用。</div>
+    </div>
+  </div>
+  <div class="panel-body">
+
+    <div class="section">
+      <div class="sec-label">核心原理</div>
+      <div class="prompt-box"><span class="hl-system">[你只需要清晰描述任务]</span>
+
+<span class="hl-user">将下面的英文翻译成中文：
+"The quarterly report shows a 15% increase in revenue."</span>
+
+<span class="hl-ans">→ 季度报告显示收入增长了 15%。</span></div>
+    </div>
+
+    <div class="section">
+      <div class="sec-label">进阶：加角色 / 格式约束</div>
+      <div class="prompt-box"><span class="hl-system">你是一位资深的代码审查专家。</span>
+
+<span class="hl-user">审查以下 Python 代码，指出潜在问题，输出格式为 JSON：
+```python
+def get_user(id):
+    return db.query("SELECT * FROM users WHERE id=" + id)
+```</span>
+
+<span class="hl-ans">→ {"issues": [{"type": "SQL注入", "line": 2, "severity": "critical"}]}</span></div>
+    </div>
+
+    <div class="section">
+      <div class="when-grid">
+        <div class="when-card use">
+          <div class="when-title">✅ 适合用</div>
+          <ul>
+            <li>简单分类 / 情感分析</li>
+            <li>摘要 / 翻译</li>
+            <li>通用问答</li>
+            <li>格式转换（有明确规则）</li>
+            <li>快速原型验证</li>
+          </ul>
+        </div>
+        <div class="when-card skip">
+          <div class="when-title">❌ 不适合</div>
+          <ul>
+            <li>多步骤数学推理</li>
+            <li>需要特定输出风格</li>
+            <li>领域专业术语密集</li>
+            <li>小模型复杂任务</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+    <div class="metrics">
+      <div class="metric"><div class="metric-val c1-txt">⭐</div><div class="metric-key">Token 消耗</div></div>
+      <div class="metric"><div class="metric-val c1-txt">⚡</div><div class="metric-key">响应速度</div></div>
+      <div class="metric"><div class="metric-val c1-txt">中</div><div class="metric-key">复杂任务准确率</div></div>
+      <div class="metric"><div class="metric-val c1-txt">零</div><div class="metric-key">准备成本</div></div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════ FEW-SHOT ══════════ -->
+<div id="tab-fewshot" class="panel">
+  <div class="panel-header c2-bg">
+    <div class="panel-icon">📚</div>
+    <div class="panel-meta">
+      <div class="panel-name c2-txt">Few-shot Prompting</div>
+      <div class="panel-tagline">在 Prompt 里给 2~8 个示例（input→output），让模型学会模式。<br>比 Zero-shot 更精确，比微调更灵活。</div>
+    </div>
+  </div>
+  <div class="panel-body">
+
+    <div class="section">
+      <div class="sec-label">标准结构</div>
+      <div class="prompt-box"><span class="hl-system"># 示例 1</span>
+<span class="hl-user">输入：这个产品太棒了！</span>
+<span class="hl-ans">输出：正面</span>
+
+<span class="hl-system"># 示例 2</span>
+<span class="hl-user">输入：质量很差，不推荐。</span>
+<span class="hl-ans">输出：负面</span>
+
+<span class="hl-system"># 示例 3</span>
+<span class="hl-user">输入：还行，没有特别惊喜。</span>
+<span class="hl-ans">输出：中性</span>
+
+<span class="hl-system"># 待预测</span>
+<span class="hl-user">输入：物流速度可以，但包装损坏了。</span>
+<span class="hl-ans">输出：→ 负面</span></div>
+    </div>
+
+    <div class="section">
+      <div class="sec-label">示例选择技巧（影响效果最大）</div>
+      <div class="prompt-box"><span class="hl-think">技巧 1：示例要覆盖边界情况，不要只给"典型正确"
+技巧 2：示例格式要和期望输出格式完全一致
+技巧 3：示例数量：2~8 个，太多反而干扰（特别是小模型）
+技巧 4：示例顺序有影响 — 最后一个示例权重最高（近因效应）
+技巧 5：动态 Few-shot：从向量库里检索和当前 query 最相似的示例</span></div>
+    </div>
+
+    <div class="section">
+      <div class="when-grid">
+        <div class="when-card use">
+          <div class="when-title">✅ 适合用</div>
+          <ul>
+            <li>特定格式输出（JSON/表格）</li>
+            <li>领域特定分类</li>
+            <li>风格迁移、语气统一</li>
+            <li>小模型能力提升</li>
+            <li>没有微调资源时</li>
+          </ul>
+        </div>
+        <div class="when-card skip">
+          <div class="when-title">❌ 注意</div>
+          <ul>
+            <li>示例太少且质量差 → 比 Zero-shot 更差</li>
+            <li>示例有偏差 → 模型会学偏</li>
+            <li>Context 窗口有限时要节省</li>
+            <li>推理类任务建议配合 CoT</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+    <div class="metrics">
+      <div class="metric"><div class="metric-val c2-txt">⭐⭐</div><div class="metric-key">Token 消耗</div></div>
+      <div class="metric"><div class="metric-val c2-txt">高</div><div class="metric-key">格式控制力</div></div>
+      <div class="metric"><div class="metric-val c2-txt">中高</div><div class="metric-key">分类准确率</div></div>
+      <div class="metric"><div class="metric-val c2-txt">低</div><div class="metric-key">准备成本</div></div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════ COT ══════════ -->
+<div id="tab-cot" class="panel">
+  <div class="panel-header c3-bg">
+    <div class="panel-icon">🧠</div>
+    <div class="panel-meta">
+      <div class="panel-name c3-txt">Chain-of-Thought (CoT)</div>
+      <div class="panel-tagline">让模型把中间推理步骤显式写出来，再给出最终答案。<br>Google 2022 年论文证明：CoT 能让复杂推理准确率提升 50%+。</div>
+    </div>
+  </div>
+  <div class="panel-body">
+
+    <div class="section">
+      <div class="sec-label">Zero-shot CoT（最简单：加一句话）</div>
+      <div class="prompt-box"><span class="hl-user">Roger 有 5 个网球，又买了 2 罐，每罐 3 个。他现在共有多少个？</span>
+
+<span class="hl-system">让我们一步步思考。</span>   <span class="hl-think">← 这句话就够了！</span>
+
+<span class="hl-think">Roger 原有 5 个。
+买了 2 罐 × 每罐 3 个 = 6 个。
+5 + 6 = 11 个。</span>
+
+<span class="hl-ans">答案：11 个。</span></div>
+    </div>
+
+    <div class="section">
+      <div class="sec-label">Few-shot CoT（示例里直接展示推理过程）</div>
+      <div class="prompt-box"><span class="hl-system"># 示例</span>
+<span class="hl-user">Q：食堂早上有 23 个苹果，用了 20 个做午饭，又买了 6 个，还剩几个？</span>
+<span class="hl-think">A：开始有 23 个。做午饭用了 20 个，还剩 23-20=3 个。
+  又买了 6 个，共 3+6=9 个。</span>
+<span class="hl-ans">答案：9 个。</span>
+
+<span class="hl-system"># 问题</span>
+<span class="hl-user">Q：停车场有 3 排，每排 10 辆，走了 7 辆来了 2 辆，现在多少辆？</span>
+<span class="hl-think">A：原有 3×10=30 辆。走了 7 辆剩 23 辆。来了 2 辆共 25 辆。</span>
+<span class="hl-ans">答案：25 辆。</span></div>
+    </div>
+
+    <div class="section">
+      <div class="sec-label">为什么有效？</div>
+      <div class="prompt-box"><span class="hl-think">直接回答：模型必须在一次 forward pass 里"压缩"所有推理
+写出步骤：每个 token 生成时都能"看到"前面的推理结果
+            → 把复杂问题分解成一系列简单问题
+            → 可解释、可调试、错误可追溯</span></div>
+    </div>
+
+    <div class="section">
+      <div class="when-grid">
+        <div class="when-card use">
+          <div class="when-title">✅ 最有效场景</div>
+          <ul>
+            <li>数学应用题 / 计算推理</li>
+            <li>逻辑题 / 因果分析</li>
+            <li>代码 debug（写出排查思路）</li>
+            <li>医疗/法律诊断推理</li>
+            <li>多步骤规划</li>
+          </ul>
+        </div>
+        <div class="when-card skip">
+          <div class="when-title">❌ 效果有限</div>
+          <ul>
+            <li>简单分类任务（过度设计）</li>
+            <li>小于 7B 的小模型</li>
+            <li>对延迟敏感的场景</li>
+            <li>纯事实检索（配合 RAG 更好）</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+    <div class="metrics">
+      <div class="metric"><div class="metric-val c3-txt">⭐⭐⭐</div><div class="metric-key">Token 消耗</div></div>
+      <div class="metric"><div class="metric-val c3-txt">+50%</div><div class="metric-key">复杂推理提升</div></div>
+      <div class="metric"><div class="metric-val c3-txt">高</div><div class="metric-key">可解释性</div></div>
+      <div class="metric"><div class="metric-val c3-txt">极低</div><div class="metric-key">实现成本</div></div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════ SELF-CONSISTENCY ══════════ -->
+<div id="tab-sc" class="panel">
+  <div class="panel-header c4-bg">
+    <div class="panel-icon">🗳️</div>
+    <div class="panel-meta">
+      <div class="panel-name c4-txt">Self-Consistency</div>
+      <div class="panel-tagline">多次运行 CoT（高 Temperature），得到多条推理路径，<br>对最终答案投票取最多数。用冗余换准确率。</div>
+    </div>
+  </div>
+  <div class="panel-body">
+
+    <div class="section">
+      <div class="sec-label">核心流程</div>
+      <div class="flow">
+        <div class="flow-node c4-act">同一问题</div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-node" style="background:#1a1d27;color:#64748b;border:1px solid #2a2d3a">×N 次采样<br><span style="font-size:10px">T=0.7~1.0</span></div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-node" style="background:#1a1d27;color:#64748b;border:1px solid #2a2d3a">N 条推理路径</div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-node" style="background:#1a1d27;color:#64748b;border:1px solid #2a2d3a">提取各路径答案</div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-node c4-act">多数票✓</div>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="sec-label">示例：同一道题三条推理路径</div>
+      <div class="prompt-box"><span class="hl-system">Q：一件衣服原价 200，打八折后再优惠 20 元，最终价格？</span>
+
+<span class="hl-think">路径 A：200×0.8=160，160-20=140 ✓ → 答案：140</span>
+<span class="hl-think">路径 B：200×0.8=160，再减20，160-20=140 ✓ → 答案：140</span>
+<span class="hl-think">路径 C：八折是160，优惠券20，最终140元 ✓  → 答案：140</span>
+
+<span class="hl-ans">投票结果：140（3/3）→ 最终答案：140 元 ✅</span>
+
+<span class="hl-system">--- 如果路径C走偏了 ---</span>
+<span class="hl-think">路径 C'：200-20=180，再打八折=144 ✗  → 答案：144</span>
+<span class="hl-ans">投票结果：140（2票）vs 144（1票）→ 仍选 140 ✅</span></div>
+    </div>
+
+    <div class="section">
+      <div class="sec-label">N 次采样如何选择？</div>
+      <div class="prompt-box"><span class="hl-think">N=3：低成本，错误容忍度一般（1/3 错误会被纠正）
+N=5：平衡点，论文中常用值
+N=10+：高准确率，适合关键决策，成本显著上升
+
+经验法则：先用 CoT+N=1 评估基础准确率
+  - 基础准确率 <60%：问题出在 Prompt，不是采样次数
+  - 基础准确率 60-80%：N=5 有明显提升
+  - 基础准确率 >80%：N=3 够用，成本收益更好</span></div>
+    </div>
+
+    <div class="section">
+      <div class="when-grid">
+        <div class="when-card use">
+          <div class="when-title">✅ 值得用</div>
+          <ul>
+            <li>高精度数学/逻辑推理</li>
+            <li>医疗诊断辅助决策</li>
+            <li>金融风险计算</li>
+            <li>考试题自动评分</li>
+            <li>离线批处理任务</li>
+          </ul>
+        </div>
+        <div class="when-card skip">
+          <div class="when-title">❌ 不适合</div>
+          <ul>
+            <li>实时对话（延迟 N 倍）</li>
+            <li>成本敏感项目</li>
+            <li>开放性创意任务（无唯一答案）</li>
+            <li>简单任务（浪费）</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+    <div class="metrics">
+      <div class="metric"><div class="metric-val c4-txt">⭐⭐⭐⭐⭐</div><div class="metric-key">Token 消耗</div></div>
+      <div class="metric"><div class="metric-val c4-txt">+17%</div><div class="metric-key">准确率提升（vs CoT）</div></div>
+      <div class="metric"><div class="metric-val c4-txt">N×</div><div class="metric-key">成本倍数</div></div>
+      <div class="metric"><div class="metric-val c4-txt">强</div><div class="metric-key">抗错误鲁棒性</div></div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════ REACT ══════════ -->
+<div id="tab-react" class="panel">
+  <div class="panel-header c5-bg">
+    <div class="panel-icon">🤖</div>
+    <div class="panel-meta">
+      <div class="panel-name c5-txt">ReAct（Reason + Act）</div>
+      <div class="panel-tagline">推理与行动交替进行：Thought → Action → Observation → Thought…<br>是现代 AI Agent 的核心范式，解决 LLM 知识静态问题。</div>
+    </div>
+  </div>
+  <div class="panel-body">
+
+    <div class="section">
+      <div class="sec-label">完整交互示例</div>
+      <div class="prompt-box"><span class="hl-user">Q：Claude Sonnet 4 的最大 Context Window 是多少？现在是否支持 Vision？</span>
+
+<span class="hl-think">Thought 1：这是关于最新模型的问题，我的训练数据可能过时，
+           需要查询最新文档。</span>
+<span class="hl-act">Action 1：web_search("Claude Sonnet 4 context window vision 2025")</span>
+<span class="hl-obs">Observation 1：搜索返回 Anthropic 官方文档，显示相关规格...</span>
+
+<span class="hl-think">Thought 2：已获得官方数据，可以整合回答用户问题了。</span>
+<span class="hl-act">Action 2：web_fetch("https://docs.anthropic.com/...")</span>
+<span class="hl-obs">Observation 2：获取详细规格页面内容...</span>
+
+<span class="hl-think">Thought 3：信息充足，现在可以给出准确答案。</span>
+<span class="hl-ans">Answer：根据最新官方文档，[具体数据]...</span></div>
+    </div>
+
+    <div class="section">
+      <div class="sec-label">循环结构</div>
+      <div class="flow">
+        <div class="flow-node c5-act">问题</div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-node" style="background:#1e3a2a;color:#fbbf24;border:1px solid #d97706">💭 Thought<br><span style="font-size:10px">推理/规划</span></div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-node" style="background:#1e3a2a;color:#34d399;border:1px solid #059669">⚡ Action<br><span style="font-size:10px">调用工具</span></div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-node" style="background:#1e3a2a;color:#fb923c;border:1px solid #ea580c">👁 Observation<br><span style="font-size:10px">工具返回</span></div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-node c5-act">最终答案<br><span style="font-size:10px">或继续循环</span></div>
+        <div class="flow-loop">↩ 循环直到任务完成</div>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="sec-label">可接入的 Action（工具）类型</div>
+      <div class="prompt-box"><span class="hl-act">搜索类：</span>  web_search / RAG 检索 / 数据库查询
+<span class="hl-act">执行类：</span>  Python 代码执行 / Shell 命令 / API 调用
+<span class="hl-act">读写类：</span>  文件读写 / 数据库增删改查 / 邮件发送
+<span class="hl-act">感知类：</span>  截图分析 / 浏览器操控 / 表单填写
+<span class="hl-act">协作类：</span>  调用其他 Agent / 子任务委派</div>
+    </div>
+
+    <div class="section">
+      <div class="sec-label">vs 纯 CoT 的核心区别</div>
+      <div class="prompt-box"><span class="hl-think">纯 CoT：</span>  知识来自模型参数，可能过时/幻觉，无法执行操作
+<span class="hl-act">ReAct：</span>   知识来自实时工具，准确且可追溯，能改变外部世界
+
+<span class="hl-think">纯 CoT 回答"今天 A 股涨了多少"：可能编造数据 ❌</span>
+<span class="hl-act">ReAct 回答"今天 A 股涨了多少"：调用股票 API → 真实数据 ✅</span></div>
+    </div>
+
+    <div class="section">
+      <div class="when-grid">
+        <div class="when-card use">
+          <div class="when-title">✅ ReAct 的主场</div>
+          <ul>
+            <li>需要实时信息的问答</li>
+            <li>多步骤自动化任务</li>
+            <li>代码生成 + 执行验证</li>
+            <li>AI Agent / 工作流自动化</li>
+            <li>你们的 ai-service 健康助手</li>
+          </ul>
+        </div>
+        <div class="when-card skip">
+          <div class="when-title">❌ 注意事项</div>
+          <ul>
+            <li>工具调用失败需要错误处理</li>
+            <li>循环次数需要有上限（防死循环）</li>
+            <li>延迟比纯生成高</li>
+            <li>工具权限要严格控制</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+    <div class="metrics">
+      <div class="metric"><div class="metric-val c5-txt">⭐⭐⭐⭐</div><div class="metric-key">Token 消耗</div></div>
+      <div class="metric"><div class="metric-val c5-txt">∞</div><div class="metric-key">知识边界</div></div>
+      <div class="metric"><div class="metric-val c5-txt">Agent</div><div class="metric-key">核心范式</div></div>
+      <div class="metric"><div class="metric-val c5-txt">高</div><div class="metric-key">实现复杂度</div></div>
+    </div>
+  </div>
+</div>
+
+<script>
+function showTab(id) {
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.getElementById('tab-' + id).classList.add('active');
+  event.target.classList.add('active');
+}
+</script>
+</body>
+</html>

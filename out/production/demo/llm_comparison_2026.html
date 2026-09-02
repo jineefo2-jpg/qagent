@@ -1,0 +1,577 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  background: #0a0c14;
+  color: #e2e8f0;
+  padding: 28px 20px 48px;
+}
+h1 { text-align: center; font-size: 21px; font-weight: 800; color: #fff; margin-bottom: 4px; }
+.subtitle { text-align: center; font-size: 12px; color: #64748b; margin-bottom: 6px; }
+.updated { text-align: center; font-size: 11px; color: #374151; margin-bottom: 24px; }
+
+/* TABS */
+.tabs { display: flex; gap: 6px; max-width: 980px; margin: 0 auto 20px; flex-wrap: wrap; justify-content: center; }
+.tab { padding: 7px 16px; border-radius: 8px; font-size: 12px; font-weight: 700; cursor: pointer; border: 1.5px solid #1e2235; background: #131620; color: #64748b; transition: all 0.2s; }
+.tab:hover { color: #94a3b8; border-color: #2a3050; }
+.tab.active { background: #1e2235; color: #e2e8f0; border-color: #3b4fd8; }
+
+/* PANELS */
+.panel { display: none; max-width: 980px; margin: 0 auto; }
+.panel.active { display: block; }
+
+/* PRICE TABLE */
+.price-section { margin-bottom: 24px; }
+.sec-title { font-size: 11px; font-weight: 700; letter-spacing: 1.2px; text-transform: uppercase; color: #64748b; margin-bottom: 10px; padding-left: 2px; }
+
+.model-grid { display: flex; flex-direction: column; gap: 6px; }
+.model-row {
+  background: #131620;
+  border: 1px solid #1e2235;
+  border-radius: 10px;
+  padding: 12px 16px;
+  display: grid;
+  grid-template-columns: 200px 80px 80px 80px 1fr 120px;
+  align-items: center;
+  gap: 8px;
+  transition: border-color 0.15s;
+}
+.model-row:hover { border-color: #2a3050; }
+.model-row.header {
+  background: #0a0c14;
+  border-color: #0a0c14;
+  padding: 4px 16px;
+}
+.model-row.header .col { font-size: 10px; font-weight: 700; letter-spacing: 0.8px; text-transform: uppercase; color: #374151; }
+
+.col { font-size: 12px; }
+.col-name { font-weight: 700; font-size: 13px; }
+.col-price { font-family: 'Courier New', monospace; font-size: 11.5px; }
+.col-in { color: #34d399; }
+.col-out { color: #f87171; }
+.col-ctx { color: #60a5fa; font-size: 11px; }
+
+/* BADGE */
+.badge {
+  display: inline-block;
+  padding: 2px 7px;
+  border-radius: 4px;
+  font-size: 10.5px;
+  font-weight: 700;
+  line-height: 1.6;
+}
+.badge-anthropic { background: #1e2a50; color: #818cf8; }
+.badge-openai    { background: #1a2e1e; color: #4ade80; }
+.badge-google    { background: #2a2010; color: #fbbf24; }
+.badge-deepseek  { background: #1e2a3a; color: #38bdf8; }
+.badge-domestic  { background: #2a1e3a; color: #c084fc; }
+.badge-open      { background: #1e3a2a; color: #34d399; border: 1px solid #166534; }
+
+/* STRENGTH DOTS */
+.dots { display: flex; gap: 3px; }
+.dot { width: 9px; height: 9px; border-radius: 2px; }
+.dot.on  { background: #4ade80; }
+.dot.half{ background: #fbbf24; }
+.dot.off { background: #1e2235; }
+
+/* RECOMMEND */
+.rec-tag {
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: #1e3a5f;
+  color: #60a5fa;
+  border: 1px solid #2563eb;
+  white-space: nowrap;
+}
+.rec-tag.hot { background: #3a1e1e; color: #f87171; border-color: #dc2626; }
+.rec-tag.green { background: #1e3a2a; color: #4ade80; border-color: #166534; }
+.rec-tag.purple { background: #2d1e4a; color: #a78bfa; border-color: #7c3aed; }
+.rec-tag.yellow { background: #3a2e1e; color: #fbbf24; border-color: #d97706; }
+
+/* BENCHMARK CHART */
+.bench-wrap { background: #131620; border: 1px solid #1e2235; border-radius: 12px; padding: 20px; margin-bottom: 16px; }
+.bench-title { font-size: 12.5px; font-weight: 700; color: #94a3b8; margin-bottom: 14px; }
+.bench-row { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+.bench-label { width: 140px; font-size: 11.5px; color: #94a3b8; flex-shrink: 0; text-align: right; }
+.bench-bar-bg { flex: 1; height: 18px; background: #0a0c14; border-radius: 4px; overflow: hidden; position: relative; }
+.bench-bar { height: 100%; border-radius: 4px; display: flex; align-items: center; padding-left: 8px; font-size: 10.5px; font-weight: 700; color: #fff; min-width: 30px; transition: width 0.6s; }
+.bench-score { width: 44px; font-size: 11px; color: #64748b; font-family: monospace; flex-shrink: 0; }
+
+/* SCATTER PLACEHOLDER */
+.scatter-wrap {
+  background: #131620;
+  border: 1px solid #1e2235;
+  border-radius: 12px;
+  padding: 20px;
+  margin-bottom: 16px;
+  position: relative;
+}
+.scatter-title { font-size: 12.5px; font-weight: 700; color: #94a3b8; margin-bottom: 8px; }
+.scatter-sub { font-size: 11px; color: #374151; margin-bottom: 16px; }
+.scatter-canvas { position: relative; width: 100%; height: 260px; border-left: 1px solid #1e2235; border-bottom: 1px solid #1e2235; }
+.scatter-dot {
+  position: absolute;
+  border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 9px; font-weight: 700; color: #fff;
+  cursor: default;
+  transform: translate(-50%, 50%);
+  transition: transform 0.2s;
+}
+.scatter-dot:hover { transform: translate(-50%, 50%) scale(1.3); z-index: 10; }
+.scatter-dot .dot-tip {
+  display: none;
+  position: absolute;
+  bottom: 120%;
+  left: 50%;
+  transform: translateX(-50%);
+  background: #1e2235;
+  border: 1px solid #2a3050;
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 11px;
+  white-space: nowrap;
+  color: #e2e8f0;
+  z-index: 20;
+}
+.scatter-dot:hover .dot-tip { display: block; }
+.axis-x { position: absolute; bottom: -22px; width: 100%; text-align: center; font-size: 10px; color: #374151; }
+.axis-y { position: absolute; left: -60px; top: 50%; transform: translateY(-50%) rotate(-90deg); font-size: 10px; color: #374151; white-space: nowrap; }
+.axis-ticks-x { display: flex; justify-content: space-between; padding: 0 0; margin-top: 4px; }
+.axis-ticks-x span { font-size: 9px; color: #374151; }
+
+/* SELECTION GUIDE */
+.guide-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.guide-card { background: #131620; border: 1px solid #1e2235; border-radius: 10px; padding: 16px 18px; }
+.guide-scenario { font-size: 13px; font-weight: 700; margin-bottom: 10px; }
+.guide-pick { font-size: 12px; font-weight: 700; margin-bottom: 4px; }
+.guide-reason { font-size: 11.5px; color: #64748b; line-height: 1.6; }
+.guide-alt { font-size: 11px; color: #374151; margin-top: 6px; }
+
+/* NOTE */
+.note { font-size: 11px; color: #374151; margin-top: 16px; text-align: center; line-height: 1.6; }
+</style>
+</head>
+<body>
+
+<h1>🌐 主流大模型能力 & 价格对比</h1>
+<p class="subtitle">Claude · GPT · Gemini · DeepSeek · 国产模型 — 数据截至 2026 年 5 月</p>
+<p class="updated">数据来源：各厂商官方定价页 / SWE-bench / MMLU / Chatbot Arena Elo</p>
+
+<div class="tabs">
+  <div class="tab active" onclick="show('price')">💰 价格对比</div>
+  <div class="tab" onclick="show('bench')">📊 能力 Benchmark</div>
+  <div class="tab" onclick="show('scatter')">🎯 性价比图谱</div>
+  <div class="tab" onclick="show('guide')">🧭 选型指南</div>
+</div>
+
+<!-- ══════ PRICE ══════ -->
+<div class="panel active" id="p-price">
+  <!-- Anthropic -->
+  <div class="price-section">
+    <div class="sec-title">🟣 Anthropic Claude</div>
+    <div class="model-grid">
+      <div class="model-row header">
+        <div class="col">模型</div><div class="col">输入</div><div class="col">输出</div><div class="col">上下文</div><div class="col">特点</div><div class="col">推荐场景</div>
+      </div>
+      <div class="model-row">
+        <div class="col col-name"><span class="badge badge-anthropic">Anthropic</span><br>Claude Opus 4.6</div>
+        <div class="col col-price col-in">$5.00/M</div>
+        <div class="col col-price col-out">$25.00/M</div>
+        <div class="col col-ctx">200K</div>
+        <div class="col" style="color:#94a3b8;font-size:11.5px">SWE-bench 80.8%，推理+编码顶级，支持 Computer Use</div>
+        <div class="col"><span class="rec-tag purple">Agent / 复杂任务</span></div>
+      </div>
+      <div class="model-row">
+        <div class="col col-name"><span class="badge badge-anthropic">Anthropic</span><br>Claude Sonnet 4.6</div>
+        <div class="col col-price col-in">$3.00/M</div>
+        <div class="col col-price col-out">$15.00/M</div>
+        <div class="col col-ctx">200K/1M↑</div>
+        <div class="col" style="color:#94a3b8;font-size:11.5px">SWE-bench 79.6%，最佳旗舰性价比，长文本+代码强</div>
+        <div class="col"><span class="rec-tag">通用首选</span></div>
+      </div>
+      <div class="model-row">
+        <div class="col col-name"><span class="badge badge-anthropic">Anthropic</span><br>Claude Haiku 4.5</div>
+        <div class="col col-price col-in">$1.00/M</div>
+        <div class="col col-price col-out">$5.00/M</div>
+        <div class="col col-ctx">200K</div>
+        <div class="col" style="color:#94a3b8;font-size:11.5px">快速轻量，适合高并发、分类、摘要等简单任务</div>
+        <div class="col"><span class="rec-tag green">高并发/低成本</span></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- OpenAI -->
+  <div class="price-section">
+    <div class="sec-title">🟢 OpenAI GPT</div>
+    <div class="model-grid">
+      <div class="model-row header">
+        <div class="col">模型</div><div class="col">输入</div><div class="col">输出</div><div class="col">上下文</div><div class="col">特点</div><div class="col">推荐场景</div>
+      </div>
+      <div class="model-row">
+        <div class="col col-name"><span class="badge badge-openai">OpenAI</span><br>GPT-5.4</div>
+        <div class="col col-price col-in">$2.50/M</div>
+        <div class="col col-price col-out">$15.00/M</div>
+        <div class="col col-ctx">400K</div>
+        <div class="col" style="color:#94a3b8;font-size:11.5px">全能均衡，工具调用可靠，最大生态（插件/GPT Store）</div>
+        <div class="col"><span class="rec-tag">通用/生态</span></div>
+      </div>
+      <div class="model-row">
+        <div class="col col-name"><span class="badge badge-openai">OpenAI</span><br>GPT-5.5</div>
+        <div class="col col-price col-in">$5.00/M</div>
+        <div class="col col-price col-out">$25.00/M</div>
+        <div class="col col-ctx">400K</div>
+        <div class="col" style="color:#94a3b8;font-size:11.5px">旗舰多模态，Computer Use 75% OSWorld</div>
+        <div class="col"><span class="rec-tag hot">多模态/企业级</span></div>
+      </div>
+      <div class="model-row">
+        <div class="col col-name"><span class="badge badge-openai">OpenAI</span><br>o3 / o4-mini</div>
+        <div class="col col-price col-in">$10+/M</div>
+        <div class="col col-price col-out">$40+/M</div>
+        <div class="col col-ctx">200K</div>
+        <div class="col" style="color:#94a3b8;font-size:11.5px">推理专用，数学/科学/竞赛题，思考 Token 另计费</div>
+        <div class="col"><span class="rec-tag hot">硬核推理</span></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Google -->
+  <div class="price-section">
+    <div class="sec-title">🟡 Google Gemini</div>
+    <div class="model-grid">
+      <div class="model-row header">
+        <div class="col">模型</div><div class="col">输入</div><div class="col">输出</div><div class="col">上下文</div><div class="col">特点</div><div class="col">推荐场景</div>
+      </div>
+      <div class="model-row">
+        <div class="col col-name"><span class="badge badge-google">Google</span><br>Gemini 3.1 Pro</div>
+        <div class="col col-price col-in">$2.00/M</div>
+        <div class="col col-price col-out">$12.00/M</div>
+        <div class="col col-ctx">1M</div>
+        <div class="col" style="color:#94a3b8;font-size:11.5px">MMLU 94.1% 最高，速度 120 tok/s，性价比最强旗舰</div>
+        <div class="col"><span class="rec-tag yellow">性价比旗舰</span></div>
+      </div>
+      <div class="model-row">
+        <div class="col col-name"><span class="badge badge-google">Google</span><br>Gemini 2.5 Flash</div>
+        <div class="col col-price col-in">$0.30/M</div>
+        <div class="col col-price col-out">$2.50/M</div>
+        <div class="col col-ctx">1M</div>
+        <div class="col" style="color:#94a3b8;font-size:11.5px">超低价+百万上下文，Google 全家桶深度整合</div>
+        <div class="col"><span class="rec-tag green">大上下文/低价</span></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 国产 -->
+  <div class="price-section">
+    <div class="sec-title">🔵 DeepSeek & 国产模型</div>
+    <div class="model-grid">
+      <div class="model-row header">
+        <div class="col">模型</div><div class="col">输入</div><div class="col">输出</div><div class="col">上下文</div><div class="col">特点</div><div class="col">推荐场景</div>
+      </div>
+      <div class="model-row">
+        <div class="col col-name"><span class="badge badge-deepseek">DeepSeek</span><br>V3 / V4 Flash</div>
+        <div class="col col-price col-in">$0.14/M</div>
+        <div class="col col-price col-out">$0.28/M</div>
+        <div class="col col-ctx">128K</div>
+        <div class="col" style="color:#94a3b8;font-size:11.5px">全球最低价，SWE-bench 72-74%，开源可私有化部署</div>
+        <div class="col"><span class="rec-tag green">极致省钱</span></div>
+      </div>
+      <div class="model-row">
+        <div class="col col-name"><span class="badge badge-deepseek">DeepSeek</span><br>R2（推理）</div>
+        <div class="col col-price col-in">$0.28/M</div>
+        <div class="col col-price col-out">$1.10/M</div>
+        <div class="col col-ctx">128K</div>
+        <div class="col" style="color:#94a3b8;font-size:11.5px">推理专用，媲美 o3，成本仅为 1/10</div>
+        <div class="col"><span class="rec-tag green">低价推理</span></div>
+      </div>
+      <div class="model-row">
+        <div class="col col-name"><span class="badge badge-domestic">Qwen 3.5</span><br>通义千问</div>
+        <div class="col col-price col-in">~$0.30/M</div>
+        <div class="col col-price col-out">~$1.20/M</div>
+        <div class="col col-ctx">128K</div>
+        <div class="col" style="color:#94a3b8;font-size:11.5px">SWE-bench 76.4%，中文最强，阿里云全家桶支持</div>
+        <div class="col"><span class="rec-tag purple">中文/国内合规</span></div>
+      </div>
+      <div class="model-row">
+        <div class="col col-name"><span class="badge badge-domestic">Kimi K2.5</span><br>月之暗面</div>
+        <div class="col col-price col-in">~$0.95/M</div>
+        <div class="col col-price col-out">~$3.80/M</div>
+        <div class="col col-ctx">200K</div>
+        <div class="col" style="color:#94a3b8;font-size:11.5px">SWE-bench 76.8%，超长上下文文档处理国内最强</div>
+        <div class="col"><span class="rec-tag purple">长文档/国内</span></div>
+      </div>
+      <div class="model-row">
+        <div class="col col-name"><span class="badge badge-open">MiniMax M2.5</span><br>开源</div>
+        <div class="col col-price col-in">$0.30/M</div>
+        <div class="col col-price col-out">$1.20/M</div>
+        <div class="col col-ctx">128K</div>
+        <div class="col" style="color:#94a3b8;font-size:11.5px">SWE-bench 80.2%，开源模型中最高，MoE 架构</div>
+        <div class="col"><span class="rec-tag green">开源最强</span></div>
+      </div>
+      <div class="model-row">
+        <div class="col col-name"><span class="badge badge-domestic">GLM-5</span><br>智谱 AI</div>
+        <div class="col col-price col-in">~$0.50/M</div>
+        <div class="col col-price col-out">~$2.00/M</div>
+        <div class="col col-ctx">128K</div>
+        <div class="col" style="color:#94a3b8;font-size:11.5px">SWE-bench 77.8%，国内首家上市 AI 公司，企业合规强</div>
+        <div class="col"><span class="rec-tag purple">国企/政府项目</span></div>
+      </div>
+    </div>
+  </div>
+  <p class="note">⚠️ 价格单位：美元 / 百万 Token（输入/输出）· 价格频繁变动，建议以各厂商官网实时价格为准 · 1 USD ≈ 7.2 CNY</p>
+</div>
+
+<!-- ══════ BENCHMARK ══════ -->
+<div class="panel" id="p-bench">
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">
+
+    <!-- SWE-bench -->
+    <div class="bench-wrap">
+      <div class="bench-title">🔧 SWE-bench Verified — 真实 GitHub Bug 修复率</div>
+      <div id="swe"></div>
+      <div style="font-size:10.5px;color:#374151;margin-top:10px">满分 100%，测试模型修复真实开源 Issue 的能力，是代码能力最权威基准</div>
+    </div>
+
+    <!-- MMLU -->
+    <div class="bench-wrap">
+      <div class="bench-title">📚 MMLU — 综合知识理解（57 学科）</div>
+      <div id="mmlu"></div>
+      <div style="font-size:10.5px;color:#374151;margin-top:10px">涵盖数学、科学、法律、医学等，满分 100%，反映模型通用知识广度</div>
+    </div>
+
+    <!-- GPQA -->
+    <div class="bench-wrap">
+      <div class="bench-title">🔬 GPQA Diamond — 博士级科学推理</div>
+      <div id="gpqa"></div>
+      <div style="font-size:10.5px;color:#374151;margin-top:10px">198 道博士级生物/化学/物理题，人类专家约 65%，随机猜约 25%</div>
+    </div>
+
+    <!-- Speed -->
+    <div class="bench-wrap">
+      <div class="bench-title">⚡ 推理速度 — 输出 Tokens/秒（越高越快）</div>
+      <div id="speed"></div>
+      <div style="font-size:10.5px;color:#374151;margin-top:10px">实时对话场景关键指标，数值越高响应越快，影响用户体验</div>
+    </div>
+  </div>
+
+  <div class="note" style="margin-top:8px">⚠️ 数据来自 2026 年 3~5 月公开评测，部分为厂商自测数据，仅供参考。同一 Benchmark 不同评估脚手架结果可能相差 5~15%</div>
+</div>
+
+<!-- ══════ SCATTER ══════ -->
+<div class="panel" id="p-scatter">
+  <div class="scatter-wrap" style="padding-bottom:60px">
+    <div class="scatter-title">🎯 价格 vs 编码能力 散点图</div>
+    <div class="scatter-sub">X 轴：API 输入价格（$/ 百万 Token，越左越便宜）· Y 轴：SWE-bench 编码得分（越上越强）</div>
+    <div style="position:relative; padding-left:60px;">
+      <div class="axis-y">← 编码能力弱 &nbsp;&nbsp;&nbsp; SWE-bench 编码能力 &nbsp;&nbsp;&nbsp; 强 →</div>
+      <div class="scatter-canvas" id="scatterCanvas"></div>
+      <div class="axis-ticks-x" style="padding:0 0 0 0;margin-top:6px;">
+        <span>$0（免费）</span><span>$1</span><span>$2</span><span>$3</span><span>$5+</span>
+      </div>
+      <div style="text-align:center;font-size:10px;color:#374151;margin-top:4px">API 输入价格（$/百万 Token）→ 越贵</div>
+    </div>
+  </div>
+
+  <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-top:0;">
+    <div style="background:#131620;border:1px solid #1e2235;border-radius:8px;padding:14px;">
+      <div style="font-size:11px;font-weight:700;color:#4ade80;margin-bottom:6px">🏆 最优性价比区间</div>
+      <div style="font-size:11.5px;color:#64748b;line-height:1.6">右上方 = 贵但强<br>左上方 = <span style="color:#4ade80;font-weight:700">便宜且强</span> ← 目标区域<br>左下方 = 便宜但弱<br>右下方 = 贵且弱（避开）</div>
+    </div>
+    <div style="background:#131620;border:1px solid #1e2235;border-radius:8px;padding:14px;">
+      <div style="font-size:11px;font-weight:700;color:#60a5fa;margin-bottom:6px">📌 2026 关键趋势</div>
+      <div style="font-size:11.5px;color:#64748b;line-height:1.6">国产模型（MiniMax / Kimi）SWE-bench 已接近 Claude Opus，但价格仅 1/10 ~ 1/20</div>
+    </div>
+    <div style="background:#131620;border:1px solid #1e2235;border-radius:8px;padding:14px;">
+      <div style="font-size:11px;font-weight:700;color:#fbbf24;margin-bottom:6px">💡 实战建议</div>
+      <div style="font-size:11.5px;color:#64748b;line-height:1.6">80% 流量走 DeepSeek/Haiku，20% 复杂任务走 Sonnet/Opus，综合成本降低 60-80%</div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════ GUIDE ══════ -->
+<div class="panel" id="p-guide">
+  <div class="guide-grid">
+    <div class="guide-card">
+      <div class="guide-scenario">🤖 Agent / 复杂自动化</div>
+      <div class="guide-pick" style="color:#a78bfa">首选：Claude Sonnet 4.6 / Opus 4.6</div>
+      <div class="guide-reason">SWE-bench 最高，原生 Computer Use + Extended Thinking，工具调用最稳定，Claude Code 是当前 SWE-bench 最高分工具（~80.9%）</div>
+      <div class="guide-alt">次选：GPT-5.4（工具调用可靠，生态最全）</div>
+    </div>
+    <div class="guide-card">
+      <div class="guide-scenario">💰 成本敏感 / 高并发</div>
+      <div class="guide-pick" style="color:#4ade80">首选：DeepSeek V4 Flash</div>
+      <div class="guide-reason">$0.14/M 输入，约为 Claude Sonnet 的 1/20，SWE-bench 72-74%，多数日常任务够用，开源可私有化部署</div>
+      <div class="guide-alt">次选：Gemini 2.5 Flash（$0.30/M，百万上下文）</div>
+    </div>
+    <div class="guide-card">
+      <div class="guide-scenario">🇨🇳 国内合规 / 中文任务</div>
+      <div class="guide-pick" style="color:#c084fc">首选：Qwen 3.5 / DeepSeek</div>
+      <div class="guide-reason">国内节点无需代理，支持支付宝付款，Qwen 中文能力国际领先，DeepSeek 开源可本地部署，完全数据自主</div>
+      <div class="guide-alt">次选：GLM-5（国企政府项目合规性更强）</div>
+    </div>
+    <div class="guide-card">
+      <div class="guide-scenario">📄 长文档处理 / RAG</div>
+      <div class="guide-pick" style="color:#38bdf8">首选：Gemini 3.1 Pro / 2.5 Flash</div>
+      <div class="guide-reason">百万 Token 上下文窗口，$2/M 输入价格合理，速度 120 tok/s，适合大文件全文输入的 RAG 架构</div>
+      <div class="guide-alt">国内场景次选：Kimi K2.5（200K 上下文，文档解析强）</div>
+    </div>
+    <div class="guide-card">
+      <div class="guide-scenario">🧮 数学 / 科学推理</div>
+      <div class="guide-pick" style="color:#f87171">首选：GPT o3 / DeepSeek R2</div>
+      <div class="guide-reason">o3 在 AIME 数学测试完美得分，但成本高（$10/$40/M）。DeepSeek R2 以 1/10 成本媲美 o3，适合预算有限的推理场景</div>
+      <div class="guide-alt">次选：Claude Opus 4.6（GPQA Diamond 90.5%）</div>
+    </div>
+    <div class="guide-card">
+      <div class="guide-scenario">🎨 创意写作 / 产品对话</div>
+      <div class="guide-pick" style="color:#fbbf24">首选：Claude Sonnet 4.6</div>
+      <div class="guide-reason">写作风格最像人类，"AI 味"最低，指令遵循精准，适合 ToC 产品的自然对话体验</div>
+      <div class="guide-alt">次选：GPT-5.4（叙事结构更清晰，生态更全）</div>
+    </div>
+    <div class="guide-card">
+      <div class="guide-scenario">🏗️ ai-service 健康助手（你们项目）</div>
+      <div class="guide-pick" style="color:#818cf8">推荐架构：分层路由</div>
+      <div class="guide-reason">简单问答/FAQ → DeepSeek V4（$0.14/M）<br>症状分析推理 → Claude Sonnet 4.6（$3/M）<br>关键诊断/复杂多跳 → Opus 4.6（$5/M）<br>综合成本可降低 60-70%</div>
+      <div class="guide-alt">pgvector + RAG 已有基础，重点打磨 Chunking 和 Reranker</div>
+    </div>
+    <div class="guide-card">
+      <div class="guide-scenario">🌍 全球产品 / 多模态</div>
+      <div class="guide-pick" style="color:#4ade80">首选：GPT-5.5 / Gemini 3.1 Pro</div>
+      <div class="guide-reason">GPT 生态最全（插件/API/Azure），Gemini 多模态最强（视频理解领先），适合面向全球用户的多语言多模态产品</div>
+      <div class="guide-alt">UAE 合规场景建议走 Azure OpenAI（有中东节点）</div>
+    </div>
+  </div>
+  <p class="note">💡 没有"最好的模型"，只有"最合适的模型"。建议先用免费额度在真实任务上跑一轮 benchmark，再做选型决策。</p>
+</div>
+
+<script>
+function show(id) {
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.getElementById('p-'+id).classList.add('active');
+  event.target.classList.add('active');
+}
+
+// ── BENCHMARK BARS ──
+function renderBars(containerId, data, maxVal, color) {
+  const c = document.getElementById(containerId);
+  c.innerHTML = '';
+  data.forEach(d => {
+    const pct = (d.val / maxVal * 100).toFixed(1);
+    const row = document.createElement('div');
+    row.className = 'bench-row';
+    row.innerHTML = `
+      <div class="bench-label">${d.name}</div>
+      <div class="bench-bar-bg">
+        <div class="bench-bar" style="width:${pct}%;background:${d.color||color}">${d.tag||''}</div>
+      </div>
+      <div class="bench-score">${d.val}%</div>`;
+    c.appendChild(row);
+  });
+}
+
+renderBars('swe', [
+  {name:'Claude Opus 4.6',  val:80.8, color:'#818cf8', tag:'🏆'},
+  {name:'MiniMax M2.5',     val:80.2, color:'#34d399', tag:'开源最强'},
+  {name:'Gemini 3.1 Pro',   val:80.6, color:'#fbbf24'},
+  {name:'Claude Sonnet 4.6',val:79.6, color:'#a78bfa'},
+  {name:'GPT-5.4',          val:80.0, color:'#4ade80'},
+  {name:'GLM-5',            val:77.8, color:'#c084fc'},
+  {name:'Kimi K2.5',        val:76.8, color:'#c084fc'},
+  {name:'Qwen 3.5',         val:76.4, color:'#c084fc'},
+  {name:'DeepSeek V3.2',    val:73.0, color:'#38bdf8'},
+], 100, '#60a5fa');
+
+renderBars('mmlu', [
+  {name:'Gemini 3.1 Pro',   val:94.1, color:'#fbbf24', tag:'🏆'},
+  {name:'GPT-5.2',          val:91.4, color:'#4ade80'},
+  {name:'Claude Opus 4.6',  val:90.5, color:'#818cf8'},
+  {name:'DeepSeek V3',      val:88.5, color:'#38bdf8'},
+  {name:'Qwen 3.5',         val:87.2, color:'#c084fc'},
+  {name:'Kimi K2.5',        val:85.0, color:'#c084fc'},
+], 100, '#60a5fa');
+
+renderBars('gpqa', [
+  {name:'Claude Mythos Prev',val:94.6, color:'#818cf8', tag:'🏆'},
+  {name:'Gemini 3.1 Pro',   val:94.3, color:'#fbbf24'},
+  {name:'Claude Opus 4.6',  val:90.5, color:'#a78bfa'},
+  {name:'GPT-5.4 Pro',      val:89.0, color:'#4ade80'},
+  {name:'DeepSeek R2',      val:85.5, color:'#38bdf8'},
+  {name:'人类专家',          val:65.0, color:'#374151', tag:'基准线'},
+], 100, '#60a5fa');
+
+function renderSpeedBars(containerId, data) {
+  const c = document.getElementById(containerId);
+  c.innerHTML = '';
+  const maxVal = Math.max(...data.map(d=>d.val));
+  data.forEach(d => {
+    const pct = (d.val / maxVal * 100).toFixed(1);
+    const row = document.createElement('div');
+    row.className = 'bench-row';
+    row.innerHTML = `
+      <div class="bench-label">${d.name}</div>
+      <div class="bench-bar-bg">
+        <div class="bench-bar" style="width:${pct}%;background:${d.color}">${d.tag||''}</div>
+      </div>
+      <div class="bench-score" style="width:60px">${d.val} t/s</div>`;
+    c.appendChild(row);
+  });
+}
+renderSpeedBars('speed', [
+  {name:'Gemini 3.1 Pro',   val:120, color:'#fbbf24', tag:'🏆'},
+  {name:'DeepSeek V3',      val:90,  color:'#38bdf8'},
+  {name:'GPT-5.4',          val:75,  color:'#4ade80'},
+  {name:'Kimi K2.5',        val:70,  color:'#c084fc'},
+  {name:'Claude Sonnet 4.6',val:65,  color:'#a78bfa'},
+  {name:'Claude Opus 4.6',  val:45,  color:'#818cf8'},
+]);
+
+// ── SCATTER ──
+const dots = [
+  {name:'DeepSeek V4',   price:0.14, swe:73, color:'#38bdf8', size:20},
+  {name:'Gemini Flash',  price:0.30, swe:74, color:'#fbbf24', size:18},
+  {name:'MiniMax M2.5',  price:0.30, swe:80.2,color:'#34d399',size:22},
+  {name:'Qwen 3.5',      price:0.30, swe:76.4,color:'#c084fc',size:18},
+  {name:'Kimi K2.5',     price:0.95, swe:76.8,color:'#c084fc',size:18},
+  {name:'GLM-5',         price:0.50, swe:77.8,color:'#c084fc',size:18},
+  {name:'Haiku 4.5',     price:1.00, swe:68, color:'#818cf8', size:16},
+  {name:'Gemini 3.1 Pro',price:2.00, swe:80.6,color:'#fbbf24',size:22},
+  {name:'GPT-5.4',       price:2.50, swe:80.0,color:'#4ade80',size:22},
+  {name:'Sonnet 4.6',    price:3.00, swe:79.6,color:'#a78bfa',size:22},
+  {name:'Opus 4.6',      price:5.00, swe:80.8,color:'#818cf8',size:24},
+  {name:'GPT-5.5',       price:5.00, swe:79.0,color:'#4ade80',size:20},
+];
+
+const canvas = document.getElementById('scatterCanvas');
+const maxPrice = 5.5;
+const minSWE = 65; const maxSWE = 83;
+
+dots.forEach(d => {
+  const xPct = (Math.min(d.price, maxPrice) / maxPrice) * 96;
+  const yPct = ((d.swe - minSWE) / (maxSWE - minSWE)) * 88 + 5;
+  const el = document.createElement('div');
+  el.className = 'scatter-dot';
+  el.style.left = xPct + '%';
+  el.style.bottom = yPct + '%';
+  el.style.width = d.size + 'px';
+  el.style.height = d.size + 'px';
+  el.style.background = d.color;
+  el.style.fontSize = d.size > 20 ? '9px' : '7px';
+  el.innerHTML = `<div class="dot-tip">${d.name}<br>输入:$${d.price}/M · SWE:${d.swe}%</div>`;
+  const initial = d.name.split(' ')[0].substring(0,3);
+  el.appendChild(document.createTextNode(''));
+  el.title = d.name;
+
+  const label = document.createElement('div');
+  label.style.cssText = `position:absolute;bottom:${d.size+4}px;left:50%;transform:translateX(-50%);font-size:9px;color:${d.color};white-space:nowrap;font-weight:700;`;
+  label.textContent = d.name.length > 10 ? d.name.split(' ')[0] : d.name;
+  el.appendChild(label);
+  canvas.appendChild(el);
+});
+</script>
+</body>
+</html>

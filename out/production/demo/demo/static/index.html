@@ -1,0 +1,3904 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>QuantAgent · 量化分析助手</title>
+<script>
+  // 加载 marked.js 之前先检测浏览器 —— QQ/UC/微信等老内核直接跳过加载
+  (function() {
+    try {
+      var ua = (navigator.userAgent || '').toLowerCase();
+      var isLegacy = /mqqbrowser|qqbrowser|ucbrowser|micromessenger|xiaomi|liebao|sogoumobile|baiduboxapp/.test(ua)
+                  || location.search.indexOf('compat=1') >= 0;
+      window.__LEGACY_BROWSER__ = isLegacy;
+      if (!isLegacy) {
+        // 只在现代浏览器加载 marked.js（避免它在老内核里崩）
+        document.write('<scr' + 'ipt src="https://cdn.jsdelivr.net/npm/marked@4.3.0/marked.min.js"><\/scr' + 'ipt>');
+      }
+    } catch (_) {
+      window.__LEGACY_BROWSER__ = true;
+    }
+  })();
+</script>
+<style>
+  :root {
+    --bg:          #0d1117;
+    --bg-elev:     #161b22;
+    --bg-elev-2:   #1f2937;
+    --border:      #30363d;
+    --text:        #e6edf3;
+    --text-muted:  #8b949e;
+    --primary:     #00d4aa;
+    --primary-dim: #00d4aa33;
+    --danger:      #f85149;
+    --warning:     #d29922;
+    --user-bg:     #1f6feb;
+    --code-bg:     #0a0d12;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; font-family: -apple-system, BlinkMacSystemFont,
+                "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }
+  body { background: var(--bg); color: var(--text); overflow: hidden; }
+
+  .app { display: flex; height: 100vh; }
+
+  /* ── 侧边栏 ── */
+  .sidebar {
+    width: 260px;
+    background: var(--bg-elev);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+  }
+  .sidebar-header {
+    padding: 16px;
+    border-bottom: 1px solid var(--border);
+  }
+  .logo {
+    font-size: 18px;
+    font-weight: 600;
+    color: var(--primary);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .logo-sub {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-top: 4px;
+  }
+  .new-btn {
+    margin: 12px 16px;
+    padding: 10px 14px;
+    background: var(--primary);
+    color: #000;
+    border: none;
+    border-radius: 6px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: opacity 0.2s;
+  }
+  .new-btn:hover { opacity: 0.85; }
+
+  .session-list {
+    flex: 1;
+    overflow-y: auto;
+    padding: 0 8px 16px;
+  }
+  .session-item {
+    padding: 10px 12px;
+    margin-bottom: 4px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 13px;
+    color: var(--text-muted);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    transition: background 0.15s;
+  }
+  .session-item:hover { background: var(--bg-elev-2); color: var(--text); }
+  .session-item.active {
+    background: var(--primary-dim);
+    color: var(--text);
+  }
+  .session-title { flex: 1; overflow: hidden; text-overflow: ellipsis;
+                    white-space: nowrap; }
+  .session-delete {
+    visibility: hidden;
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    padding: 0 4px;
+    font-size: 14px;
+  }
+  .session-item:hover .session-delete { visibility: visible; }
+  .session-delete:hover { color: var(--danger); }
+
+  .sidebar-footer {
+    padding: 12px 16px;
+    border-top: 1px solid var(--border);
+    font-size: 11px;
+    color: var(--text-muted);
+  }
+
+  /* ── 主对话区 ── */
+  .chat-area { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+
+  .chat-header {
+    padding: 14px 24px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-elev);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .chat-title { font-size: 15px; font-weight: 600; }
+  .chat-meta { font-size: 12px; color: var(--text-muted); }
+
+  /* ── 用户登录区 ── */
+  .user-area { display: flex; align-items: center; gap: 8px; margin-left: 12px; }
+  .login-btn {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 6px 14px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 500;
+    transition: background 0.15s;
+  }
+  .login-btn:hover { background: var(--bg-elev); }
+  .user-chip {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 10px 4px 4px;
+    border-radius: 20px;
+    cursor: pointer;
+    transition: background 0.15s;
+    position: relative;
+  }
+  .user-chip:hover { background: var(--bg); }
+  .user-chip img {
+    width: 26px; height: 26px;
+    border-radius: 50%;
+    border: 1px solid var(--border);
+    object-fit: cover;
+  }
+  .user-chip .user-name {
+    font-size: 13px;
+    color: var(--text);
+    max-width: 120px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .user-menu {
+    display: none;
+    position: absolute;
+    right: 0; top: 100%;
+    margin-top: 6px;
+    background: var(--bg-elev);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    min-width: 180px;
+    z-index: 1000;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.3);
+    overflow: hidden;
+  }
+  .user-menu.show { display: block; }
+  .user-menu .menu-info {
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+    font-size: 12px;
+    color: var(--text-muted);
+    word-break: break-all;
+  }
+  .user-menu .menu-item {
+    display: block;
+    padding: 10px 14px;
+    color: var(--text);
+    cursor: pointer;
+    font-size: 13px;
+    text-decoration: none;
+  }
+  .user-menu .menu-item:hover { background: var(--bg); }
+
+  /* 登录弹窗 */
+  .login-modal-mask {
+    display: none;
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,0.5);
+    z-index: 2000;
+    align-items: center;
+    justify-content: center;
+  }
+  .login-modal-mask.show { display: flex; }
+  .login-modal {
+    background: var(--bg-elev);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 24px;
+    width: min(360px, 90vw);
+    box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+  }
+  .login-modal h3 {
+    margin: 0 0 8px;
+    font-size: 17px;
+    color: var(--text);
+  }
+  .login-modal p {
+    margin: 0 0 18px;
+    font-size: 13px;
+    color: var(--text-muted);
+    line-height: 1.5;
+  }
+  .login-provider-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    width: 100%;
+    padding: 10px 14px;
+    margin-bottom: 8px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text);
+    text-decoration: none;
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 0.15s;
+  }
+  .login-provider-btn:hover { background: rgba(255,255,255,0.05); }
+  .login-provider-btn[disabled] {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+  .login-provider-btn .icon {
+    width: 18px; height: 18px;
+    display: inline-block;
+  }
+  .login-modal .close-btn {
+    margin-top: 10px;
+    background: transparent;
+    border: none;
+    color: var(--text-muted);
+    font-size: 12px;
+    cursor: pointer;
+    width: 100%;
+    padding: 6px;
+  }
+  .login-modal .login-disabled-hint {
+    color: #d97706;
+    font-size: 12px;
+    text-align: center;
+    padding: 8px 0 4px;
+    line-height: 1.5;
+  }
+
+  /* ── 下单确认弹窗 ── */
+  .order-modal-mask {
+    display: none;
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,0.6);
+    z-index: 2100;
+    align-items: center;
+    justify-content: center;
+  }
+  .order-modal-mask.show { display: flex; }
+  .order-modal {
+    background: var(--bg-elev);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 22px 24px;
+    width: min(440px, 92vw);
+    max-height: 90vh;
+    overflow-y: auto;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+  }
+  .order-modal h3 {
+    margin: 0 0 4px;
+    font-size: 16px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .order-modal .order-side-buy { color: #4ade80; }
+  .order-modal .order-side-sell { color: #f87171; }
+  .order-modal .sub {
+    font-size: 12px;
+    color: var(--text-muted);
+    margin: 0 0 14px;
+  }
+  .order-modal .row {
+    display: flex;
+    justify-content: space-between;
+    padding: 7px 0;
+    border-bottom: 1px dashed var(--border);
+    font-size: 13px;
+  }
+  .order-modal .row:last-child { border-bottom: none; }
+  .order-modal .row .k { color: var(--text-muted); }
+  .order-modal .row .v { color: var(--text); font-weight: 500; }
+  .order-modal .v-warn { color: #fbbf24; }
+  .order-modal .notes {
+    margin: 10px 0;
+    padding: 8px 10px;
+    background: var(--bg);
+    border-left: 3px solid #60a5fa;
+    border-radius: 4px;
+    font-size: 12px;
+    color: var(--text);
+    line-height: 1.5;
+  }
+  .order-modal .risk-reasons {
+    background: rgba(220,38,38,0.1);
+    border: 1px solid rgba(220,38,38,0.4);
+    color: #fca5a5;
+    border-radius: 6px;
+    padding: 8px 12px;
+    margin: 8px 0;
+    font-size: 12px;
+    line-height: 1.5;
+  }
+  .order-modal .risk-warnings {
+    background: rgba(251,191,36,0.1);
+    border: 1px solid rgba(251,191,36,0.4);
+    color: #fcd34d;
+    border-radius: 6px;
+    padding: 8px 12px;
+    margin: 8px 0;
+    font-size: 12px;
+  }
+  .order-modal .double-confirm {
+    margin: 10px 0;
+    padding: 10px;
+    background: rgba(251,191,36,0.05);
+    border: 1px dashed rgba(251,191,36,0.4);
+    border-radius: 6px;
+    font-size: 12px;
+    color: var(--text);
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+  }
+  .order-modal .double-confirm input { margin-top: 2px; }
+  .order-modal .actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 14px;
+  }
+  .order-modal .btn {
+    flex: 1;
+    padding: 10px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 14px;
+    font-weight: 500;
+    border: 1px solid var(--border);
+    transition: all 0.15s;
+  }
+  .order-modal .btn-cancel {
+    background: transparent;
+    color: var(--text-muted);
+  }
+  .order-modal .btn-cancel:hover { background: var(--bg); color: var(--text); }
+  .order-modal .btn-confirm {
+    background: #2563eb;
+    color: #fff;
+    border-color: #2563eb;
+  }
+  .order-modal .btn-confirm:hover { background: #1d4ed8; }
+  .order-modal .btn-confirm[disabled] {
+    opacity: 0.5;
+    cursor: not-allowed;
+    background: #6b7280;
+    border-color: #6b7280;
+  }
+  .order-modal .countdown {
+    text-align: center;
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-top: 8px;
+  }
+
+  /* ── 持仓/订单抽屉 ── */
+  .drawer-btn {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 6px 10px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 13px;
+    margin-right: 8px;
+  }
+  .drawer-btn:hover { background: var(--bg-elev); }
+  .drawer-mask {
+    display: none;
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,0.4);
+    z-index: 1500;
+  }
+  .drawer-mask.show { display: block; }
+  .drawer {
+    position: fixed;
+    top: 0; right: 0;
+    width: min(420px, 92vw);
+    height: 100vh;
+    background: var(--bg-elev);
+    border-left: 1px solid var(--border);
+    box-shadow: -8px 0 24px rgba(0,0,0,0.4);
+    z-index: 1501;
+    transform: translateX(100%);
+    transition: transform 0.25s ease-out;
+    display: flex;
+    flex-direction: column;
+  }
+  .drawer.open { transform: translateX(0); }
+  .drawer-header {
+    padding: 14px 16px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .drawer-header h3 {
+    margin: 0;
+    font-size: 15px;
+    color: var(--text);
+  }
+  .drawer-header .close {
+    background: transparent;
+    border: none;
+    color: var(--text-muted);
+    font-size: 22px;
+    cursor: pointer;
+    padding: 0 4px;
+  }
+  .drawer-tabs {
+    display: flex;
+    border-bottom: 1px solid var(--border);
+  }
+  .drawer-tab {
+    flex: 1;
+    padding: 10px;
+    text-align: center;
+    cursor: pointer;
+    color: var(--text-muted);
+    font-size: 13px;
+    border-bottom: 2px solid transparent;
+  }
+  .drawer-tab.active {
+    color: var(--text);
+    border-bottom-color: #60a5fa;
+  }
+  .drawer-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 12px 16px;
+  }
+  .drawer-body .empty {
+    text-align: center;
+    color: var(--text-muted);
+    padding: 30px 0;
+    font-size: 13px;
+  }
+  .drawer-body .item {
+    padding: 10px 12px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    margin-bottom: 8px;
+    font-size: 12px;
+  }
+  .drawer-body .item .item-head {
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 6px;
+    font-weight: 600;
+    font-size: 13px;
+  }
+  .drawer-body .item .meta {
+    color: var(--text-muted);
+    line-height: 1.6;
+  }
+  .drawer-body .pnl-up { color: #4ade80; }
+  .drawer-body .pnl-down { color: #f87171; }
+  .drawer-body .cancel-btn {
+    margin-top: 6px;
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+    padding: 3px 10px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 11px;
+  }
+  .drawer-body .cancel-btn:hover { color: #f87171; border-color: #f87171; }
+
+  /* 顶部 toast 样式由文件后段已有 .toast 规则提供（统一管理，避免冲突） */
+
+  .messages {
+    flex: 1;
+    overflow-y: auto;
+    padding: 24px 20%;
+    scroll-behavior: smooth;
+  }
+  @media (max-width: 1200px) { .messages { padding: 24px 10%; } }
+  @media (max-width: 800px)  { .messages { padding: 16px 12px; } }
+
+  .empty-state {
+    text-align: center;
+    color: var(--text-muted);
+    padding: 80px 0;
+  }
+  .empty-state h2 { color: var(--text); margin-bottom: 12px; font-weight: 500; }
+  .empty-state .trade-hint {
+    margin: 22px auto 0;
+    max-width: 480px;
+    padding: 12px 18px;
+    background: linear-gradient(135deg, rgba(96,165,250,0.08), rgba(96,165,250,0.02));
+    border: 1px solid rgba(96,165,250,0.3);
+    border-radius: 10px;
+    color: var(--text);
+    font-size: 13px;
+    line-height: 1.6;
+  }
+  .empty-state .trade-hint .badge-line {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 4px;
+    color: #60a5fa;
+    font-weight: 500;
+  }
+  .empty-state .trade-hint .login-link {
+    color: #60a5fa;
+    text-decoration: underline;
+    cursor: pointer;
+    background: none;
+    border: none;
+    padding: 0;
+    font-size: inherit;
+  }
+  .empty-state .trade-hint .small {
+    display: block;
+    margin-top: 4px;
+    color: var(--text-muted);
+    font-size: 11px;
+  }
+  .empty-state .trade-hint.logged-in {
+    background: linear-gradient(135deg, rgba(74,222,128,0.06), rgba(74,222,128,0.02));
+    border-color: rgba(74,222,128,0.3);
+  }
+  .empty-state .trade-hint.logged-in .badge-line { color: #4ade80; }
+  .empty-state .examples {
+    margin-top: 32px;
+    display: grid;
+    gap: 10px;
+  }
+  .example-btn {
+    background: var(--bg-elev);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 12px 16px;
+    border-radius: 8px;
+    text-align: left;
+    cursor: pointer;
+    font-size: 13px;
+    transition: all 0.15s;
+  }
+  .example-btn:hover {
+    border-color: var(--primary);
+    background: var(--bg-elev-2);
+  }
+
+  .msg { margin-bottom: 20px; }
+  .msg-role {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    font-weight: 600;
+    margin-bottom: 8px;
+    color: var(--text-muted);
+  }
+  .msg-role .badge {
+    display: inline-block;
+    width: 24px;
+    height: 24px;
+    border-radius: 4px;
+    text-align: center;
+    line-height: 24px;
+    font-size: 12px;
+    color: #000;
+  }
+  .msg.user .badge { background: var(--user-bg); color: #fff; }
+  .msg.assistant .badge { background: var(--primary); }
+
+  .msg-content {
+    padding: 14px 16px;
+    background: var(--bg-elev);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    line-height: 1.7;
+    font-size: 14px;
+    word-wrap: break-word;
+  }
+  .msg.user .msg-content { background: var(--bg-elev-2); }
+  .msg-content p { margin: 8px 0; }
+  .msg-content p:first-child { margin-top: 0; }
+  .msg-content p:last-child { margin-bottom: 0; }
+  .msg-content h1, .msg-content h2, .msg-content h3, .msg-content h4 {
+    margin: 14px 0 8px;
+    color: var(--primary);
+  }
+  .msg-content h1 { font-size: 18px; }
+  .msg-content h2 { font-size: 16px; }
+  .msg-content h3 { font-size: 14px; }
+  .msg-content code {
+    background: var(--code-bg);
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-family: "Menlo", "Monaco", monospace;
+    font-size: 12px;
+    color: #ffa657;
+  }
+  .msg-content pre {
+    background: var(--code-bg);
+    padding: 12px;
+    border-radius: 6px;
+    overflow-x: auto;
+    margin: 8px 0;
+  }
+  .msg-content pre code { background: none; padding: 0; }
+  .msg-content table {
+    border-collapse: collapse;
+    margin: 12px 0;
+    font-size: 13px;
+    width: 100%;
+  }
+  .msg-content th, .msg-content td {
+    padding: 8px 12px;
+    border: 1px solid var(--border);
+  }
+  .msg-content th { background: var(--bg-elev-2); color: var(--primary); }
+  .msg-content blockquote {
+    border-left: 3px solid var(--warning);
+    padding: 4px 12px;
+    color: var(--text-muted);
+    margin: 8px 0;
+    background: rgba(210, 153, 34, 0.08);
+  }
+  .msg-content ul, .msg-content ol { padding-left: 24px; margin: 8px 0; }
+
+  /* 流式渲染期间防止半成品 markdown 抖动 */
+  .msg-content > *:first-child { margin-top: 0; }
+  .msg-content > *:last-child { margin-bottom: 0; }
+  .msg-content table { table-layout: fixed; }
+  .msg-content pre { white-space: pre-wrap; word-break: break-word; }
+
+  /* ── 工具执行卡片 ── */
+  .tool-trace {
+    margin-top: 12px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg-elev-2);
+    font-size: 12px;
+    overflow: hidden;
+  }
+  .tool-trace-header {
+    padding: 8px 12px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    user-select: none;
+  }
+  .tool-trace-header:hover { background: rgba(255,255,255,0.03); }
+  .tool-icon {
+    width: 18px;
+    height: 18px;
+    border-radius: 3px;
+    background: var(--primary);
+    color: #000;
+    text-align: center;
+    line-height: 18px;
+    font-size: 11px;
+    font-weight: 700;
+  }
+  .tool-trace.error .tool-icon { background: var(--danger); color: #fff; }
+  .tool-name {
+    font-family: "Menlo", monospace;
+    color: var(--primary);
+    font-weight: 600;
+  }
+  .tool-trace.error .tool-name { color: var(--danger); }
+  .tool-status { margin-left: auto; color: var(--text-muted); font-size: 11px; }
+  .tool-arrow { color: var(--text-muted); transition: transform 0.2s; }
+  .tool-trace.open .tool-arrow { transform: rotate(90deg); }
+
+  .tool-trace-body {
+    display: none;
+    padding: 8px 12px 12px;
+    border-top: 1px solid var(--border);
+  }
+  .tool-trace.open .tool-trace-body { display: block; }
+  .tool-trace-body pre {
+    background: var(--code-bg);
+    padding: 8px;
+    border-radius: 4px;
+    overflow-x: auto;
+    margin: 4px 0;
+    font-size: 11px;
+    line-height: 1.5;
+  }
+  .tool-trace-body .label {
+    color: var(--text-muted);
+    font-size: 11px;
+    margin-top: 6px;
+    margin-bottom: 2px;
+  }
+
+  /* ── 思考过程 ── */
+  .thought {
+    padding: 8px 12px;
+    margin-top: 8px;
+    background: rgba(0, 212, 170, 0.05);
+    border-left: 2px solid var(--primary);
+    border-radius: 4px;
+    font-size: 13px;
+    color: var(--text-muted);
+    font-style: italic;
+  }
+
+  /* ── 输入区 ── */
+  .input-area {
+    border-top: 1px solid var(--border);
+    padding: 16px 20%;
+    background: var(--bg-elev);
+  }
+  @media (max-width: 1200px) { .input-area { padding: 16px 10%; } }
+  @media (max-width: 800px)  { .input-area { padding: 12px; } }
+
+  .input-wrap {
+    display: flex;
+    gap: 8px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 8px;
+    align-items: center;   /* 附件按钮 + textarea + 发送按钮 垂直居中 */
+  }
+  .input-wrap:focus-within { border-color: var(--primary); }
+  textarea {
+    flex: 1;
+    background: none;
+    border: none;
+    color: var(--text);
+    font-size: 14px;
+    padding: 8px;
+    resize: none;
+    min-height: 24px;
+    max-height: 200px;
+    font-family: inherit;
+    line-height: 1.5;
+  }
+  textarea:focus { outline: none; }
+  .send-btn {
+    padding: 8px 18px;
+    background: var(--primary);
+    color: #000;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 14px;
+    font-weight: 600;
+    transition: opacity 0.15s;
+    height: 36px;
+  }
+  .send-btn:hover { opacity: 0.85; }
+  .send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .send-btn.cancel-mode {
+    background: var(--danger);
+    color: #fff;
+  }
+  .send-btn.cancel-mode:hover { opacity: 0.85; }
+
+  .upload-btn {
+    width: 36px;
+    height: 36px;
+    background: transparent;
+    color: var(--text-muted);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 18px;
+    transition: all 0.15s;
+    flex-shrink: 0;
+  }
+  .upload-btn:hover {
+    color: var(--primary);
+    border-color: var(--primary);
+    background: var(--primary-dim);
+  }
+  .upload-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .upload-btn.uploading {
+    color: var(--primary);
+    animation: pulse 1.5s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
+
+  .attachment-area {
+    margin-bottom: 8px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .attachment-area:empty { margin: 0; }
+  .attachment-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    background: var(--bg-elev-2);
+    border: 1px solid var(--primary-dim);
+    border-radius: 6px;
+    padding: 6px 10px;
+    font-size: 13px;
+    max-width: 280px;
+  }
+  .attachment-chip .att-icon { font-size: 16px; }
+  .attachment-chip .att-name {
+    color: var(--text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1;
+    min-width: 0;
+  }
+  .attachment-chip .att-size {
+    color: var(--text-muted);
+    font-size: 11px;
+    flex-shrink: 0;
+  }
+  .attachment-chip .att-remove {
+    background: none; border: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    font-size: 16px; line-height: 1;
+    padding: 0 4px;
+    flex-shrink: 0;
+  }
+  .attachment-chip .att-remove:hover { color: var(--danger); }
+
+  /* 消息气泡内附件展示 */
+  .msg-attachment {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: var(--bg-elev-2);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 4px 8px;
+    font-size: 12px;
+    color: var(--text-muted);
+    margin-bottom: 6px;
+  }
+
+  .toast {
+    position: fixed;
+    bottom: 100px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: var(--bg-elev-2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 10px 16px;
+    border-radius: 6px;
+    font-size: 13px;
+    z-index: 1000;
+    opacity: 0;
+    transition: opacity 0.3s;
+    pointer-events: none;
+    max-width: 400px;
+  }
+  .toast.show { opacity: 1; }
+  .toast.error { border-color: var(--danger); color: var(--danger); }
+  .toast.success { border-color: var(--primary); }
+
+  .input-hint {
+    margin-top: 6px;
+    padding-bottom: 10px;
+    font-size: 11px;
+    color: var(--text-muted);
+    text-align: center;
+  }
+
+  /* ── 图表加载失败占位 ── */
+  .chart-failed-notice {
+    margin-top: 12px;
+    padding: 12px 16px;
+    background: rgba(248, 81, 73, 0.04);
+    border: 1px dashed var(--border);
+    border-radius: 8px;
+    color: var(--text-muted);
+    font-size: 12px;
+    text-align: center;
+    line-height: 1.5;
+  }
+  .chart-failed-notice::before {
+    content: '📊 ';
+    opacity: 0.6;
+  }
+
+  /* ── Follow-up 建议 chip（answer 下方）── */
+  .suggestions {
+    margin-top: 14px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .suggestions-label {
+    width: 100%;
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-bottom: 2px;
+  }
+  .suggestion-chip {
+    padding: 7px 12px;
+    background: var(--bg-elev-2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 16px;
+    font-size: 12px;
+    cursor: pointer;
+    transition: all 0.15s;
+    text-align: left;
+    line-height: 1.4;
+    max-width: 100%;
+    font-family: inherit;
+  }
+  .suggestion-chip:hover {
+    border-color: var(--primary);
+    color: var(--primary);
+    background: rgba(0, 212, 170, 0.08);
+  }
+  .suggestion-chip::before {
+    content: '💡 ';
+    opacity: 0.6;
+    margin-right: 2px;
+  }
+
+  /* ── 流式进度指示器（常驻直到 final 事件）── */
+  .msg-status {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 6px 12px;
+    margin-top: 10px;
+    background: rgba(0, 212, 170, 0.08);
+    border: 1px solid var(--primary-dim);
+    border-radius: 14px;
+    font-size: 12px;
+    color: var(--primary);
+  }
+  .msg-status .status-text {
+    margin-left: 6px;
+    font-weight: 500;
+  }
+  .msg-status.error-state {
+    background: rgba(248, 81, 73, 0.08);
+    border-color: var(--danger);
+    color: var(--danger);
+  }
+
+  /* ── Loading 状态 ── */
+  .loading-dot {
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    background: var(--primary);
+    border-radius: 50%;
+    margin: 0 2px;
+    animation: bounce 1.4s infinite ease-in-out both;
+  }
+  .loading-dot:nth-child(1) { animation-delay: -0.32s; }
+  .loading-dot:nth-child(2) { animation-delay: -0.16s; }
+  @keyframes bounce {
+    0%, 80%, 100% { transform: scale(0); }
+    40% { transform: scale(1); }
+  }
+
+  /* 滚动条 */
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+  ::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+
+  /* ═══════════════════════════════════════════════════════
+     移动端响应式适配（≤ 768px）
+     ═══════════════════════════════════════════════════════ */
+
+  /* 默认隐藏汉堡按钮，仅移动端显示 */
+  .mobile-menu-btn {
+    display: none;
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 6px 10px;
+    border-radius: 6px;
+    font-size: 16px;
+    cursor: pointer;
+  }
+  .sidebar-mask {
+    display: none;
+    position: fixed;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    background: rgba(0,0,0,0.5);
+    z-index: 998;
+  }
+
+  @media (max-width: 768px) {
+    body { overflow: auto; }
+    html, body { height: auto; min-height: 100vh; }
+
+    .app { height: 100vh; }
+
+    /* 侧边栏改成抽屉（默认隐藏，加 .open 才显示） */
+    .sidebar {
+      position: fixed;
+      top: 0; left: 0;
+      width: 80vw;
+      max-width: 320px;
+      height: 100%;
+      transform: translateX(-100%);
+      transition: transform 0.25s ease;
+      z-index: 999;
+      box-shadow: 2px 0 12px rgba(0,0,0,0.4);
+    }
+    .sidebar.open { transform: translateX(0); }
+    .sidebar-mask.show { display: block; }
+
+    /* 主区域占满 */
+    .chat-area { width: 100%; }
+
+    /* 汉堡按钮显示 */
+    .mobile-menu-btn { display: inline-block; }
+
+    /* header 紧凑 */
+    .chat-header {
+      padding: 10px 12px;
+      gap: 8px;
+    }
+    .chat-title { font-size: 14px; }
+    .chat-meta { display: none; }  /* 移动端隐藏次要信息 */
+
+    /* 消息区减小内边距 */
+    .messages {
+      padding: 16px 12px;
+      padding-bottom: 160px;  /* 给底部输入区留位 */
+    }
+
+    /* 输入区固定底部 + 安全区 */
+    .input-area {
+      padding: 10px 12px env(safe-area-inset-bottom, 10px);
+      position: sticky;
+      bottom: 0;
+    }
+    .input-wrap {
+      padding: 6px;
+      gap: 6px;
+    }
+    textarea {
+      font-size: 16px;  /* iOS 16+ 避免 input focus 自动放大 */
+      padding: 6px;
+      min-height: 28px;
+    }
+    .send-btn {
+      padding: 8px 12px;
+      font-size: 13px;
+      min-width: 56px;
+    }
+    .upload-btn { width: 36px; height: 36px; }
+    .input-hint { font-size: 10px; }
+
+    /* 工具卡片紧凑 */
+    .tool-trace-body pre { font-size: 10px; }
+
+    /* 消息气泡内边距减小 */
+    .msg-content { padding: 12px 14px; font-size: 14px; }
+    .msg { margin-bottom: 16px; }
+
+    /* 建议 chip 一行一个 */
+    .suggestion-chip {
+      width: 100%;
+      text-align: left;
+    }
+
+    /* 图表/上传卡片 */
+    .attachment-chip { max-width: 100%; }
+
+    /* 空状态例子按钮 */
+    .empty-state { padding: 40px 0; }
+    .empty-state h2 { font-size: 18px; }
+    .example-btn { font-size: 12px; padding: 10px 12px; }
+  }
+
+  /* 平板（768-1024px）：保留侧边栏但缩窄 */
+  @media (min-width: 769px) and (max-width: 1024px) {
+    .sidebar { width: 220px; }
+    .messages { padding: 20px 8%; }
+  }
+
+  /* ── 行情/期权搜索面板（右侧抽屉） ── */
+  .market-toggle-btn {
+    background: var(--bg-elev-2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 6px 10px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 13px;
+    margin-left: 8px;
+  }
+  .market-toggle-btn:hover { border-color: var(--primary); }
+  .market-toggle-btn.active { background: var(--primary-dim); border-color: var(--primary); }
+
+  .market-panel {
+    position: fixed;
+    top: 0; right: 0;
+    width: 360px;
+    height: 100%;
+    background: var(--bg-elev);
+    border-left: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    transform: translateX(100%);
+    transition: transform 0.25s ease;
+    z-index: 900;
+    box-shadow: -2px 0 12px rgba(0,0,0,0.35);
+  }
+  .market-panel.open { transform: translateX(0); }
+  .market-panel-header {
+    padding: 12px 14px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+  .market-panel-title { font-size: 14px; font-weight: 600; color: var(--primary); }
+  .market-panel-close {
+    background: none; border: none; color: var(--text-muted);
+    font-size: 18px; cursor: pointer; padding: 0 4px;
+  }
+  .market-panel-close:hover { color: var(--text); }
+  .market-search-box {
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border);
+  }
+  .market-search-box input {
+    width: 100%;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 8px 10px;
+    border-radius: 6px;
+    font-size: 13px;
+    outline: none;
+  }
+  .market-search-box input:focus { border-color: var(--primary); }
+  .market-search-results {
+    max-height: 200px;
+    overflow-y: auto;
+    border-bottom: 1px solid var(--border);
+  }
+  .market-result-item {
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border);
+    cursor: pointer;
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+    font-size: 12px;
+  }
+  .market-result-item:hover { background: var(--bg-elev-2); }
+  .market-result-item:last-child { border-bottom: none; }
+  .market-result-symbol { font-weight: 600; color: var(--primary); }
+  .market-result-name { color: var(--text-muted); flex: 1; text-align: right;
+                       overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  .market-detail { flex: 1; overflow-y: auto; padding: 12px; }
+  .market-detail-empty { color: var(--text-muted); font-size: 12px; padding: 24px 12px; text-align: center; }
+  .market-quote-card {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 12px;
+    margin-bottom: 12px;
+  }
+  .market-quote-symbol { font-size: 16px; font-weight: 700; color: var(--text); }
+  .market-quote-name { font-size: 11px; color: var(--text-muted); margin-bottom: 8px; }
+  .market-quote-price { font-size: 22px; font-weight: 600; }
+  .market-quote-price.up    { color: var(--primary); }
+  .market-quote-price.down  { color: var(--danger); }
+  .market-quote-change { font-size: 12px; margin-top: 4px; }
+  .market-quote-change.up   { color: var(--primary); }
+  .market-quote-change.down { color: var(--danger); }
+  .market-quote-meta { margin-top: 8px; font-size: 11px; color: var(--text-muted);
+                       display: grid; grid-template-columns: 1fr 1fr; gap: 4px 8px; }
+  .market-quote-meta-row { display: flex; justify-content: space-between; }
+  .market-quote-meta-row span:first-child { color: var(--text-muted); }
+  .market-quote-meta-row span:last-child  { color: var(--text); }
+
+  .market-source-badge {
+    display: inline-block;
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: 3px;
+    margin-left: 6px;
+    vertical-align: middle;
+    border: 1px solid var(--border);
+  }
+  .market-source-badge.realtime {
+    color: var(--primary); border-color: var(--primary-dim);
+    background: var(--primary-dim);
+  }
+  .market-source-badge.delay {
+    color: var(--text-muted); background: var(--bg);
+  }
+
+  .market-expiry-row {
+    display: flex; align-items: center; gap: 8px;
+    margin-bottom: 10px; font-size: 12px;
+  }
+  .market-expiry-row select {
+    flex: 1;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 6px 8px;
+    border-radius: 4px;
+    font-size: 12px;
+  }
+  .market-chain-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 11px;
+  }
+  .market-chain-table th,
+  .market-chain-table td {
+    padding: 4px 6px;
+    text-align: center;
+    border-bottom: 1px solid var(--border);
+  }
+  .market-chain-table th { color: var(--text-muted); font-weight: 500; background: var(--bg); }
+  .market-chain-table td.call { color: var(--primary); }
+  .market-chain-table td.put  { color: var(--warning); }
+  .market-chain-strike { color: var(--text); font-weight: 600; background: var(--bg); }
+  .market-chain-empty { color: var(--text-muted); font-size: 12px; padding: 16px; text-align: center; }
+
+  .market-panel-mask {
+    display: none;
+    position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+    background: rgba(0,0,0,0.4); z-index: 899;
+  }
+  .market-panel-mask.show { display: block; }
+
+  @media (max-width: 768px) {
+    .market-panel { width: 92vw; max-width: 380px; }
+  }
+</style>
+</head>
+<body>
+
+<div class="app">
+  <!-- 移动端遮罩（点击关闭侧边栏）-->
+  <div class="sidebar-mask" id="sidebarMask" onclick="toggleSidebar(false)"></div>
+
+  <!-- 侧边栏 -->
+  <aside class="sidebar">
+    <div class="sidebar-header">
+      <div class="logo">📊 QuantAgent</div>
+      <div class="logo-sub">v1.0 · 量化分析助手</div>
+    </div>
+    <button class="new-btn" onclick="createSession()">+ 新对话</button>
+    <div class="session-list" id="sessionList"></div>
+    <div class="sidebar-footer">
+      会话数据仅存于内存，重启服务即清空
+    </div>
+  </aside>
+
+  <!-- 对话主区 -->
+  <main class="chat-area">
+    <header class="chat-header">
+      <button class="mobile-menu-btn" onclick="toggleSidebar()" aria-label="菜单">☰</button>
+      <div class="chat-title" id="chatTitle" style="flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">未选择会话</div>
+      <div class="chat-meta" id="chatMeta"></div>
+      <button class="market-toggle-btn" id="marketToggleBtn"
+              onclick="MarketSearch.toggle()"
+              title="股票/期权搜索">🔍 行情</button>
+      <!-- 用户登录区（启动后由 bootstrapAuth 填充） -->
+      <div class="user-area" id="userArea"></div>
+    </header>
+
+    <div class="messages" id="messages">
+      <div class="empty-state">
+        <h2>📊 QuantAgent 量化分析助手</h2>
+        <p>多因子打分 · 期权定价 · 风险评估 · 财经搜索</p>
+        <div class="trade-hint" id="tradeHint">
+          <div class="badge-line">🔒 登录后可下单(支持老虎证券 / Alpaca 等)</div>
+          <div>
+            支持美股 / 港股 / 期权,
+            <button class="login-link" onclick="showLoginModal()">用 Google / GitHub / 邮箱登录</button>
+            ,登录后再去 <a href="/brokers" style="color:var(--primary);">绑定券商</a>。
+          </div>
+          <span class="small">⚠️ 当前所有交易功能默认为模拟环境(paper),不涉及真金白银</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="input-area">
+      <div class="attachment-area" id="attachmentArea"></div>
+      <div class="input-wrap">
+        <button class="upload-btn" id="uploadBtn"
+                onclick="document.getElementById('pdfInput').click()"
+                title="附加 PDF（点击发送时随消息一起上传）">📎</button>
+        <input type="file" id="pdfInput" accept=".pdf"
+               style="display:none" onchange="queueAttachment(this.files[0])">
+        <textarea id="input"
+                  placeholder="向 QuantAgent 提问... (Enter 发送, Shift+Enter 换行)"
+                  rows="1"
+                  onkeydown="handleKey(event)"
+                  oninput="autoResize(this)"></textarea>
+        <button class="send-btn" id="sendBtn" onclick="onSendBtnClick()">发送</button>
+      </div>
+      <div class="input-hint">
+        ⚠️ 仅供研究参考，不构成投资建议
+        <span style="margin: 0 8px; opacity: 0.5;">·</span>
+        <a href="mailto:jineefo2@gmail.com"
+           style="color: var(--text-muted); text-decoration: none;"
+           title="Author">jineefo2@gmail.com</a>
+      </div>
+    </div>
+  </main>
+</div>
+
+<!-- 行情/期权搜索面板 -->
+<div class="market-panel-mask" id="marketPanelMask" onclick="MarketSearch.toggle(false)"></div>
+<aside class="market-panel" id="marketPanel" aria-hidden="true">
+  <div class="market-panel-header">
+    <div class="market-panel-title">🔍 行情 & 期权</div>
+    <button class="market-panel-close" onclick="MarketSearch.toggle(false)" aria-label="关闭">✕</button>
+  </div>
+  <div class="market-search-box">
+    <input type="text" id="marketSearchInput"
+           placeholder="输入代码或公司名 (如 AAPL / Apple)"
+           autocomplete="off"
+           oninput="MarketSearch.onInput()">
+  </div>
+  <div class="market-search-results" id="marketSearchResults" style="display:none;"></div>
+  <div class="market-detail" id="marketDetail">
+    <div class="market-detail-empty">
+      搜索股票后,这里会显示实时价格 + 期权链。
+      <br><br>
+      <span style="color:var(--text-muted);font-size:11px;">
+      需要先在 <a href="/brokers" style="color:var(--primary);">/brokers</a> 绑定老虎账户。
+      </span>
+    </div>
+  </div>
+</aside>
+
+<!-- 登录弹窗 -->
+<div class="login-modal-mask" id="loginModalMask" onclick="if(event.target===this)hideLoginModal()">
+  <div class="login-modal" role="dialog" aria-modal="true" aria-labelledby="loginModalTitle">
+    <h3 id="loginModalTitle">登录以使用交易功能</h3>
+    <p>未登录用户可使用全部分析功能；交易类操作（账户查询、下单、撤单）需要登录。</p>
+    <div id="loginBtnsArea">
+      <!-- 1. 邮箱（国内首选，无需翻墙） -->
+      <button class="login-provider-btn" id="loginEmailBtn"
+              style="display:none;" onclick="showEmailLoginPanel()">
+        <span class="icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M20 4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2zm0 4-8 5-8-5V6l8 5 8-5v2z"/></svg>
+        </span>
+        使用邮箱 + 验证码登录
+      </button>
+      <!-- 2. GitHub（国内基本可用） -->
+      <a class="login-provider-btn" id="loginGithubBtn" href="/auth/github/login" style="display:none;">
+        <span class="icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M12 .3a12 12 0 0 0-3.8 23.4c.6.1.8-.3.8-.6v-2c-3.3.7-4-1.4-4-1.4-.5-1.4-1.4-1.8-1.4-1.8-1.1-.7.1-.7.1-.7 1.2.1 1.9 1.2 1.9 1.2 1.1 1.9 2.9 1.4 3.6 1 .1-.8.4-1.4.7-1.7-2.6-.3-5.4-1.3-5.4-5.9 0-1.3.5-2.4 1.2-3.2-.1-.3-.5-1.5.1-3.2 0 0 1-.3 3.3 1.2a11.5 11.5 0 0 1 6 0c2.3-1.5 3.3-1.2 3.3-1.2.7 1.7.2 2.9.1 3.2.8.8 1.2 1.9 1.2 3.2 0 4.6-2.8 5.6-5.5 5.9.4.4.8 1.1.8 2.2v3.3c0 .3.2.7.8.6A12 12 0 0 0 12 .3"/></svg>
+        </span>
+        使用 GitHub 登录
+      </a>
+      <!-- 3. Google（国内访问受限） -->
+      <a class="login-provider-btn" id="loginGoogleBtn" href="/auth/google/login" style="display:none;">
+        <span class="icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="18" height="18"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84A10.99 10.99 0 0 0 12 23z"/><path fill="#FBBC05" d="M5.84 14.1A6.61 6.61 0 0 1 5.5 12c0-.73.13-1.44.34-2.1V7.07H2.18A11 11 0 0 0 1 12c0 1.77.42 3.45 1.18 4.93l3.66-2.84z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84C6.71 7.31 9.14 5.38 12 5.38z"/></svg>
+        </span>
+        使用 Google 登录
+      </a>
+      <div class="login-disabled-hint" id="loginDisabledHint" style="display:none;">
+        ⚠️ 服务端未配置任何登录方式<br>请联系管理员
+      </div>
+    </div>
+
+    <!-- 邮箱登录面板（默认隐藏） -->
+    <div id="emailLoginPanel" style="display:none;">
+      <div style="display:flex;gap:6px;margin-bottom:8px;">
+        <input id="emailInput" type="email" placeholder="邮箱地址"
+               style="flex:1;padding:8px 10px;border:1px solid var(--border);
+                      border-radius:6px;background:var(--bg);color:var(--text);
+                      font-size:13px;outline:none;">
+        <button id="sendCodeBtn" onclick="sendEmailCode()"
+                style="padding:0 12px;border:1px solid var(--border);
+                       background:var(--bg);color:var(--text);
+                       border-radius:6px;cursor:pointer;font-size:12px;
+                       white-space:nowrap;">发送验证码</button>
+      </div>
+      <input id="codeInput" type="text" inputmode="numeric"
+             pattern="[0-9]*" maxlength="6" placeholder="6 位验证码"
+             style="width:100%;padding:8px 10px;border:1px solid var(--border);
+                    border-radius:6px;background:var(--bg);color:var(--text);
+                    font-size:14px;letter-spacing:4px;outline:none;
+                    margin-bottom:8px;box-sizing:border-box;">
+      <button onclick="verifyEmailCode()"
+              style="width:100%;padding:10px;background:#2563eb;color:#fff;
+                     border:none;border-radius:6px;cursor:pointer;font-size:14px;
+                     font-weight:500;">登录</button>
+      <div id="emailLoginMsg" style="margin-top:8px;font-size:12px;min-height:18px;"></div>
+      <button class="close-btn" onclick="hideEmailLoginPanel()"
+              style="margin-top:4px;">← 返回</button>
+    </div>
+
+    <button class="close-btn" id="loginCloseBtn"
+            onclick="hideLoginModal()">取消</button>
+  </div>
+</div>
+
+<!-- 下单确认弹窗 -->
+<div class="order-modal-mask" id="orderModalMask">
+  <div class="order-modal" id="orderModal" role="dialog" aria-modal="true"></div>
+</div>
+
+<!-- 持仓/订单抽屉 -->
+<div class="drawer-mask" id="drawerMask" onclick="closeDrawer()"></div>
+<aside class="drawer" id="drawer" aria-hidden="true">
+  <div class="drawer-header">
+    <h3>📊 我的账户</h3>
+    <div style="display:flex;gap:6px;align-items:center;">
+      <button class="close" onclick="refreshDrawer()" title="刷新"
+              style="font-size:16px;padding:0 8px;line-height:1;">↻</button>
+      <button class="close" onclick="closeDrawer()" aria-label="关闭">×</button>
+    </div>
+  </div>
+  <div class="drawer-tabs">
+    <div class="drawer-tab active" data-tab="positions" onclick="switchDrawerTab('positions')">持仓</div>
+    <div class="drawer-tab" data-tab="orders" onclick="switchDrawerTab('orders')">订单</div>
+    <div class="drawer-tab" data-tab="balance" onclick="switchDrawerTab('balance')">资金</div>
+    <div class="drawer-tab" data-tab="memory" onclick="switchDrawerTab('memory')">🧠 记忆</div>
+  </div>
+  <div class="drawer-body" id="drawerBody">
+    <div class="empty">加载中...</div>
+  </div>
+</aside>
+
+<!-- 顶部 toast -->
+<div class="toast" id="toast"></div>
+
+<script>
+// ════════════════════════════════════════════════════════════
+// 全局错误捕获（手机调试用：直接显示在屏幕上）
+// ════════════════════════════════════════════════════════════
+function _dbgShow(msg) {
+  // 等 toast 函数定义后再用；先粗暴 alert 兜底
+  if (typeof showToast === 'function') {
+    showToast(msg, 'error', 8000);
+  } else {
+    setTimeout(function() {
+      var box = document.createElement('div');
+      box.style.cssText = 'position:fixed;bottom:20px;left:10px;right:10px;z-index:9999;background:#f85149;color:#fff;padding:10px;border-radius:6px;font-size:11px;word-break:break-all;';
+      box.textContent = msg;
+      document.body.appendChild(box);
+      setTimeout(function() { box.remove(); }, 10000);
+    }, 100);
+  }
+}
+window.addEventListener('error', function(e) {
+  console.warn('[GlobalError]', e.message, '@', e.filename, ':', e.lineno);
+  _dbgShow('[JS Err] ' + (e.message || 'unknown') + ' @ ' + (e.lineno || '?'));
+});
+window.addEventListener('unhandledrejection', function(e) {
+  var msg = (e.reason && e.reason.message) ? e.reason.message : String(e.reason || 'unknown');
+  console.warn('[UnhandledRejection]', e.reason);
+  _dbgShow('[Promise] ' + msg);
+});
+
+// ════════════════════════════════════════════════════════════
+// 状态
+// ════════════════════════════════════════════════════════════
+let currentSession = null;
+let isStreaming = false;
+let currentAbortController = null;  // 当前请求的 AbortController
+
+// 设备 ID：本浏览器 localStorage 唯一标识，让会话不跨设备共享
+function getDeviceId() {
+  let id = null;
+  try {
+    id = localStorage.getItem('quant_device_id');
+  } catch (_) { /* localStorage 不可用（隐私模式）*/ }
+  if (!id) {
+    // crypto.randomUUID 在 iOS 15.4 以下不可用，做 fallback
+    try {
+      if (typeof crypto !== 'undefined' && crypto.randomUUID) {
+        id = crypto.randomUUID();
+      }
+    } catch (_) {}
+    if (!id) {
+      id = 'dev-' + Math.random().toString(36).slice(2, 14)
+                 + Date.now().toString(36);
+    }
+    try { localStorage.setItem('quant_device_id', id); } catch (_) {}
+  }
+  return id;
+}
+const DEVICE_ID = getDeviceId();
+
+// 统一封装：所有 fetch 自动带上 X-Device-Id（cookie 浏览器自动带上，无需手动）
+async function api(url, options = {}) {
+  options.headers = {
+    ...(options.headers || {}),
+    'X-Device-Id': DEVICE_ID,
+  };
+  options.credentials = options.credentials || 'same-origin';   // 确保 cookie 跟随
+  return fetch(url, options);
+}
+
+// ════════════════════════════════════════════════════════════
+// 账户体系（OAuth 登录 / 登出 / 用户菜单）
+// ════════════════════════════════════════════════════════════
+
+var CURRENT_USER = null;          // {user_id, email, name, avatar_url, provider}
+var AUTH_PROVIDERS = [];          // ['google','github']
+
+// 注：showToast 实际由本文件后段统一定义（避免重复）
+// 类名约定：'success' / 'error' / 'info'
+
+function showLoginModal() {
+  // 同步亮灭按钮
+  var hasAny = AUTH_PROVIDERS.length > 0;
+  document.getElementById('loginGoogleBtn').style.display =
+    AUTH_PROVIDERS.indexOf('google') >= 0 ? '' : 'none';
+  document.getElementById('loginGithubBtn').style.display =
+    AUTH_PROVIDERS.indexOf('github') >= 0 ? '' : 'none';
+  document.getElementById('loginEmailBtn').style.display =
+    AUTH_PROVIDERS.indexOf('email') >= 0 ? '' : 'none';
+  document.getElementById('loginDisabledHint').style.display =
+    hasAny ? 'none' : '';
+  // 默认显示按钮区，隐藏邮箱面板
+  hideEmailLoginPanel();
+  document.getElementById('loginModalMask').classList.add('show');
+}
+
+function hideLoginModal() {
+  document.getElementById('loginModalMask').classList.remove('show');
+  hideEmailLoginPanel();
+}
+
+// ────────── 邮箱登录子面板 ──────────
+
+function showEmailLoginPanel() {
+  document.getElementById('loginBtnsArea').style.display = 'none';
+  document.getElementById('emailLoginPanel').style.display = '';
+  document.getElementById('loginCloseBtn').style.display = 'none';
+  // 自动聚焦
+  setTimeout(function () {
+    var el = document.getElementById('emailInput');
+    if (el) el.focus();
+  }, 50);
+}
+
+function hideEmailLoginPanel() {
+  document.getElementById('loginBtnsArea').style.display = '';
+  document.getElementById('emailLoginPanel').style.display = 'none';
+  document.getElementById('loginCloseBtn').style.display = '';
+  document.getElementById('emailLoginMsg').textContent = '';
+}
+
+function _setEmailMsg(text, ok) {
+  var el = document.getElementById('emailLoginMsg');
+  if (!el) return;
+  el.textContent = text || '';
+  el.style.color = ok ? '#4ade80' : '#f87171';
+}
+
+var _codeCooldownTimer = null;
+function _startCodeCooldown(seconds) {
+  var btn = document.getElementById('sendCodeBtn');
+  if (!btn) return;
+  var remain = seconds;
+  btn.disabled = true;
+  btn.textContent = remain + 's 后重发';
+  if (_codeCooldownTimer) clearInterval(_codeCooldownTimer);
+  _codeCooldownTimer = setInterval(function () {
+    remain -= 1;
+    if (remain <= 0) {
+      clearInterval(_codeCooldownTimer);
+      _codeCooldownTimer = null;
+      btn.disabled = false;
+      btn.textContent = '发送验证码';
+    } else {
+      btn.textContent = remain + 's 后重发';
+    }
+  }, 1000);
+}
+
+async function sendEmailCode() {
+  var email = (document.getElementById('emailInput').value || '').trim();
+  if (!email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+    _setEmailMsg('请输入正确的邮箱地址', false);
+    return;
+  }
+  _setEmailMsg('发送中...', true);
+  try {
+    var r = await api('/auth/email/send_code', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: email }),
+    });
+    var d = await r.json();
+    if (d && d.success) {
+      _setEmailMsg(d.message || '验证码已发送，请查收邮箱', true);
+      _startCodeCooldown(60);
+      // 自动聚焦到验证码输入框
+      setTimeout(function () {
+        var el = document.getElementById('codeInput');
+        if (el) el.focus();
+      }, 50);
+    } else {
+      _setEmailMsg((d && d.error) || '发送失败', false);
+    }
+  } catch (e) {
+    _setEmailMsg('网络异常: ' + e.message, false);
+  }
+}
+
+async function verifyEmailCode() {
+  var email = (document.getElementById('emailInput').value || '').trim();
+  var code = (document.getElementById('codeInput').value || '').trim();
+  if (!code || !/^\d{6}$/.test(code)) {
+    _setEmailMsg('请输入 6 位数字验证码', false);
+    return;
+  }
+  _setEmailMsg('验证中...', true);
+  try {
+    var r = await api('/auth/email/verify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: email, code: code }),
+    });
+    var d = await r.json();
+    if (d && d.success) {
+      CURRENT_USER = d.user;
+      hideLoginModal();
+      renderUserArea();
+      showToast('登录成功', 'success');
+    } else {
+      _setEmailMsg((d && d.error) || '验证失败', false);
+    }
+  } catch (e) {
+    _setEmailMsg('网络异常: ' + e.message, false);
+  }
+}
+
+function renderUserArea() {
+  var area = document.getElementById('userArea');
+  if (!area) return;
+  if (CURRENT_USER) {
+    var avatar = CURRENT_USER.avatar_url || '';
+    var name = CURRENT_USER.name || CURRENT_USER.email || '用户';
+    var safeName = name.replace(/[<>"&]/g, function (c) {
+      return { '<':'&lt;', '>':'&gt;', '"':'&quot;', '&':'&amp;' }[c];
+    });
+    area.innerHTML =
+      '<button class="drawer-btn" onclick="openDrawer()" title="账户/订单/持仓">📊</button>'
+      + '<div class="user-chip" onclick="toggleUserMenu(event)">'
+      + (avatar ? '<img src="' + avatar + '" alt="">' : '<span style="width:26px;height:26px;border-radius:50%;background:var(--bg);display:inline-flex;align-items:center;justify-content:center;font-size:13px;">' + safeName.charAt(0) + '</span>')
+      + '<span class="user-name">' + safeName + '</span>'
+      + '<div class="user-menu" id="userMenu">'
+      +   '<div class="menu-info">' + (CURRENT_USER.email || '') + '<br><span style="opacity:.6;">via ' + (CURRENT_USER.provider || '') + '</span></div>'
+      +   '<a class="menu-item" href="/brokers">🔗 券商绑定</a>'
+      +   '<a class="menu-item" href="/auth/logout">退出登录</a>'
+      + '</div>'
+      + '</div>';
+  } else {
+    area.innerHTML = '<button class="login-btn" onclick="showLoginModal()">登录</button>';
+  }
+  // 顺手同步首页的"登录可下单"提示
+  try { syncTradeHint(); } catch (_) {}
+}
+
+function toggleUserMenu(e) {
+  if (e) { e.stopPropagation(); }
+  var m = document.getElementById('userMenu');
+  if (m) m.classList.toggle('show');
+}
+
+// 点击空白关闭用户菜单
+document.addEventListener('click', function () {
+  var m = document.getElementById('userMenu');
+  if (m && m.classList.contains('show')) m.classList.remove('show');
+});
+
+// 启动时拉登录信息 + 可用 OAuth 提供方
+async function bootstrapAuth() {
+  // 1. 当前登录用户
+  try {
+    var r = await api('/api/me');
+    if (r.ok) {
+      CURRENT_USER = await r.json();
+    } else {
+      CURRENT_USER = null;
+    }
+  } catch (_) {
+    CURRENT_USER = null;
+  }
+
+  // 2. 可用 provider
+  try {
+    var pr = await api('/api/auth/providers');
+    if (pr.ok) {
+      var d = await pr.json();
+      AUTH_PROVIDERS = d.providers || [];
+    }
+  } catch (_) {
+    AUTH_PROVIDERS = [];
+  }
+
+  renderUserArea();
+}
+
+// URL 参数处理：?login=ok / ?logout=ok / ?auth_error=...
+function handleAuthUrlParams() {
+  try {
+    var sp = new URLSearchParams(window.location.search);
+    if (sp.get('login') === 'ok') {
+      showToast('登录成功', 'success');
+    } else if (sp.get('logout') === 'ok') {
+      showToast('已退出登录', 'success');
+    } else if (sp.get('auth_error')) {
+      showToast('登录失败：' + decodeURIComponent(sp.get('auth_error')), 'error');
+    }
+    if (sp.get('login') || sp.get('logout') || sp.get('auth_error')) {
+      // 清掉 URL 上的参数（不留刷新痕迹）
+      try {
+        var clean = window.location.pathname + window.location.hash;
+        window.history.replaceState({}, '', clean);
+      } catch (_) {}
+    }
+  } catch (_) {}
+}
+
+// 工具调用返回 auth_required 时，引导登录
+function isAuthRequiredResult(result) {
+  return result && (result.error_type === 'auth_required'
+                    || (result.error && /需要登录/.test(result.error || '')));
+}
+
+
+// ════════════════════════════════════════════════════════════
+// 交易 UI（下单确认弹窗 + 持仓/订单抽屉）
+// ════════════════════════════════════════════════════════════
+
+var _orderModalState = {
+  intent_id: null,
+  timer: null,
+  remaining: 30,
+};
+
+function escapeHtmlSafe(s) {
+  return String(s == null ? '' : s).replace(/[<>"&]/g, function (c) {
+    return { '<':'&lt;', '>':'&gt;', '"':'&quot;', '&':'&amp;' }[c];
+  });
+}
+
+// 当 broker API 返回 no_broker_binding 时,渲染成中性的提示而不是红色错误
+function friendlyBrokerErrorHTML(err) {
+  if (!err) return null;
+  var m = String(err).match(/no_broker_binding:\s*user has no (\w+) binding/);
+  if (!m) return null;
+  var broker = m[1];
+  return '当前账号还没绑定 <b>' + escapeHtmlSafe(broker) + '</b> 账户。<br>'
+       + '前往 <a href="/brokers" style="color:var(--primary);">券商绑定</a> 添加一个后,'
+       + '这里就能看到你的账户数据。';
+}
+
+function fmtMoney(v) {
+  if (v == null || isNaN(v)) return '-';
+  return '$' + Number(v).toLocaleString('en-US', {
+    minimumFractionDigits: 2, maximumFractionDigits: 2,
+  });
+}
+
+async function showOrderConfirmModal(intent_id, prelimResult) {
+  if (!CURRENT_USER) {
+    showLoginModal();
+    return;
+  }
+  _orderModalState.intent_id = intent_id;
+  var mask = document.getElementById('orderModalMask');
+  var modal = document.getElementById('orderModal');
+  modal.innerHTML = '<div style="padding:20px;text-align:center;color:var(--text-muted);">加载订单详情…</div>';
+  mask.classList.add('show');
+
+  // 拉服务端的最新风控 + 账户快照（比 prelim 更可靠）
+  var detail = null;
+  try {
+    var r = await api('/api/orders/intents/' + encodeURIComponent(intent_id));
+    if (r.ok) {
+      detail = await r.json();
+    } else if (r.status === 404) {
+      modal.innerHTML = '<div style="padding:20px;text-align:center;color:#f87171;">订单意图已过期或不存在</div>'
+        + '<div class="actions"><button class="btn btn-cancel" onclick="closeOrderModal()">关闭</button></div>';
+      return;
+    } else {
+      throw new Error('HTTP ' + r.status);
+    }
+  } catch (e) {
+    modal.innerHTML = '<div style="padding:20px;text-align:center;color:#f87171;">加载失败：'
+      + escapeHtmlSafe(e.message) + '</div>'
+      + '<div class="actions"><button class="btn btn-cancel" onclick="closeOrderModal()">关闭</button></div>';
+    return;
+  }
+
+  renderOrderConfirmModal(detail);
+  startOrderCountdown();
+}
+
+function renderOrderConfirmModal(detail) {
+  var intent = detail.intent || {};
+  var account = detail.account || {};
+  var check = detail.risk_check || {};
+  var binding = detail.binding || {env: 'paper', live_orders_enabled: false, is_live_blocked: false};
+  var side = intent.side === 'sell' ? 'sell' : 'buy';
+  var sideText = side === 'buy' ? '买入' : '卖出';
+  var sideClass = side === 'buy' ? 'order-side-buy' : 'order-side-sell';
+  var notional = (intent.qty || 0) * (intent.limit_price || 0);
+  var pct = (check.notional_pct || 0) * 100;
+  var notes = intent.notes || '';
+
+  // ADR-0002 Layer 4: red banner for live, distinct labels for paper / mock
+  var brokerLabel;
+  if (binding.broker_type === 'tiger') {
+    brokerLabel = binding.env === 'live'
+      ? '🐯 Tiger Brokers · ⚠️ 实盘账户'
+      : '🐯 Tiger Brokers · 模拟环境';
+  } else if (binding.broker_type === 'alpaca') {
+    brokerLabel = '📈 Alpaca Paper Trading';
+  } else {
+    brokerLabel = '本地模拟账户';
+  }
+
+  var html = '<h3><span class="' + sideClass + '">' + sideText + '</span> '
+    + escapeHtmlSafe(intent.symbol) + '</h3>'
+    + '<p class="sub">' + brokerLabel + ' · 限价单 · TIF: ' + (intent.time_in_force || 'day') + '</p>';
+
+  // 实盘 红色横幅
+  if (binding.env === 'live') {
+    if (binding.is_live_blocked) {
+      html += '<div class="risk-reasons" style="background:rgba(248,81,73,0.15);'
+        + 'border:1px solid #f85149;color:#ff8a82;font-weight:600;">'
+        + '🚫 这是实盘账户但「启用实盘下单」开关未开,无法下单。<br>'
+        + '<span style="font-weight:400;font-size:12px;">'
+        + '前往 <a href="/brokers" style="color:#ff8a82;text-decoration:underline;">/brokers</a> '
+        + '页面点击"只读 · 点击启用实盘"开关。意图会保留,启用后回来重试。'
+        + '</span></div>';
+    } else {
+      html += '<div class="risk-warnings" style="background:rgba(248,81,73,0.2);'
+        + 'border:1px solid #f85149;color:#ff8a82;font-weight:600;font-size:14px;'
+        + 'padding:12px;border-radius:6px;margin:10px 0;">'
+        + '⚠️ 实盘 - 真金白银<br>'
+        + '<span style="font-weight:400;font-size:12px;">'
+        + '点击确认后将向你的真实老虎账户提交订单。'
+        + '</span></div>';
+    }
+  }
+
+  html += '<div class="row"><span class="k">数量</span><span class="v">' + (intent.qty || 0) + ' 股</span></div>';
+  html += '<div class="row"><span class="k">限价</span><span class="v">' + fmtMoney(intent.limit_price) + '</span></div>';
+  html += '<div class="row"><span class="k">预估金额</span><span class="v">' + fmtMoney(notional) + '</span></div>';
+  html += '<div class="row"><span class="k">占净值</span><span class="v ' + (pct > 50 ? 'v-warn' : '') + '">'
+    + pct.toFixed(1) + '%</span></div>';
+  html += '<div class="row"><span class="k">购买力</span><span class="v">' + fmtMoney(account.buying_power) + '</span></div>';
+  html += '<div class="row"><span class="k">账户净值</span><span class="v">' + fmtMoney(account.equity) + '</span></div>';
+
+  if (notes) {
+    html += '<div class="notes">💬 Agent: ' + escapeHtmlSafe(notes) + '</div>';
+  }
+
+  // 风控反馈
+  if (check.reasons && check.reasons.length) {
+    html += '<div class="risk-reasons">⛔ 风控不通过：<br>'
+      + check.reasons.map(function (r) { return '• ' + escapeHtmlSafe(r); }).join('<br>')
+      + '</div>';
+  }
+  if (check.warnings && check.warnings.length) {
+    html += '<div class="risk-warnings">⚠️ ' + check.warnings.map(escapeHtmlSafe).join('；') + '</div>';
+  }
+
+  // 二次确认（大额）
+  var needDouble = check.needs_double_confirm;
+  if (needDouble) {
+    html += '<label class="double-confirm">'
+      + '<input type="checkbox" id="orderDoubleConfirm" onchange="updateConfirmBtnState()">'
+      + '<span>本单占净值 ' + pct.toFixed(1) + '%，达到大额订单阈值。我确认知晓风险，仍要下单。</span>'
+      + '</label>';
+  }
+
+  // 按钮
+  var canConfirm = (check.passed === true) && (!needDouble);
+  // 即使 reasons 里包含"需要勾选大额确认"，勾上后前端就能放行（后端会重新校验）
+  if (!check.passed && needDouble && check.reasons && check.reasons.length === 1
+        && /大额订单|双重确认|二次确认|勾选/.test(check.reasons[0])) {
+    canConfirm = false;   // 等用户勾选
+  }
+  // ADR-0002 Layer 4: 实盘且未启用 → 客户端层面禁用按钮 (服务端 Layer 5 还会再 reject)
+  if (binding.is_live_blocked) {
+    canConfirm = false;
+  }
+
+  html += '<div class="actions">'
+    + '<button class="btn btn-cancel" onclick="closeOrderModal()">取消</button>'
+    + '<button class="btn btn-confirm" id="orderConfirmBtn" onclick="confirmOrder()"'
+    + (canConfirm ? '' : ' disabled') + '>确认下单</button>'
+    + '</div>';
+  html += '<div class="countdown" id="orderCountdown">30 秒未确认将自动关闭</div>';
+
+  document.getElementById('orderModal').innerHTML = html;
+  updateConfirmBtnState();
+}
+
+function updateConfirmBtnState() {
+  var btn = document.getElementById('orderConfirmBtn');
+  var cb = document.getElementById('orderDoubleConfirm');
+  if (!btn) return;
+  if (cb) {
+    // 大额订单：勾了才放行
+    btn.disabled = !cb.checked;
+  }
+}
+
+function startOrderCountdown() {
+  _orderModalState.remaining = 30;
+  if (_orderModalState.timer) clearInterval(_orderModalState.timer);
+  _orderModalState.timer = setInterval(function () {
+    _orderModalState.remaining -= 1;
+    var el = document.getElementById('orderCountdown');
+    if (el) el.textContent = _orderModalState.remaining + ' 秒未确认将自动关闭';
+    if (_orderModalState.remaining <= 0) {
+      closeOrderModal();
+      showToast('订单意图已超时', 'error');
+    }
+  }, 1000);
+}
+
+function closeOrderModal() {
+  document.getElementById('orderModalMask').classList.remove('show');
+  if (_orderModalState.timer) clearInterval(_orderModalState.timer);
+  _orderModalState.timer = null;
+  _orderModalState.intent_id = null;
+}
+
+async function confirmOrder() {
+  var intent_id = _orderModalState.intent_id;
+  if (!intent_id) { closeOrderModal(); return; }
+  var btn = document.getElementById('orderConfirmBtn');
+  if (btn) { btn.disabled = true; btn.textContent = '提交中…'; }
+
+  var doubleConfirmed = false;
+  var cb = document.getElementById('orderDoubleConfirm');
+  if (cb && cb.checked) doubleConfirmed = true;
+
+  try {
+    var r = await api('/api/orders/confirm', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ intent_id: intent_id, double_confirmed: doubleConfirmed }),
+    });
+    var data = await r.json().catch(function () { return null; });
+
+    if (!r.ok) {
+      showToast('下单失败：' + (data && data.detail ? data.detail : ('HTTP ' + r.status)), 'error');
+      if (btn) { btn.disabled = false; btn.textContent = '确认下单'; }
+      return;
+    }
+
+    if (data && data.success) {
+      var o = data.order || {};
+      showToast('✅ 已提交：' + (o.broker_order_id || '').slice(0, 8) + '...', 'success');
+      closeOrderModal();
+      // 自动打开抽屉到「订单」tab 让用户看到状态
+      // 然后在 1.5s 后再刷一次（撮合通常 < 2s 完成）
+      try {
+        _drawerTab = 'orders';
+        var tabs = document.querySelectorAll('.drawer-tab');
+        for (var i = 0; i < tabs.length; i++) {
+          tabs[i].classList.toggle('active',
+            tabs[i].getAttribute('data-tab') === 'orders');
+        }
+        document.getElementById('drawer').classList.add('open');
+        document.getElementById('drawerMask').classList.add('show');
+        refreshDrawer();
+        setTimeout(refreshDrawer, 1500);
+        setTimeout(refreshDrawer, 4000);
+      } catch (_) {}
+    } else if (data && data.blocked_by_risk_gate) {
+      showToast('被风控阻断：' + (data.message || ''), 'error');
+      if (btn) { btn.disabled = false; btn.textContent = '确认下单'; }
+    } else {
+      showToast('下单失败：' + (data && data.error ? data.error : '未知错误'), 'error');
+      if (btn) { btn.disabled = false; btn.textContent = '确认下单'; }
+    }
+  } catch (e) {
+    showToast('网络异常：' + e.message, 'error');
+    if (btn) { btn.disabled = false; btn.textContent = '确认下单'; }
+  }
+}
+
+// ────────── BrokerStream(SSE 实时推送) ──────────
+//
+// 后端 /api/broker/stream 用 SSE 推:account / position / order / quote 事件。
+// 这里只负责"事件到来 → 触发已有 refreshDrawer"。refreshDrawer 走 REST 端点,
+// 但 TigerAdapter 有 30s TTL 缓存,所以 1 分钟内最多打 Tiger 2 轮,不会撞限速。
+// EventSource 自带断线重连,我们不用管。
+var BrokerStream = {
+  es: null,
+  hasPush: null,
+  _debounceTimer: null,
+
+  start: function () {
+    if (this.es) return;
+    var self = this;
+    try {
+      this.es = new EventSource('/api/broker/stream');
+    } catch (e) {
+      this.es = null;
+      return;
+    }
+    this.es.addEventListener('open', function (ev) {
+      try {
+        var d = JSON.parse(ev.data || '{}');
+        self.hasPush = !!d.has_push;
+      } catch (_) {}
+    });
+    var onAnyChange = function () {
+      // 抽屉关着 / 标签页隐藏 → 不刷新
+      var drawer = document.getElementById('drawer');
+      if (!drawer || !drawer.classList.contains('open')) return;
+      if (document.visibilityState === 'hidden') return;
+      // 把短时间内多个事件合并成一次刷新(quote 高频会重复触发)
+      if (self._debounceTimer) clearTimeout(self._debounceTimer);
+      self._debounceTimer = setTimeout(function () {
+        self._debounceTimer = null;
+        if (typeof refreshDrawer === 'function') {
+          refreshDrawer(/*silent=*/true);
+        }
+      }, 300);
+    };
+    ['account', 'position', 'order', 'quote'].forEach(function (t) {
+      self.es.addEventListener(t, onAnyChange);
+    });
+    // 行情面板独立接 quote 事件 —— 不走 drawer 那条 debounce
+    self.es.addEventListener('quote', function (ev) {
+      try {
+        var d = JSON.parse(ev.data || '{}');
+        if (typeof MarketSearch !== 'undefined' && MarketSearch.applyQuote) {
+          MarketSearch.applyQuote(d);
+        }
+      } catch (_) {}
+    });
+    this.es.onerror = function () {
+      // EventSource 内置重连,不主动 close;只在 stop 时彻底关
+    };
+  },
+
+  stop: function () {
+    if (this.es) {
+      try { this.es.close(); } catch (_) {}
+      this.es = null;
+    }
+    if (this._debounceTimer) {
+      clearTimeout(this._debounceTimer);
+      this._debounceTimer = null;
+    }
+  },
+};
+
+
+// ────────── MarketSearch(行情/期权搜索面板) ──────────
+//
+// 流程:
+//   1) 输入 → /api/broker/symbols/search → 模糊结果列表
+//   2) 点击某个 symbol → /symbols/brief + /symbols/option-expiries → 主面板
+//   3) 选到期日 → /symbols/option-chain → 期权链表格
+//   4) /symbols/subscribe 把 stock + 期权链 identifier 推给 Tiger socket
+//   5) BrokerStream 的 quote 事件 → applyQuote 实时更新价格
+var MarketSearch = {
+  open: false,
+  _searchTimer: null,
+  _currentSymbol: null,
+  _currentExpiry: null,
+  _chainIdentifiers: [],
+
+  toggle: function (force) {
+    var panel = document.getElementById('marketPanel');
+    var mask = document.getElementById('marketPanelMask');
+    var btn = document.getElementById('marketToggleBtn');
+    if (!panel) return;
+    var willOpen = (typeof force === 'boolean') ? force : !panel.classList.contains('open');
+    panel.classList.toggle('open', willOpen);
+    panel.setAttribute('aria-hidden', willOpen ? 'false' : 'true');
+    if (mask) mask.classList.toggle('show', willOpen);
+    if (btn) btn.classList.toggle('active', willOpen);
+    this.open = willOpen;
+    if (willOpen) {
+      var inp = document.getElementById('marketSearchInput');
+      if (inp) setTimeout(function () { inp.focus(); }, 80);
+    }
+  },
+
+  onInput: function () {
+    var self = this;
+    if (this._searchTimer) clearTimeout(this._searchTimer);
+    this._searchTimer = setTimeout(function () {
+      self._doSearch();
+    }, 250);
+  },
+
+  _doSearch: async function () {
+    var inp = document.getElementById('marketSearchInput');
+    var box = document.getElementById('marketSearchResults');
+    if (!inp || !box) return;
+    var q = (inp.value || '').trim();
+    if (!q) {
+      box.style.display = 'none';
+      box.innerHTML = '';
+      return;
+    }
+    try {
+      var resp = await fetch('/api/broker/symbols/search?q=' + encodeURIComponent(q));
+      if (!resp.ok) {
+        var detail = '';
+        try { detail = (await resp.json()).detail || ''; } catch (_) {}
+        box.innerHTML = '<div class="market-result-item" style="color:var(--text-muted);">'
+          + (resp.status === 400 ? (detail || '请先绑定老虎账户') : ('搜索失败: ' + resp.status))
+          + '</div>';
+        box.style.display = '';
+        return;
+      }
+      var data = await resp.json();
+      var results = (data && data.results) || [];
+      if (results.length === 0) {
+        box.innerHTML = '<div class="market-result-item" style="color:var(--text-muted);">无匹配结果</div>';
+        box.style.display = '';
+        return;
+      }
+      var html = '';
+      for (var i = 0; i < results.length; i++) {
+        var r = results[i];
+        html += '<div class="market-result-item" data-sym="' + _escapeAttr(r.symbol) + '" data-name="' + _escapeAttr(r.name) + '">'
+          + '<span class="market-result-symbol">' + _escapeText(r.symbol) + '</span>'
+          + '<span class="market-result-name">' + _escapeText(r.name) + '</span>'
+          + '</div>';
+      }
+      box.innerHTML = html;
+      box.style.display = '';
+      // 绑定点击
+      var items = box.querySelectorAll('.market-result-item');
+      for (var j = 0; j < items.length; j++) {
+        items[j].addEventListener('click', function () {
+          MarketSearch.selectSymbol(this.dataset.sym, this.dataset.name);
+        });
+      }
+    } catch (e) {
+      box.innerHTML = '<div class="market-result-item" style="color:var(--danger);">' + _escapeText(String(e)) + '</div>';
+      box.style.display = '';
+    }
+  },
+
+  selectSymbol: async function (symbol, name) {
+    if (!symbol) return;
+    this._currentSymbol = symbol;
+    this._currentExpiry = null;
+    this._chainIdentifiers = [];
+    var detail = document.getElementById('marketDetail');
+    var box = document.getElementById('marketSearchResults');
+    if (box) { box.style.display = 'none'; box.innerHTML = ''; }
+    detail.innerHTML = '<div class="market-detail-empty">加载 ' + _escapeText(symbol) + ' 行情中…</div>';
+    // 并发拉行情 + 到期日
+    var briefPromise = fetch('/api/broker/symbols/brief?symbol=' + encodeURIComponent(symbol));
+    var expPromise = fetch('/api/broker/symbols/option-expiries?symbol=' + encodeURIComponent(symbol));
+    var brief = null, expiries = [];
+    try {
+      var r1 = await briefPromise;
+      if (r1.ok) brief = await r1.json();
+    } catch (_) {}
+    try {
+      var r2 = await expPromise;
+      if (r2.ok) {
+        var d = await r2.json();
+        expiries = (d && d.expiries) || [];
+      }
+    } catch (_) {}
+
+    // 拿到 expiries 时同时记录其 source(Tiger / yahoo_delay)
+    var expSource = null;
+    try {
+      var r2b = await fetch('/api/broker/symbols/option-expiries?symbol='
+        + encodeURIComponent(symbol)).then(function (r) { return r.ok ? r.json() : null; });
+      expSource = r2b && r2b.source;
+    } catch (_) {}
+    // 只有实时 Tiger 源才订阅 socket(延迟/Yahoo 无推送)
+    if (brief && brief.source === 'tiger_realtime') {
+      this._subscribe([symbol], []);
+    }
+    this._renderDetail(symbol, name, brief, expiries, expSource);
+  },
+
+  _renderDetail: function (symbol, name, brief, expiries, expiriesSource) {
+    var detail = document.getElementById('marketDetail');
+    if (!detail) return;
+    var price = brief && brief.latest_price;
+    var change = (brief && brief.change) || 0;
+    var changePct = (brief && (brief.change_percent || brief.change_pct)) || 0;
+    var dir = change > 0 ? 'up' : (change < 0 ? 'down' : '');
+    var changeSign = change >= 0 ? '+' : '';
+    var briefBadge = _sourceBadge(brief && brief.source);
+
+    var quoteHtml = '<div class="market-quote-card" id="marketQuoteCard">'
+      + '<div class="market-quote-symbol">' + _escapeText(symbol) + briefBadge + '</div>'
+      + '<div class="market-quote-name">' + _escapeText(name || '') + '</div>'
+      + '<div class="market-quote-price ' + dir + '" id="marketQuotePrice">'
+      + (price != null ? _fmtPrice(price) : '—') + '</div>'
+      + '<div class="market-quote-change ' + dir + '" id="marketQuoteChange">'
+      + (price != null ? (changeSign + _fmtPrice(change) + ' (' + changeSign + changePct.toFixed(2) + '%)') : '')
+      + '</div>'
+      + '<div class="market-quote-meta">'
+      + '<div class="market-quote-meta-row"><span>昨收</span><span>' + _fmtMaybe(brief && brief.prev_close) + '</span></div>'
+      + '<div class="market-quote-meta-row"><span>开盘</span><span>' + _fmtMaybe(brief && brief.open) + '</span></div>'
+      + '<div class="market-quote-meta-row"><span>最高</span><span>' + _fmtMaybe(brief && brief.high) + '</span></div>'
+      + '<div class="market-quote-meta-row"><span>最低</span><span>' + _fmtMaybe(brief && brief.low) + '</span></div>'
+      + '<div class="market-quote-meta-row"><span>成交量</span><span>' + _fmtVolume(brief && brief.volume) + '</span></div>'
+      + '</div>'
+      + '</div>';
+
+    var expHtml = '';
+    if (expiries.length > 0) {
+      var expBadge = _sourceBadge(expiriesSource);
+      expHtml += '<div class="market-expiry-row">'
+        + '<span>到期日' + expBadge + ':</span>'
+        + '<select id="marketExpirySelect" onchange="MarketSearch.onExpiryChange()">';
+      for (var i = 0; i < expiries.length; i++) {
+        expHtml += '<option value="' + _escapeAttr(expiries[i].date) + '">' + _escapeText(expiries[i].date) + '</option>';
+      }
+      expHtml += '</select></div>';
+      expHtml += '<div id="marketChainBox"><div class="market-chain-empty">加载期权链…</div></div>';
+    } else {
+      expHtml += '<div class="market-chain-empty">无可用期权(可能是无期权标的或权限不足)</div>';
+    }
+
+    detail.innerHTML = quoteHtml + expHtml;
+    if (expiries.length > 0) {
+      this.onExpiryChange();
+    }
+  },
+
+  onExpiryChange: async function () {
+    var sel = document.getElementById('marketExpirySelect');
+    var box = document.getElementById('marketChainBox');
+    if (!sel || !box || !this._currentSymbol) return;
+    var expiry = sel.value;
+    this._currentExpiry = expiry;
+    box.innerHTML = '<div class="market-chain-empty">加载期权链…</div>';
+    try {
+      var resp = await fetch('/api/broker/symbols/option-chain?symbol='
+        + encodeURIComponent(this._currentSymbol) + '&expiry=' + encodeURIComponent(expiry));
+      if (!resp.ok) {
+        var detail = '';
+        try { detail = (await resp.json()).detail || ''; } catch (_) {}
+        var icon = resp.status === 403 ? '🔒' : '⚠️';
+        box.innerHTML = '<div class="market-chain-empty" '
+          + 'style="color:var(--warning); text-align:left; line-height:1.6;">'
+          + icon + ' '
+          + _escapeText(detail || ('请求失败 ' + resp.status))
+          + '</div>';
+        return;
+      }
+      var data = await resp.json();
+      this._renderChain(box, data.chain || [], data.source);
+    } catch (e) {
+      box.innerHTML = '<div class="market-chain-empty" style="color:var(--danger);">'
+        + _escapeText(String(e)) + '</div>';
+    }
+  },
+
+  _renderChain: function (box, chain, source) {
+    if (!chain.length) {
+      box.innerHTML = '<div class="market-chain-empty">该到期日无期权数据</div>';
+      return;
+    }
+    var badge = _sourceBadge(source);
+    var html = (badge ? '<div style="font-size:11px;margin-bottom:6px;color:var(--text-muted);">期权链' + badge + '</div>' : '')
+      + '<table class="market-chain-table">'
+      + '<thead><tr><th>Call 卖一</th><th>Call 现价</th><th>行权价</th><th>Put 现价</th><th>Put 买一</th></tr></thead><tbody>';
+    var ids = [];
+    for (var i = 0; i < chain.length; i++) {
+      var row = chain[i];
+      var c = row.call || {};
+      var p = row.put || {};
+      if (c.identifier) ids.push(c.identifier);
+      if (p.identifier) ids.push(p.identifier);
+      html += '<tr>'
+        + '<td class="call">' + _fmtMaybe(c.ask) + '</td>'
+        + '<td class="call" data-id="' + _escapeAttr(c.identifier || '') + '">' + _fmtMaybe(c.latest_price) + '</td>'
+        + '<td class="market-chain-strike">' + _fmtPrice(row.strike) + '</td>'
+        + '<td class="put" data-id="' + _escapeAttr(p.identifier || '') + '">' + _fmtMaybe(p.latest_price) + '</td>'
+        + '<td class="put">' + _fmtMaybe(p.bid) + '</td>'
+        + '</tr>';
+    }
+    html += '</tbody></table>';
+    box.innerHTML = html;
+    this._chainIdentifiers = ids;
+    // 只有 Tiger 源(=tiger 或缺省/未标注)且我们也启了 socket 才订阅期权 tick
+    // yahoo_delay / tiger_delay 都没有推送
+    if (ids.length && (source === 'tiger' || source == null)) {
+      this._subscribe([], ids);
+    }
+  },
+
+  _subscribe: async function (stocks, options) {
+    try {
+      await fetch('/api/broker/symbols/subscribe', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({stocks: stocks || [], options: options || []}),
+      });
+    } catch (_) { /* 失败时面板仍以 REST 数据展示,只是没实时刷新 */ }
+  },
+
+  // 由 BrokerStream 的 quote 事件回调过来
+  applyQuote: function (q) {
+    if (!q || !q.symbol || q.price == null) return;
+    var sym = q.symbol;
+    // 当前主 symbol 的股票 tick → 更新报价卡
+    if (sym === this._currentSymbol) {
+      var priceEl = document.getElementById('marketQuotePrice');
+      var changeEl = document.getElementById('marketQuoteChange');
+      if (priceEl) {
+        priceEl.textContent = _fmtPrice(q.price);
+        var dir = q.change > 0 ? 'up' : (q.change < 0 ? 'down' : '');
+        priceEl.classList.remove('up','down');
+        if (dir) priceEl.classList.add(dir);
+      }
+      if (changeEl) {
+        var sign = q.change >= 0 ? '+' : '';
+        changeEl.textContent = sign + _fmtPrice(q.change || 0)
+          + ' (' + sign + (q.change_pct || 0).toFixed(2) + '%)';
+        changeEl.classList.remove('up','down');
+        if (q.change > 0) changeEl.classList.add('up');
+        else if (q.change < 0) changeEl.classList.add('down');
+      }
+      return;
+    }
+    // 期权 identifier → 更新表格里对应单元格
+    if (this._chainIdentifiers.indexOf(sym) >= 0) {
+      var cells = document.querySelectorAll('.market-chain-table td[data-id="' + _escapeAttr(sym) + '"]');
+      for (var i = 0; i < cells.length; i++) {
+        cells[i].textContent = _fmtPrice(q.price);
+      }
+    }
+  },
+};
+
+function _fmtPrice(v) {
+  if (v == null || isNaN(v)) return '—';
+  return Number(v).toFixed(2);
+}
+function _fmtMaybe(v) {
+  return (v == null || isNaN(v)) ? '—' : Number(v).toFixed(2);
+}
+function _fmtVolume(v) {
+  if (v == null || isNaN(v)) return '—';
+  var n = Number(v);
+  if (n >= 1e8) return (n / 1e8).toFixed(2) + '亿';
+  if (n >= 1e4) return (n / 1e4).toFixed(2) + '万';
+  return String(n);
+}
+function _escapeText(s) {
+  if (s == null) return '';
+  return String(s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+function _escapeAttr(s) {
+  return _escapeText(s);
+}
+function _sourceBadge(source) {
+  if (!source) return '';
+  if (source === 'tiger_realtime') {
+    return '<span class="market-source-badge realtime" title="老虎实时行情">实时·老虎</span>';
+  }
+  if (source === 'tiger_delay') {
+    return '<span class="market-source-badge delay" title="老虎延迟约 15min">延迟15min·老虎</span>';
+  }
+  if (source === 'yahoo_delay') {
+    return '<span class="market-source-badge delay" title="Yahoo Finance 延迟约 15min">延迟·Yahoo</span>';
+  }
+  if (source === 'tiger') {
+    return '<span class="market-source-badge realtime" title="老虎">老虎</span>';
+  }
+  return '<span class="market-source-badge delay">' + _escapeText(source) + '</span>';
+}
+
+
+var _drawerTab = 'positions';
+var _drawerPollTimer = null;
+// 真实更新走 BrokerStream(SSE),轮询只做 fallback,所以拉长到 30s。
+var DRAWER_POLL_MS = 30000;
+
+function _stopDrawerPoll() {
+  if (_drawerPollTimer) {
+    clearInterval(_drawerPollTimer);
+    _drawerPollTimer = null;
+  }
+}
+
+function _startDrawerPoll() {
+  _stopDrawerPoll();
+  // 只在「持仓」和「资金」tab 自动轮询（订单/记忆变化少，省 API）
+  if (_drawerTab === 'positions' || _drawerTab === 'balance') {
+    _drawerPollTimer = setInterval(function () {
+      // 只在抽屉仍可见 + 页面也可见时刷新
+      var drawer = document.getElementById('drawer');
+      if (!drawer || !drawer.classList.contains('open')) {
+        _stopDrawerPoll();
+        return;
+      }
+      if (document.visibilityState === 'hidden') return;
+      refreshDrawer(/*silent=*/true);
+    }, DRAWER_POLL_MS);
+  }
+}
+
+function openDrawer() {
+  if (!CURRENT_USER) { showLoginModal(); return; }
+  document.getElementById('drawer').classList.add('open');
+  document.getElementById('drawerMask').classList.add('show');
+  refreshDrawer();
+  _startDrawerPoll();
+  BrokerStream.start();    // SSE 实时推送(成交/资金变动会立即触发 refreshDrawer)
+}
+
+function closeDrawer() {
+  document.getElementById('drawer').classList.remove('open');
+  document.getElementById('drawerMask').classList.remove('show');
+  _stopDrawerPoll();
+  BrokerStream.stop();
+}
+
+function switchDrawerTab(name) {
+  _drawerTab = name;
+  var tabs = document.querySelectorAll('.drawer-tab');
+  for (var i = 0; i < tabs.length; i++) {
+    tabs[i].classList.toggle('active', tabs[i].getAttribute('data-tab') === name);
+  }
+  refreshDrawer();
+  _startDrawerPoll();   // 切 tab 时重启轮询（不同 tab 策略不同）
+}
+
+// 页面切到后台时停轮询（省电），切回前台时再启动
+document.addEventListener('visibilitychange', function () {
+  if (document.visibilityState === 'hidden') {
+    _stopDrawerPoll();
+  } else {
+    var drawer = document.getElementById('drawer');
+    if (drawer && drawer.classList.contains('open')) {
+      _startDrawerPoll();
+    }
+  }
+});
+
+async function refreshDrawer(silent) {
+  var body = document.getElementById('drawerBody');
+  // 轮询时不要清空内容（避免闪烁），仅首次或手动刷新显示加载态
+  if (!silent) {
+    body.innerHTML = '<div class="empty">加载中…</div>';
+  }
+  try {
+    if (_drawerTab === 'positions') {
+      var r = await api('/api/positions');
+      var d = await r.json();
+      renderPositions(d);
+    } else if (_drawerTab === 'orders') {
+      var r2 = await api('/api/orders?status=all&limit=30');
+      var d2 = await r2.json();
+      renderOrders(d2);
+    } else if (_drawerTab === 'balance') {
+      var r3 = await api('/api/broker/status');
+      var d3 = await r3.json();
+      renderBalance(d3);
+    } else if (_drawerTab === 'memory') {
+      // 同时拉档案 + 情景记忆 + 统计
+      var [r4a, r4b, r4c] = await Promise.all([
+        api('/api/memory/profile'),
+        api('/api/memory/episodic?limit=100'),
+        api('/api/memory/stats'),
+      ]);
+      var profile = await r4a.json();
+      var memList = await r4b.json();
+      var stats = await r4c.json();
+      renderMemoryTab(profile, memList, stats);
+    }
+  } catch (e) {
+    body.innerHTML = '<div class="empty">加载失败：' + escapeHtmlSafe(e.message) + '</div>';
+  }
+}
+
+function renderPositions(d) {
+  var body = document.getElementById('drawerBody');
+  if (!d || !d.success) {
+    var err = (d && d.error) || '加载失败';
+    var friendly = friendlyBrokerErrorHTML(err);
+    body.innerHTML = '<div class="empty">' + (friendly || escapeHtmlSafe(err)) + '</div>';
+    return;
+  }
+  var items = d.positions || [];
+  // 时间戳 + 自动刷新提示（始终展示，即使无持仓）
+  var ts = new Date();
+  var tsStr = ts.getHours().toString().padStart(2,'0') + ':'
+            + ts.getMinutes().toString().padStart(2,'0') + ':'
+            + ts.getSeconds().toString().padStart(2,'0');
+  var footer = '<div style="text-align:center;font-size:11px;color:var(--text-muted);'
+             + 'padding:8px 0 4px;margin-top:6px;border-top:1px dashed var(--border);">'
+             + '⚡ 自动刷新中 · 最后更新 ' + tsStr + '</div>';
+  if (!items.length) {
+    body.innerHTML = '<div class="empty">暂无持仓</div>' + footer;
+    return;
+  }
+  body.innerHTML = items.map(function (p) {
+    var pnlClass = (p.unrealized_pl >= 0) ? 'pnl-up' : 'pnl-down';
+    var sign = p.unrealized_pl >= 0 ? '+' : '';
+    return '<div class="item">'
+      + '<div class="item-head"><span>' + escapeHtmlSafe(p.symbol) + '</span>'
+      + '<span class="' + pnlClass + '">' + sign + p.unrealized_pl_pct.toFixed(2) + '%</span></div>'
+      + '<div class="meta">'
+      + '持仓 ' + p.qty + ' 股 @ ' + fmtMoney(p.avg_entry_price) + '<br>'
+      + '市值 ' + fmtMoney(p.market_value) + ' · '
+      + '<span class="' + pnlClass + '">' + sign + fmtMoney(p.unrealized_pl) + '</span>'
+      + (p.current_price ? '<br><span style="opacity:.65;">当前价 ' + fmtMoney(p.current_price) + '</span>' : '')
+      + '</div></div>';
+  }).join('') + footer;
+}
+
+function renderOrders(d) {
+  var body = document.getElementById('drawerBody');
+  if (!d || !d.success) {
+    var err = (d && d.error) || '加载失败';
+    var friendly = friendlyBrokerErrorHTML(err);
+    body.innerHTML = '<div class="empty">' + (friendly || escapeHtmlSafe(err)) + '</div>';
+    return;
+  }
+  var items = d.orders || [];
+  if (!items.length) {
+    body.innerHTML = '<div class="empty">暂无订单</div>';
+    return;
+  }
+  var STATUS_LABEL = {
+    'new': '⏳ 待成交', 'partially_filled': '◐ 部分成交', 'filled': '✅ 已成交',
+    'canceled': '✕ 已撤', 'rejected': '⛔ 拒单', 'expired': '⏱ 过期', 'pending': '⏳',
+  };
+  body.innerHTML = items.map(function (o) {
+    var price = o.limit_price ? '@' + fmtMoney(o.limit_price) : '@市价';
+    var sideTxt = o.side === 'buy' ? '买入' : '卖出';
+    var canCancel = (o.status === 'new' || o.status === 'partially_filled');
+    return '<div class="item">'
+      + '<div class="item-head"><span>' + sideTxt + ' ' + escapeHtmlSafe(o.symbol) + '</span>'
+      + '<span>' + (STATUS_LABEL[o.status] || o.status) + '</span></div>'
+      + '<div class="meta">' + o.qty + ' 股 ' + price + '<br>'
+      + '已成交 ' + (o.filled_qty || 0) + ' 股' + (o.filled_avg_price ? ' @ ' + fmtMoney(o.filled_avg_price) : '')
+      + '<br><span style="opacity:.6;font-size:11px;">id: ' + escapeHtmlSafe((o.broker_order_id||'').slice(0,18)) + '</span>'
+      + '</div>'
+      + (canCancel ? '<button class="cancel-btn" onclick="cancelOrderFromDrawer(\'' + escapeHtmlSafe(o.broker_order_id) + '\')">撤单</button>' : '')
+      + '</div>';
+  }).join('');
+}
+
+function renderBalance(d) {
+  var body = document.getElementById('drawerBody');
+  if (!d || !d.configured) {
+    var err = (d && d.error) || '当前账号未绑定 broker';
+    var friendly = friendlyBrokerErrorHTML(err);
+    body.innerHTML = '<div class="empty">' + (friendly || escapeHtmlSafe(err)) + '</div>';
+    return;
+  }
+  if (!d.ping_ok) {
+    var err2 = d.error || '';
+    var friendly2 = friendlyBrokerErrorHTML(err2);
+    if (friendly2) {
+      body.innerHTML = '<div class="empty">' + friendly2 + '</div>';
+    } else {
+      body.innerHTML = '<div class="empty">无法连接 broker：' + escapeHtmlSafe(err2) + '</div>';
+    }
+    return;
+  }
+  var acc = d.account || {};
+  var risk = d.risk_config || {};
+  body.innerHTML =
+    '<div class="item">'
+    + '<div class="item-head">资金概览</div>'
+    + '<div class="meta">'
+    + '<div class="row" style="display:flex;justify-content:space-between;"><span>现金</span><span>' + fmtMoney(acc.cash) + '</span></div>'
+    + '<div class="row" style="display:flex;justify-content:space-between;"><span>购买力</span><span>' + fmtMoney(acc.buying_power) + '</span></div>'
+    + '<div class="row" style="display:flex;justify-content:space-between;"><span>净值</span><span>' + fmtMoney(acc.equity) + '</span></div>'
+    + '<div class="row" style="display:flex;justify-content:space-between;opacity:.6;"><span>账户号</span><span>' + escapeHtmlSafe((acc.account_id||'').slice(0,12)) + '...</span></div>'
+    + '</div></div>'
+    + '<div class="item">'
+    + '<div class="item-head">风控规则</div>'
+    + '<div class="meta">'
+    + '单笔上限：' + (risk.max_single_pct*100).toFixed(0) + '% · ETF ' + (risk.max_single_pct_etf*100).toFixed(0) + '%<br>'
+    + '二次确认阈值：' + (risk.double_confirm_pct*100).toFixed(0) + '%<br>'
+    + '日内订单上限：' + risk.max_daily_orders + ' 笔<br>'
+    + '日内撤单率上限：' + (risk.max_daily_cancel_rate*100).toFixed(0) + '%<br>'
+    + '白名单 ' + risk.whitelist_size + ' 个标的<br>'
+    + '市价单：' + (risk.block_market_order ? '禁用' : '允许')
+    + '</div></div>';
+}
+
+// ────────── 记忆 tab：档案 + 情景记忆 ──────────
+
+function renderMemoryTab(profileResp, memListResp, statsResp) {
+  var body = document.getElementById('drawerBody');
+  var profile = (profileResp && profileResp.profile) || {};
+  var summary = (profileResp && profileResp.summary) || '';
+  var memories = (memListResp && memListResp.memories) || [];
+  var stats = statsResp || {};
+
+  // ── 1. 档案展示 ──
+  function fieldRow(label, value, key, editable) {
+    var displayVal = '';
+    if (Array.isArray(value)) {
+      displayVal = value.length ? value.join(', ') : '<span style="opacity:.5;">未设</span>';
+    } else if (value) {
+      displayVal = escapeHtmlSafe(String(value));
+    } else {
+      displayVal = '<span style="opacity:.5;">未设</span>';
+    }
+    var editBtn = editable
+      ? '<button onclick="editProfileField(\'' + key + '\')" '
+        + 'style="background:none;border:none;color:#60a5fa;cursor:pointer;'
+        + 'font-size:11px;padding:0;margin-left:6px;">编辑</button>'
+      : '';
+    return '<div style="display:flex;justify-content:space-between;'
+      + 'padding:6px 0;border-bottom:1px dashed var(--border);font-size:12px;">'
+      + '<span style="color:var(--text-muted);">' + label + '</span>'
+      + '<span style="text-align:right;max-width:60%;word-break:break-all;">'
+      + displayVal + editBtn + '</span>'
+      + '</div>';
+  }
+
+  var profileHtml = '<div class="item">'
+    + '<div class="item-head">📋 用户档案 '
+    + '<button onclick="clearProfile()" style="background:none;border:none;'
+    + 'color:#f87171;cursor:pointer;font-size:11px;padding:0;">清空</button></div>'
+    + '<div class="meta">'
+    + fieldRow('投资风格', profile.investment_style, 'investment_style', true)
+    + fieldRow('风险偏好', profile.risk_tolerance, 'risk_tolerance', true)
+    + fieldRow('关注市场', profile.markets, 'markets', true)
+    + fieldRow('自选股', profile.watchlist, 'watchlist', true)
+    + fieldRow('投资目标', profile.goals, 'goals', true)
+    + fieldRow('个人背景', profile.background, 'background', true)
+    + fieldRow('偏好', profile.preferences, 'preferences', true)
+    + fieldRow('黑名单', profile.blacklist_symbols, 'blacklist_symbols', true)
+    + '</div></div>';
+
+  // ── 2. 情景记忆列表 ──
+  var TYPE_LABEL = {'fact': '事实', 'analysis': '分析', 'decision': '决策'};
+  var TYPE_COLOR = {'fact': '#60a5fa', 'analysis': '#fbbf24', 'decision': '#4ade80'};
+  var memHtml;
+  if (!memories.length) {
+    memHtml = '<div class="item">'
+      + '<div class="item-head">💬 情景记忆 (0)</div>'
+      + '<div class="meta" style="opacity:.6;">'
+      + '暂无记忆。当你跟 Agent 说出重要事实/经验/约束时，'
+      + 'Agent 会自动调用 record_memory 工具存入向量库。'
+      + '</div></div>';
+  } else {
+    memHtml = '<div class="item"><div class="item-head">'
+      + '💬 情景记忆 (' + memories.length + ') '
+      + '<button onclick="clearAllMemories()" style="background:none;border:none;'
+      + 'color:#f87171;cursor:pointer;font-size:11px;padding:0;">清空全部</button>'
+      + '</div></div>';
+    memHtml += memories.map(function (m) {
+      var color = TYPE_COLOR[m.type] || '#888';
+      var label = TYPE_LABEL[m.type] || m.type;
+      var date = '';
+      if (m.created_at) {
+        var d = new Date(m.created_at * 1000);
+        date = (d.getMonth()+1) + '/' + d.getDate() + ' '
+             + d.getHours().toString().padStart(2,'0') + ':'
+             + d.getMinutes().toString().padStart(2,'0');
+      }
+      return '<div class="item" style="border-left:3px solid ' + color + ';">'
+        + '<div style="display:flex;justify-content:space-between;align-items:center;'
+        + 'margin-bottom:4px;font-size:11px;">'
+        + '<span style="color:' + color + ';font-weight:600;">' + label + '</span>'
+        + '<span style="color:var(--text-muted);">' + date + '</span>'
+        + '</div>'
+        + '<div style="font-size:12px;line-height:1.5;">' + escapeHtmlSafe(m.content) + '</div>'
+        + '<button onclick="deleteMemoryById(\'' + m.id + '\')" '
+        + 'style="margin-top:6px;background:none;border:1px solid var(--border);'
+        + 'color:var(--text-muted);padding:2px 8px;border-radius:4px;cursor:pointer;'
+        + 'font-size:11px;">删除</button>'
+        + '</div>';
+    }).join('');
+  }
+
+  // ── 3. 统计卡片（Phase 4） ──
+  var statsHtml = '';
+  if (stats && stats.total !== undefined) {
+    var bt = stats.by_type || {};
+    statsHtml = '<div class="item">'
+      + '<div class="item-head">📊 记忆统计</div>'
+      + '<div class="meta">'
+      + '总数 ' + stats.total + ' 条'
+      + ' · 事实 ' + (bt.fact || 0)
+      + ' · 分析 ' + (bt.analysis || 0)
+      + ' · 决策 ' + (bt.decision || 0) + '<br>'
+      + '累计召回 ' + (stats.total_access || 0) + ' 次<br>'
+      + '<button onclick="pruneStaleMemories()" '
+      + 'style="margin-top:6px;background:none;border:1px solid var(--border);'
+      + 'color:var(--text-muted);padding:3px 10px;border-radius:4px;cursor:pointer;'
+      + 'font-size:11px;">清理 180 天未访问的旧记忆</button>'
+      + '</div></div>';
+  }
+
+  body.innerHTML = profileHtml + statsHtml + memHtml;
+}
+
+async function pruneStaleMemories() {
+  if (!confirm('清理 180 天未被检索过的旧记忆？')) return;
+  try {
+    var r = await api('/api/memory/prune?days=180', {method: 'POST'});
+    var d = await r.json();
+    showToast('清理 ' + (d.removed || 0) + ' 条 / 检查 ' + (d.checked || 0) + ' 条', 'success');
+    refreshDrawer();
+  } catch (e) {
+    showToast('清理失败：' + e.message, 'error');
+  }
+}
+
+async function editProfileField(field) {
+  var labels = {
+    'investment_style': '投资风格（value / growth / balanced / momentum）',
+    'risk_tolerance': '风险偏好（low / medium / high）',
+    'markets': '关注市场（逗号分隔，如：US, HK, CN）',
+    'watchlist': '自选股（逗号分隔，如：AAPL, NVDA）',
+    'goals': '投资目标（自由文本）',
+    'background': '个人背景（自由文本）',
+    'preferences': '偏好（自由文本）',
+    'blacklist_symbols': '黑名单标的（逗号分隔）',
+  };
+  var raw = prompt(labels[field] + '\n\n（留空= 清空该字段）');
+  if (raw === null) return;
+  var value;
+  raw = raw.trim();
+  if (raw === '') {
+    value = null;
+  } else if (['markets','watchlist','blacklist_symbols'].indexOf(field) >= 0) {
+    value = raw.split(/[,，\s]+/).filter(function (x) { return x.length > 0; });
+  } else {
+    value = raw;
+  }
+  try {
+    var r = await api('/api/memory/profile', {
+      method: 'PATCH',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({updates: {[field]: value}}),
+    });
+    var d = await r.json();
+    if (d.success) {
+      showToast('档案已更新', 'success');
+      refreshDrawer();
+    } else {
+      showToast('更新失败：' + (d.error || ''), 'error');
+    }
+  } catch (e) {
+    showToast('请求失败：' + e.message, 'error');
+  }
+}
+
+async function clearProfile() {
+  if (!confirm('确定清空整个档案？所有偏好/自选/目标都会消失。')) return;
+  try {
+    await api('/api/memory/profile', {method: 'DELETE'});
+    showToast('档案已清空', 'success');
+    refreshDrawer();
+  } catch (e) {
+    showToast('清空失败', 'error');
+  }
+}
+
+async function deleteMemoryById(memory_id) {
+  if (!confirm('删除这条记忆？')) return;
+  try {
+    var r = await api('/api/memory/episodic/' + encodeURIComponent(memory_id),
+                       {method: 'DELETE'});
+    var d = await r.json();
+    if (d.success) {
+      showToast('已删除', 'success');
+      refreshDrawer();
+    } else {
+      showToast('删除失败：' + (d.error || ''), 'error');
+    }
+  } catch (e) {
+    showToast('删除失败：' + e.message, 'error');
+  }
+}
+
+async function clearAllMemories() {
+  if (!confirm('清空所有情景记忆？此操作不可撤销。')) return;
+  try {
+    var r = await api('/api/memory/episodic', {method: 'DELETE'});
+    var d = await r.json();
+    if (d.success) {
+      showToast('已清空 ' + (d.deleted_count || 0) + ' 条', 'success');
+      refreshDrawer();
+    }
+  } catch (e) {
+    showToast('清空失败：' + e.message, 'error');
+  }
+}
+
+async function cancelOrderFromDrawer(broker_order_id) {
+  if (!confirm('撤销订单 ' + broker_order_id.slice(0, 12) + '... ？')) return;
+  try {
+    var r = await api('/api/orders/cancel/' + encodeURIComponent(broker_order_id),
+                       { method: 'POST' });
+    var d = await r.json();
+    if (d && d.success) {
+      showToast('撤单已提交', 'success');
+      refreshDrawer();
+    } else {
+      showToast('撤单失败：' + (d && d.error ? d.error : 'unknown'), 'error');
+    }
+  } catch (e) {
+    showToast('撤单异常：' + e.message, 'error');
+  }
+}
+
+// 复用 head 里已检测好的标志（如果未加载到 marked，也强制兼容模式）
+var LEGACY_MODE = !!window.__LEGACY_BROWSER__ || !window.marked;
+console.info('LEGACY_MODE =', LEGACY_MODE,
+             '| has marked =', !!window.marked,
+             '| UA:', navigator.userAgent);
+
+// marked v4 配置（仅现代浏览器用）
+if (window.marked && !LEGACY_MODE) {
+  try {
+    if (typeof marked.setOptions === 'function') {
+      marked.setOptions({ breaks: true, gfm: true });
+    } else if (typeof marked.use === 'function') {
+      marked.use({ breaks: true, gfm: true });
+    }
+  } catch (e) {
+    console.warn('marked 配置失败，自动切兼容模式:', e);
+    LEGACY_MODE = true;
+  }
+}
+
+// 兼容模式下的纯文本渲染（保留换行 + 自动识别 url）
+function _plainTextRender(src) {
+  var safe = escapeHtml(src);
+  // 把 http(s):// 链接转成可点击
+  safe = safe.replace(
+    /(https?:\/\/[^\s<>"']+)/g,
+    '<a href="$1" target="_blank" rel="noopener" style="color:var(--primary);">$1</a>'
+  );
+  return '<div style="white-space:pre-wrap;word-break:break-word;">' + safe + '</div>';
+}
+
+// 把 LLM 误生成的绝对 URL 改回相对路径
+// 例：http://localhost:8001/static/charts/x.html → /static/charts/x.html
+function _normalizeUrls(src) {
+  try {
+    return src.replace(
+      /https?:\/\/[^\/\s)]+(\/static\/[^\s)\]"']+)/g,
+      '$1'
+    );
+  } catch (_) { return src; }
+}
+
+// 安全的 markdown 渲染封装
+function safeMarkdown(text) {
+  var src = (text == null) ? '' : String(text);
+  if (!src) return '';
+  src = _normalizeUrls(src);
+
+  // 老浏览器直接走纯文本（避免 marked 内部 substring 类崩溃）
+  if (LEGACY_MODE) return _plainTextRender(src);
+
+  if (!window.marked || typeof marked.parse !== 'function') {
+    return _plainTextRender(src);
+  }
+  var html;
+  try {
+    html = marked.parse(src);
+  } catch (e) {
+    console.warn('marked.parse 失败，本次降级:', e);
+    // 一旦失败，永久切到兼容模式，后续不再尝试
+    LEGACY_MODE = true;
+    return _plainTextRender(src);
+  }
+  if (typeof html !== 'string') return _plainTextRender(src);
+  try {
+    html = html.replace(/<a (?![^>]*\btarget=)/g,
+                         '<a target="_blank" rel="noopener" ');
+  } catch (_) {}
+  return html;
+}
+
+// 流式期间节流渲染 markdown（避免每个 token 都重排）
+function scheduleMarkdownRender(contentDom) {
+  if (contentDom._renderScheduled) return;
+  contentDom._renderScheduled = true;
+  setTimeout(() => {
+    contentDom._renderScheduled = false;
+    if (!contentDom._streaming) return;
+    contentDom.innerHTML = safeMarkdown(contentDom._raw);
+  }, 80);
+}
+
+// ════════════════════════════════════════════════════════════
+// 会话管理
+// ════════════════════════════════════════════════════════════
+
+async function loadSessions() {
+  const r = await api('/api/sessions');
+  const sessions = await r.json();
+  renderSessionList(sessions);
+  return sessions;
+}
+
+function renderSessionList(sessions) {
+  const list = document.getElementById('sessionList');
+  if (sessions.length === 0) {
+    list.innerHTML = '<div style="padding:16px;color:var(--text-muted);font-size:12px;text-align:center;">暂无会话</div>';
+    return;
+  }
+  list.innerHTML = sessions.map(s => `
+    <div class="session-item ${s.id === currentSession ? 'active' : ''}"
+         onclick="switchSession('${s.id}')">
+      <span class="session-title">${escapeHtml(s.title)}</span>
+      <button class="session-delete" onclick="event.stopPropagation();deleteSession('${s.id}')">×</button>
+    </div>
+  `).join('');
+}
+
+async function createSession() {
+  const r = await api('/api/sessions', { method: 'POST' });
+  const session = await r.json();
+  currentSession = session.id;
+  await loadSessions();
+  await loadSessionDetail(session.id);
+  if (window.innerWidth <= 768) toggleSidebar(false);
+}
+
+async function switchSession(sid) {
+  if (isStreaming) return;
+  currentSession = sid;
+  await loadSessions();
+  await loadSessionDetail(sid);
+  // 手机端切换会话后自动收起侧边栏
+  if (window.innerWidth <= 768) toggleSidebar(false);
+}
+
+// 移动端侧边栏抽屉控制
+function toggleSidebar(force) {
+  const sidebar = document.querySelector('.sidebar');
+  const mask = document.getElementById('sidebarMask');
+  const open = (typeof force === 'boolean') ? force : !sidebar.classList.contains('open');
+  sidebar.classList.toggle('open', open);
+  mask.classList.toggle('show', open);
+}
+
+async function deleteSession(sid) {
+  if (!confirm('删除该会话？')) return;
+  await api('/api/sessions/' + sid, { method: 'DELETE' });
+  if (currentSession === sid) {
+    currentSession = null;
+    showEmptyState();
+  }
+  await loadSessions();
+}
+
+async function loadSessionDetail(sid) {
+  const r = await api('/api/sessions/' + sid);
+  const detail = await r.json();
+  document.getElementById('chatTitle').textContent = detail.title;
+  document.getElementById('chatMeta').textContent =
+    `创建于 ${detail.created_at} · ${detail.display.length} 条消息`;
+
+  const msgs = document.getElementById('messages');
+  msgs.innerHTML = '';
+  detail.display.forEach(m => renderMessage(m));
+  scrollToBottom();
+}
+
+function showEmptyState() {
+  document.getElementById('chatTitle').textContent = '未选择会话';
+  document.getElementById('chatMeta').textContent = '';
+  document.getElementById('messages').innerHTML = `
+    <div class="empty-state">
+      <h2>选择会话或新建一个</h2>
+      ${tradeHintHTML()}
+    </div>`;
+  // 重渲染后再按登录态刷一次文案
+  syncTradeHint();
+}
+
+function tradeHintHTML() {
+  return `
+    <div class="trade-hint" id="tradeHint">
+      <div class="badge-line">🔒 登录后可下单(支持老虎证券 / Alpaca 等)</div>
+      <div>
+        支持美股 / 港股 / 期权,
+        <button class="login-link" onclick="showLoginModal()">用 Google / GitHub / 邮箱登录</button>
+        ,登录后再去 <a href="/brokers" style="color:var(--primary);">绑定券商</a>。
+      </div>
+      <span class="small">⚠️ 当前所有交易功能默认为模拟环境(paper),不涉及真金白银</span>
+    </div>`;
+}
+
+// 根据登录态 + 实际绑定的券商动态切换提示语
+async function syncTradeHint() {
+  var el = document.getElementById('tradeHint');
+  if (!el) return;
+  if (!CURRENT_USER) {
+    el.classList.remove('logged-in');
+    return;
+  }
+  el.classList.add('logged-in');
+
+  // 拉当前用户的绑定列表
+  var bindings = [];
+  try {
+    var r = await api('/api/broker/bindings');
+    if (r.ok) bindings = await r.json();
+  } catch (_) { /* 网络失败时降级为通用文案 */ }
+
+  el.innerHTML = _buildLoggedInHintHTML(bindings);
+}
+
+function _buildLoggedInHintHTML(bindings) {
+  // Mock 不算"真"券商,过滤掉
+  var nonMock = (bindings || []).filter(function (b) { return b.broker_type !== 'mock'; });
+
+  if (nonMock.length === 0) {
+    return ''
+      + '<div class="badge-line">⚠️ 已登录,但还没绑定任何券商</div>'
+      + '<div>下单 / 查持仓需要先绑定一个券商账户。'
+      + '<a href="/brokers" style="color:var(--primary);">前往绑定</a>(支持老虎证券 / Alpaca)。</div>'
+      + '<span class="small">在你完成绑定前,LLM 只能查行情 / 算因子,不能下单。</span>';
+  }
+
+  // 按 broker_type 聚合,统计 paper / live(只读) / live(已启用) 三态
+  var brokers = {};
+  for (var i = 0; i < nonMock.length; i++) {
+    var b = nonMock[i];
+    if (!brokers[b.broker_type]) {
+      brokers[b.broker_type] = { paper: 0, live_readonly: 0, live_enabled: 0 };
+    }
+    if (b.env === 'live') {
+      brokers[b.broker_type][b.live_orders_enabled ? 'live_enabled' : 'live_readonly']++;
+    } else {
+      brokers[b.broker_type].paper++;
+    }
+  }
+
+  var displayNames = {
+    tiger:  '🐯 Tiger Brokers (老虎证券)',
+    alpaca: '📈 Alpaca',
+  };
+  var lines = [];
+  var hasLiveEnabled = false;
+  var hasLiveReadonly = false;
+  for (var bt in brokers) {
+    var name = displayNames[bt] || bt;
+    var counts = brokers[bt];
+    var envText = [];
+    if (counts.paper > 0) envText.push(counts.paper + ' 个模拟');
+    if (counts.live_readonly > 0) {
+      envText.push(counts.live_readonly + ' 个实盘(只读)');
+      hasLiveReadonly = true;
+    }
+    if (counts.live_enabled > 0) {
+      envText.push(counts.live_enabled + ' 个实盘(已开启下单)');
+      hasLiveEnabled = true;
+    }
+    lines.push(name + ' · ' + envText.join(' + '));
+  }
+
+  // 根据绑定的券商类型决定示例
+  var examples = ['查我现在的持仓', '查我的订单'];
+  if ('tiger' in brokers) {
+    examples.push('帮我买 5 股 AAPL,限价高 1%');
+    examples.push('腾讯 00700 怎么样');
+  } else if ('alpaca' in brokers) {
+    examples.push('帮我买 5 股 AAPL,限价高 1%');
+    examples.push('查 TSLA 实时行情');
+  }
+  var examplesHtml = examples.slice(0, 3).map(function (e) {
+    return '「' + escapeHtmlSafe(e) + '」';
+  }).join(' · ');
+
+  var warning;
+  var warnStyle = '';
+  if (hasLiveEnabled) {
+    warning = '🚨 你的实盘下单已启用 — LLM 通过此 binding 下的单将消耗 真金白银。仍需 UI 二次确认每笔。';
+    warnStyle = 'color:#ff8a82;font-weight:700;';
+  } else if (hasLiveReadonly) {
+    warning = '⚠️ 实盘账户当前为「只读」模式,LLM 看得到持仓但下不了单。要下单去 /brokers 打开开关。';
+    warnStyle = 'color:var(--warning);font-weight:600;';
+  } else {
+    warning = '当前全部为模拟盘(paper),使用虚拟资金,不涉及真金白银。';
+  }
+
+  return ''
+    + '<div class="badge-line">✅ 已登录,可在对话中下单</div>'
+    + '<div style="margin-top:4px;">绑定: ' + escapeHtmlSafe(lines.join('  ·  ')) + '</div>'
+    + '<div style="margin-top:4px;">试试问: ' + examplesHtml + '</div>'
+    + '<span class="small" style="' + warnStyle + '">' + warning + '</span>';
+}
+
+// ════════════════════════════════════════════════════════════
+// 消息渲染
+// ════════════════════════════════════════════════════════════
+
+function renderMessage(m) {
+  const msgs = document.getElementById('messages');
+  const div = document.createElement('div');
+  div.className = 'msg ' + m.role;
+
+  const roleLabel = m.role === 'user'
+    ? '<span class="badge">U</span> 你'
+    : '<span class="badge">Q</span> QuantAgent';
+
+  // 只展示真失败的工具调用；静默错误不显示红卡
+  const SILENT_ERROR_TOOLS = new Set(['factor_score', 'html_chart_render',
+                                       'historical_prices', 'market_news_search',
+                                       'technical_indicator', 'earnings_calendar',
+                                       'economic_calendar', 'stock_announcements',
+                                       'search_research_docs']);
+  let toolsHtml = '';
+  if (m.tool_calls && m.tool_calls.length) {
+    toolsHtml = m.tool_calls
+      .filter(tc => tc.is_error && !SILENT_ERROR_TOOLS.has(tc.name))
+      .map(tc => renderToolTrace(tc))
+      .join('');
+  }
+
+  // auth_required 历史回放：把"需要登录"提示渲染出来
+  let authRequiredHtml = '';
+  if (m.role === 'assistant' && Array.isArray(m.tool_calls)) {
+    const seen = new Set();
+    authRequiredHtml = m.tool_calls
+      .filter(tc => tc.is_error && isAuthRequiredResult(tc.result) && !seen.has(tc.name))
+      .map(tc => {
+        seen.add(tc.name);
+        const label = (typeof TOOL_LABELS !== 'undefined' && TOOL_LABELS[tc.name]) || tc.name;
+        return '<div class="chart-failed-notice">🔒 「' + label
+          + '」需要登录后才能使用。 '
+          + '<a href="javascript:void(0)" onclick="showLoginModal()" style="color:#60a5fa;text-decoration:underline;">点击登录</a>'
+          + '</div>';
+      })
+      .join('');
+  }
+
+  // 静默失败的占位提示（assistant 消息）
+  let chartFailHtml = '';
+  if (m.role === 'assistant' && Array.isArray(m.tool_calls)) {
+    const NOTICES = {
+      'html_chart_render': '此处图表未能加载，您可以让我重新生成或换种方式分析',
+      'historical_prices': '历史 K 线数据未能获取，请稍后重试或换个代码',
+      'market_news_search': '未能检索到相关新闻，可换个关键词或股票代码再试',
+      'technical_indicator': '技术指标计算所需历史数据不足，已自动跳过此项',
+      'earnings_calendar': '财报日历数据暂未取到，请稍后或换个市场/代码再试',
+      'economic_calendar': '经济日历数据源暂时不可用，请稍后再试',
+      'stock_announcements': '公告数据暂未取到，请稍后再试',
+      'search_research_docs': '研报知识库暂时不可用，已跳过本次检索',
+    };
+    const shownTools = new Set();
+    chartFailHtml = m.tool_calls
+      .filter(tc => tc.is_error && NOTICES[tc.name] && !shownTools.has(tc.name))
+      .map(tc => {
+        shownTools.add(tc.name);
+        return `<div class="chart-failed-notice">${NOTICES[tc.name]}</div>`;
+      })
+      .join('');
+  }
+
+  // assistant 消息优先用服务端预渲染的 content_html（QQ/微信浏览器零依赖展示）
+  let content;
+  if (m.role === 'assistant') {
+    if (m.content_html && typeof m.content_html === 'string') {
+      content = m.content_html;
+    } else {
+      content = safeMarkdown(m.content);
+    }
+  } else {
+    content = escapeHtml(m.content);
+  }
+
+  // 用户消息可携带附件（来自上传）
+  let attachmentHtml = '';
+  if (m.attachment) {
+    attachmentHtml = `
+      <div class="msg-attachment">
+        📄 ${escapeHtml(m.attachment.name)}
+        <span style="color:var(--text-muted)"> · ${m.attachment.size_kb} KB · ${m.attachment.chunks} 段</span>
+      </div>`;
+  }
+
+  // 历史回放：assistant 消息携带的 follow-up 建议
+  let suggestionsHtml = '';
+  if (m.role === 'assistant' && Array.isArray(m.suggestions) && m.suggestions.length) {
+    suggestionsHtml = '<div class="suggestions">' +
+      '<span class="suggestions-label">💬 继续提问</span>' +
+      m.suggestions.map(q =>
+        `<button class="suggestion-chip" onclick="useSuggestion(this)">${escapeHtml(q)}</button>`
+      ).join('') +
+      '</div>';
+  }
+
+  div.innerHTML = `
+    <div class="msg-role">${roleLabel}</div>
+    ${attachmentHtml}
+    <div class="msg-content">${content}</div>
+    ${authRequiredHtml}
+    ${chartFailHtml}
+    ${toolsHtml}
+    ${suggestionsHtml}
+  `;
+  msgs.appendChild(div);
+  return div;
+}
+
+function renderToolTrace(tc) {
+  const isErr = tc.is_error;
+  const status = tc.result
+    ? (isErr ? '失败' : '成功')
+    : '执行中...';
+  const inputJson = JSON.stringify(tc.input, null, 2);
+  const resultJson = tc.result
+    ? JSON.stringify(tc.result, null, 2)
+    : '';
+
+  return `
+    <div class="tool-trace ${isErr ? 'error' : ''}" data-tool-id="${tc.id || ''}">
+      <div class="tool-trace-header" onclick="this.parentElement.classList.toggle('open')">
+        <span class="tool-arrow">▶</span>
+        <span class="tool-icon">⚡</span>
+        <span class="tool-name">${tc.name}</span>
+        <span class="tool-status">${status}</span>
+      </div>
+      <div class="tool-trace-body">
+        <div class="label">Input：</div>
+        <pre>${escapeHtml(inputJson)}</pre>
+        ${resultJson ? `
+          <div class="label">Result：</div>
+          <pre>${escapeHtml(resultJson)}</pre>
+        ` : ''}
+      </div>
+    </div>
+  `;
+}
+
+// ════════════════════════════════════════════════════════════
+// 发送消息（SSE 流式）
+// ════════════════════════════════════════════════════════════
+
+function onSendBtnClick() {
+  // 执行中点击 = 取消；空闲点击 = 发送
+  if (isStreaming) {
+    cancelCurrentRequest();
+  } else {
+    // 兜底：sendMessage 是 async，确保 reject 也能被捕获并展示
+    Promise.resolve(sendMessage()).catch(function(e) {
+      var msg = (e && e.message) ? e.message : String(e);
+      _dbgShow('[Send Err] ' + msg);
+      isStreaming = false;
+      try { setSendBtnMode('send'); } catch(_) {}
+    });
+  }
+}
+
+function cancelCurrentRequest() {
+  if (currentAbortController) {
+    currentAbortController.abort();
+    showToast('已取消请求', 'info', 1500);
+  }
+}
+
+function setSendBtnMode(mode) {
+  // mode: 'send' | 'cancel'
+  const btn = document.getElementById('sendBtn');
+  if (mode === 'cancel') {
+    btn.textContent = '取消';
+    btn.classList.add('cancel-mode');
+    btn.disabled = false;
+  } else {
+    btn.textContent = '发送';
+    btn.classList.remove('cancel-mode');
+    btn.disabled = false;
+  }
+}
+
+async function sendMessage() {
+  if (isStreaming) return;
+  const ta = document.getElementById('input');
+  const text = ta.value.trim();
+  const hasFile = !!pendingAttachment;
+  if (!text && !hasFile) return;
+
+  // ⭐ 第一时间给视觉反馈：清空输入 + 渲染用户气泡 + 状态条
+  //   所有「await 网络请求」都放到后面，避免点完发送看似卡住
+  isStreaming = true;
+  setSendBtnMode('cancel');
+  currentAbortController = new AbortController();
+
+  // 暂存附件文件（后面才真正上传）
+  const filePending = pendingAttachment;
+  const filePreviewMeta = filePending ? {
+    name: filePending.name,
+    size_kb: +(filePending.size / 1024).toFixed(1),
+    chunks: 0,   // 上传完成后再更新
+  } : null;
+
+  // 立即清空输入框
+  ta.value = '';
+  autoResize(ta);
+  if (filePending) clearAttachment();
+
+  // 立即渲染用户消息气泡
+  renderMessage({
+    role: 'user',
+    content: text || '请阅读这份文档并给出分析',
+    attachment: filePreviewMeta,
+  });
+  scrollToBottom();
+
+  // 立即渲染 assistant 占位 + 状态条
+  const assistantDom = renderMessage({
+    role: 'assistant',
+    content: '',
+    tool_calls: [],
+  });
+  const contentDom = assistantDom.querySelector('.msg-content');
+  contentDom.innerHTML = '';
+  const statusDom = document.createElement('div');
+  statusDom.className = 'msg-status';
+  statusDom.innerHTML = `
+    <span class="loading-dot"></span>
+    <span class="loading-dot"></span>
+    <span class="loading-dot"></span>
+    <span class="status-text">思考中…</span>`;
+  assistantDom.appendChild(statusDom);
+
+  const tracesByName = {};
+
+  // ↓ 这里之后才开始真正的异步工作
+  let attachmentMeta = null;
+  let serverMessage = text;
+
+  try {
+    // 1. 如果还没有会话，轻量创建（不刷 DOM，不调 loadSessionDetail —— 否则会清掉刚渲染的气泡）
+    if (!currentSession) {
+      setStatus(assistantDom, '正在创建会话…');
+      const _r = await api('/api/sessions', { method: 'POST' });
+      const _s = await _r.json();
+      currentSession = _s.id;
+      // 立即把标题同步到 header（与服务端逻辑一致：用户消息前 30 字）
+      const _t = (text || '附件分析');
+      const _title = _t.slice(0, 30) + (_t.length > 30 ? '...' : '');
+      try {
+        document.getElementById('chatTitle').textContent = _title;
+        document.getElementById('chatMeta').textContent = '刚创建';
+      } catch (_) {}
+      // 立即刷一次侧边栏（让用户看到新会话出现在菜单里）
+      loadSessions().catch(function(){});
+    }
+
+    // 2. 如果有附件，上传 + 入库
+    if (filePending) {
+      setStatus(assistantDom, `📎 上传 ${filePending.name}…`);
+      // 临时把 pendingAttachment 设回来供 uploadAttachmentIfAny 用
+      pendingAttachment = filePending;
+      const upRes = await uploadAttachmentIfAny();
+      pendingAttachment = null;
+      if (!upRes) {
+        contentDom.innerHTML = '<p style="color:var(--danger)">附件上传失败，请重试</p>';
+        var _sd0 = assistantDom.querySelector('.msg-status');
+        if (_sd0) _sd0.remove();
+        return;
+      }
+      attachmentMeta = { name: upRes.filename, size_kb: upRes.size_kb,
+                         chunks: upRes.chunks_added };
+      // 实时更新已渲染的用户气泡里的附件 chip
+      try {
+        var allMsgs = document.querySelectorAll('.msg.user');
+        var lastUser = allMsgs[allMsgs.length - 1];
+        var att = lastUser && lastUser.querySelector('.msg-attachment');
+        if (att) {
+          att.innerHTML = '📄 ' + escapeHtml(attachmentMeta.name)
+            + ' <span style="color:var(--text-muted)"> · '
+            + attachmentMeta.size_kb + ' KB · ' + attachmentMeta.chunks + ' 段</span>';
+        }
+      } catch (_) {}
+      serverMessage = `[附件 PDF：${upRes.filename}，已索引 ${upRes.chunks_added} 段] ${text || '请阅读这份文档并给出分析'}`;
+    }
+
+    setStatus(assistantDom, '🤔 思考中…');
+
+    // 3. SSE 请求
+    const resp = await api(`/api/sessions/${currentSession}/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        message: serverMessage,
+        attachment: attachmentMeta,
+      }),
+      signal: currentAbortController.signal,
+    });
+
+    if (!resp.ok) {
+      contentDom.innerHTML = `<p style="color:var(--danger)">请求失败：${resp.status}</p>`;
+      return;
+    }
+
+    // 兼容性检测：老浏览器（QQ X5 等）可能没有 ReadableStream
+    if (!resp.body || typeof resp.body.getReader !== 'function') {
+      // 降级：用 resp.text() 一次性读完，按 SSE 格式手动解析
+      const txt = await resp.text();
+      const chunks = (txt || '').split('\n\n');
+      let fallbackFinal = null;
+      for (const chunk of chunks) {
+        if (!chunk || chunk.indexOf('data: ') !== 0) continue;
+        try {
+          const event = JSON.parse(chunk.slice(6));
+          try { handleEvent(event, assistantDom, contentDom, tracesByName); }
+          catch (he) { console.warn('handleEvent failed:', he); }
+          if (event && event.type === 'final') fallbackFinal = event;
+        } catch (_) { /* 单条解析失败跳过 */ }
+      }
+      // 兜底渲染
+      if (fallbackFinal &&
+          (!contentDom.innerHTML || !contentDom.innerHTML.trim())) {
+        if (fallbackFinal.text_html) {
+          contentDom.innerHTML = fallbackFinal.text_html;
+        } else if (fallbackFinal.text) {
+          contentDom.innerHTML = safeMarkdown(fallbackFinal.text);
+        }
+      }
+      return;
+    }
+
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let finalEvent = null;   // 保留 final 事件，DOM 空时兜底渲染
+
+    while (true) {
+      let chunkResult;
+      try {
+        chunkResult = await reader.read();
+      } catch (re) {
+        console.warn('reader.read failed:', re);
+        break;
+      }
+      const done = chunkResult && chunkResult.done;
+      const value = chunkResult && chunkResult.value;
+      if (done) break;
+      if (!value) continue;
+
+      try {
+        buffer += decoder.decode(value, { stream: true });
+      } catch (de) { console.warn('decode failed:', de); continue; }
+
+      const chunks = buffer.split('\n\n');
+      buffer = chunks.pop() || '';
+
+      for (let i = 0; i < chunks.length; i++) {
+        const chunk = chunks[i];
+        if (!chunk || chunk.indexOf('data: ') !== 0) continue;
+        let event;
+        try {
+          event = JSON.parse(chunk.slice(6));
+        } catch (pe) {
+          console.warn('JSON.parse failed for chunk:', chunk.slice(0, 50));
+          continue;
+        }
+        try {
+          handleEvent(event, assistantDom, contentDom, tracesByName);
+        } catch (he) {
+          console.warn('handleEvent failed:', he, 'event:', event);
+        }
+        if (event && event.type === 'final') finalEvent = event;
+      }
+    }
+
+    // 兜底：handleEvent('final') 没成功渲染时（DOM 空），手动补一下
+    if (finalEvent && (!contentDom.innerHTML || !contentDom.innerHTML.trim())) {
+      if (finalEvent.text_html && typeof finalEvent.text_html === 'string') {
+        contentDom.innerHTML = finalEvent.text_html;
+      } else if (finalEvent.text) {
+        contentDom.innerHTML = safeMarkdown(finalEvent.text);
+      }
+    }
+
+  } catch (e) {
+    if (e && e.name === 'AbortError') {
+      contentDom.innerHTML += `<p style="color:var(--warning);margin-top:8px;">⏸ 已取消（仍可继续追问）</p>`;
+    } else {
+      var emsg = (e && e.message) ? e.message : String(e);
+      contentDom.innerHTML = `<p style="color:var(--danger)">网络错误：${escapeHtml(emsg)}</p>`;
+      console.warn('sendMessage error:', e);
+    }
+  } finally {
+    isStreaming = false;
+    currentAbortController = null;
+    setSendBtnMode('send');
+    // 兜底清理：无论怎么结束都移除状态指示器
+    var _sd = assistantDom.querySelector('.msg-status');
+    if (_sd) _sd.remove();
+    await loadSessions();
+  }
+}
+
+// 友好的工具名映射（给用户看的中文）
+const TOOL_LABELS = {
+  market_quote:         '实时行情',
+  factor_score:         '因子打分',
+  technical_indicator:  '技术指标',
+  black_scholes:        '期权定价',
+  implied_volatility:   '隐含波动率',
+  risk_metrics:         '风险指标',
+  correlation_matrix:   '相关性矩阵',
+  portfolio_optimizer:  '组合优化',
+  market_news_search:   '搜索财经新闻',
+  trading_calendar:     '交易日历',
+  search_research_docs: '检索研报',
+  historical_prices:    '历史 K 线',
+  html_chart_render:    '生成图表',
+};
+
+function setStatus(assistantDom, text, isError = false) {
+  const statusDom = assistantDom.querySelector('.msg-status');
+  if (!statusDom) return;
+  const tx = statusDom.querySelector('.status-text');
+  if (tx) tx.textContent = text;
+  if (isError) statusDom.classList.add('error-state');
+}
+
+function handleEvent(event, assistantDom, contentDom, tracesByName) {
+  if (event.type === 'content_reset') {
+    // 新一轮 LLM 输出开始 → 清空上一轮残留（防止中间过渡话被保留）
+    contentDom._streaming = true;
+    contentDom._raw = '';
+    contentDom.innerHTML = '';
+  }
+  else if (event.type === 'content_delta') {
+    // 流式 token：累加 + 节流 markdown 渲染
+    if (!contentDom._streaming) {
+      contentDom._streaming = true;
+      contentDom.innerHTML = '';
+      contentDom._raw = '';
+    }
+    contentDom._raw += event.text;
+    scheduleMarkdownRender(contentDom);
+    setStatus(assistantDom, '✍️ 正在生成回复…');
+  }
+  else if (event.type === 'thought') {
+    setStatus(assistantDom, '🤔 思考中…');
+  }
+  else if (event.type === 'tool_call') {
+    const label = TOOL_LABELS[event.name] || event.name;
+    setStatus(assistantDom, `🔧 调用「${label}」…`);
+    // 只在 JS 中记录待处理的调用，不在 UI 上显示卡片
+    tracesByName[event.id] = {
+      name: event.name,
+      input: event.input,
+    };
+  }
+  else if (event.type === 'tool_result') {
+    const label = TOOL_LABELS[event.name] || event.name;
+    // ── 下单意图：自动弹出确认弹窗 ──
+    if (event.name === 'place_order_intent' && !event.is_error
+        && event.result && event.result.intent_id
+        && event.result.show_confirm_modal) {
+      try {
+        showOrderConfirmModal(event.result.intent_id, event.result);
+      } catch (e) {
+        console.warn('order modal failed:', e);
+      }
+      // 同时落卡片（用户能看到 Agent 调了这个工具）
+    }
+    // ── auth_required：温和提示用户登录，不展示红色错误卡 ──
+    if (event.is_error && isAuthRequiredResult(event.result)) {
+      try {
+        var notice = document.createElement('div');
+        notice.className = 'chart-failed-notice';
+        notice.innerHTML =
+          '🔒 「' + label + '」需要登录后才能使用。'
+          + ' <a href="javascript:void(0)" onclick="showLoginModal()" style="color:#60a5fa;text-decoration:underline;">点击登录</a>';
+        assistantDom.querySelector('.msg-content').appendChild(notice);
+      } catch (_) {}
+      return;   // 不再继续渲染错误卡片
+    }
+    // 这些"错误"是引导/部分失败，不该当失败展示红卡
+    const SILENT_ERRORS = new Set(['factor_score', 'html_chart_render',
+                                     'historical_prices', 'market_news_search',
+                                     'technical_indicator', 'earnings_calendar',
+                                     'economic_calendar', 'stock_announcements',
+                                     'search_research_docs']);
+    if (event.is_error && !SILENT_ERRORS.has(event.name)) {
+      // 真失败 → 显示错误卡片，状态变红
+      var pending = {};
+      try {
+        var _vals = Object.keys(tracesByName).map(function(k){ return tracesByName[k]; });
+        for (var i = 0; i < _vals.length; i++) {
+          if (_vals[i] && _vals[i].name === event.name) { pending = _vals[i]; break; }
+        }
+      } catch (_) {}
+      const wrapper = document.createElement('div');
+      wrapper.innerHTML = renderToolTrace({
+        name: event.name,
+        input: pending.input || {},
+        result: event.result,
+        is_error: true,
+      });
+      assistantDom.appendChild(wrapper.firstElementChild);
+      setStatus(assistantDom, `⚠️「${label}」失败，继续…`, true);
+    } else if (event.is_error) {
+      // 静默错误
+      setStatus(assistantDom, `✅「${label}」完成，处理中…`);
+      // 静默失败 → 在消息里加占位提示（每次一个，去重）
+      const NOTICES = {
+        'html_chart_render': '此处图表未能加载，您可以让我重新生成或换种方式分析',
+        'historical_prices': '历史 K 线数据未能获取，请稍后重试或换个代码',
+        'market_news_search': '未能检索到相关新闻，可换个关键词或股票代码再试',
+        'technical_indicator': '技术指标计算所需历史数据不足，已自动跳过此项',
+        'earnings_calendar': '财报日历数据暂未取到，请稍后或换个市场/代码再试',
+        'economic_calendar': '经济日历数据源暂时不可用，请稍后再试',
+        'stock_announcements': '公告数据暂未取到，请稍后再试',
+        'search_research_docs': '研报知识库暂时不可用，已跳过本次检索',
+      };
+      const noticeText = NOTICES[event.name];
+      if (noticeText && !assistantDom.querySelector(`.silent-notice[data-tool="${event.name}"]`)) {
+        const notice = document.createElement('div');
+        notice.className = 'silent-notice chart-failed-notice';
+        notice.dataset.tool = event.name;
+        notice.textContent = noticeText;
+        assistantDom.appendChild(notice);
+      }
+    } else {
+      setStatus(assistantDom, `✅「${label}」完成，处理中…`);
+    }
+    // 从待处理列表移除
+    for (const [id, p] of Object.entries(tracesByName)) {
+      if (p.name === event.name) { delete tracesByName[id]; break; }
+    }
+  }
+  else if (event.type === 'final') {
+    // 流结束 → 关掉流式标记
+    contentDom._streaming = false;
+    contentDom._renderScheduled = false;
+    // 优先 server 预渲染 HTML；空时保留流式累积内容（防止屏幕被清空）
+    const html = (event.text_html && typeof event.text_html === 'string'
+                   && event.text_html.trim()) ? event.text_html : '';
+    const txt = (event.text && event.text.trim()) ? event.text : '';
+    if (html) {
+      contentDom.innerHTML = html;
+    } else if (txt) {
+      contentDom.innerHTML = safeMarkdown(txt);
+    }
+    // else: 保留 contentDom 当前的流式渲染（不要清空）
+    contentDom._raw = '';
+    assistantDom.querySelectorAll('.thought').forEach(t => t.remove());
+    const statusDom = assistantDom.querySelector('.msg-status');
+    if (statusDom) statusDom.remove();
+  }
+  else if (event.type === 'suggestions') {
+    // 在 assistant 消息底部追加 3 个建议 chip
+    if (Array.isArray(event.items) && event.items.length) {
+      const sg = document.createElement('div');
+      sg.className = 'suggestions';
+      sg.innerHTML = '<span class="suggestions-label">💬 继续提问</span>' +
+        event.items.map(q =>
+          `<button class="suggestion-chip" onclick="useSuggestion(this)">${escapeHtml(q)}</button>`
+        ).join('');
+      assistantDom.appendChild(sg);
+    }
+  }
+  else if (event.type === 'error') {
+    contentDom.innerHTML = `<p style="color:var(--danger)">❌ ${event.error}</p>`;
+    const statusDom = assistantDom.querySelector('.msg-status');
+    if (statusDom) statusDom.remove();
+  }
+}
+
+// 点击建议 chip → 填入输入框并发送
+function useSuggestion(btn) {
+  if (isStreaming) return;
+  const text = btn.textContent.trim();
+  const ta = document.getElementById('input');
+  ta.value = text;
+  autoResize(ta);
+  // 移除当前消息的建议块，避免回头再点
+  var _sg = btn.closest('.suggestions');
+  if (_sg) _sg.remove();
+  sendMessage();
+}
+
+// ════════════════════════════════════════════════════════════
+// 工具函数
+// ════════════════════════════════════════════════════════════
+
+function escapeHtml(s) {
+  if (s == null) return '';
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function scrollToBottom() {
+  const msgs = document.getElementById('messages');
+  msgs.scrollTop = msgs.scrollHeight;
+}
+
+function handleKey(e) {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    sendMessage();
+  }
+}
+
+function autoResize(ta) {
+  ta.style.height = 'auto';
+  ta.style.height = Math.min(ta.scrollHeight, 200) + 'px';
+}
+
+function useExample(btn) {
+  document.getElementById('input').value = btn.textContent.trim();
+  autoResize(document.getElementById('input'));
+  document.getElementById('input').focus();
+}
+
+// ════════════════════════════════════════════════════════════
+// PDF 附件：选择 → 入队 → 发送时一起上传
+// ════════════════════════════════════════════════════════════
+
+let pendingAttachment = null;  // 当前待发送的附件（单文件）
+
+function queueAttachment(file) {
+  if (!file) return;
+  if (!file.name.toLowerCase().endsWith('.pdf')) {
+    showToast('只支持 PDF 文件', 'error');
+    return;
+  }
+  if (file.size > 20 * 1024 * 1024) {
+    showToast('文件超过 20MB 限制', 'error');
+    return;
+  }
+  pendingAttachment = file;
+  renderAttachmentChip(file);
+  document.getElementById('pdfInput').value = '';  // 允许重选同名
+  document.getElementById('input').focus();
+}
+
+function renderAttachmentChip(file) {
+  const wrap = document.getElementById('attachmentArea');
+  if (!file) {
+    wrap.innerHTML = '';
+    return;
+  }
+  const sizeKB = (file.size / 1024).toFixed(1);
+  wrap.innerHTML = `
+    <div class="attachment-chip">
+      <span class="att-icon">📄</span>
+      <span class="att-name" title="${escapeHtml(file.name)}">${escapeHtml(file.name)}</span>
+      <span class="att-size">${sizeKB} KB</span>
+      <button class="att-remove" onclick="clearAttachment()" title="移除">×</button>
+    </div>
+  `;
+}
+
+function clearAttachment() {
+  pendingAttachment = null;
+  renderAttachmentChip(null);
+}
+
+async function uploadAttachmentIfAny() {
+  /** 若有待发附件，上传到后端并入库，返回 result 或 null */
+  if (!pendingAttachment) return null;
+  const file = pendingAttachment;
+
+  const uploadBtn = document.getElementById('uploadBtn');
+  uploadBtn.classList.add('uploading');
+  uploadBtn.disabled = true;
+
+  const formData = new FormData();
+  formData.append('file', file);
+  try {
+    const r = await api('/api/upload_pdf', { method: 'POST', body: formData });
+    const result = await r.json();
+    if (!result.success) {
+      showToast(`❌ ${file.name}: ${result.error || '上传失败'}`, 'error');
+      return null;
+    }
+    return result;
+  } catch (e) {
+    showToast(`❌ 上传网络错误: ${e.message}`, 'error');
+    return null;
+  } finally {
+    uploadBtn.classList.remove('uploading');
+    uploadBtn.disabled = false;
+  }
+}
+
+let _toastTimer = null;
+function showToast(msg, type = 'info', duration) {
+  let toast = document.querySelector('.toast');
+  if (!toast) {
+    toast = document.createElement('div');
+    toast.className = 'toast';
+    document.body.appendChild(toast);
+  }
+  clearTimeout(_toastTimer);
+  toast.className = 'toast show ' + type;
+  toast.textContent = msg;
+  // 默认时长：success 1.5s，其他 3s；显式传 duration 覆盖
+  const ms = (typeof duration === 'number') ? duration
+           : (type === 'success' ? 1500 : 3000);
+  if (ms > 0) {
+    _toastTimer = setTimeout(() => toast.classList.remove('show'), ms);
+  }
+}
+
+// ════════════════════════════════════════════════════════════
+// 启动
+// ════════════════════════════════════════════════════════════
+
+// 先处理 URL 上的登录回跳提示，再拉用户信息，再加载会话
+handleAuthUrlParams();
+bootstrapAuth().then(loadSessions).catch(function (e) {
+  console.warn('bootstrap failed:', e);
+  loadSessions();
+});
+</script>
+
+</body>
+</html>
