@@ -1,0 +1,12 @@
+# 镜像里不进数据与产物 —— 数据走 volume 挂载 + rsync 上传
+data/
+out/
+logs/
+rag_db/
+.env
+.git/
+.codex/
+.idea/
+my.db
+163.html
+*.log
