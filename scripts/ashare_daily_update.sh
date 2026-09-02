@@ -25,6 +25,17 @@ if [ -z "${TUSHARE_TOKEN:-}" ]; then
   exit 1
 fi
 LOG=logs/ashare_daily.log
+# 并发锁（mkdir 原子性；macOS 无 flock）：cron 定时跑与手工跑/重建链撞上时后到者退让。
+# 陈旧锁（>6h，上次被硬杀）自动清。撞锁不算失败 —— 另一个实例正在做同样的事。
+LOCK=data/.daily_update.lock
+if ! mkdir "$LOCK" 2>/dev/null; then
+  if [ -n "$(find "$LOCK" -maxdepth 0 -mmin +360 2>/dev/null)" ]; then
+    rmdir "$LOCK" 2>/dev/null; mkdir "$LOCK" 2>/dev/null || { echo "$(date '+%F %T') 撞锁，另一实例在跑，退" >> $LOG; exit 0; }
+  else
+    echo "$(date '+%F %T') 撞锁，另一实例在跑，退" >> $LOG; exit 0
+  fi
+fi
+trap 'rmdir "$LOCK" 2>/dev/null' EXIT
 
 notify_fail() {
   echo "$(date '+%F %T') $1 FAILED" >> $LOG
