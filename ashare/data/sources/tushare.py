@@ -122,15 +122,22 @@ class TushareSource:
         #   后果不是报错而是【行业中性化失真】：一大桶票被当成同一个行业做横截面回归，
         #   行业暴露剥不干净（2026-08-31 实测：2015 年 72% 的票落在 __OTHER__）。
         #   而且每次只取"某 3000 行"，取到哪些不保证稳定 —— 参考表 diff 因此天天误报。
-        pages, off = [], 0
-        while True:
-            d = self._call("index_member_all", is_new=None, limit=5000, offset=off)
-            if d is None or not len(d):
-                break
-            pages.append(d)
-            off += len(d)
-            if off > 100000:                      # 防呆：真实量级 5-6 千行
-                break
+        # ★ is_new 必须显式传 Y 和 N 各拉一遍：_call 会剥掉值为 None 的参数，
+        #   服务端默认只回【现役】成分 —— 历史段（带 out_date 的行，2006 段/1646 只）
+        #   从来没被拉到过。后果：深历史的行业归属只剩现役段的 in_date 能覆盖的部分，
+        #   2015 年 67% 的票落 __OTHER__（2026-09-02 实测；补上后 52.9%，2019 年
+        #   49.6%→35.2%）。再往前就是数据源的天花板：申万 2021 改版前的完整历史不全。
+        pages = []
+        for flag in ("Y", "N"):
+            off = 0
+            while True:
+                d = self._call("index_member_all", is_new=flag, limit=5000, offset=off)
+                if d is None or not len(d):
+                    break
+                pages.append(d)
+                off += len(d)
+                if off > 100000:                  # 防呆：真实量级各几千行
+                    break
         df = pd.concat(pages, ignore_index=True) if pages else pd.DataFrame()
         if df.empty:
             return pd.DataFrame(columns=["ts_code", "sw_l1", "sw_l2", "sw_l3", "in_date", "out_date"])

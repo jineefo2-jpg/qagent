@@ -103,22 +103,27 @@ def test_sw_members_pages_through_the_3000_row_cap():
     import pandas as pd
     from ashare.data.sources import tushare as tsrc
 
-    pages = [pd.DataFrame({"ts_code": [f"{i:06d}.SZ" for i in range(off, off + n)],
-                           "l1_name": ["食品饮料"] * n, "l2_name": ["白酒Ⅱ"] * n,
-                           "l3_name": ["白酒Ⅲ"] * n,
-                           "in_date": ["20190626"] * n, "out_date": [None] * n})
-             for off, n in ((0, 3000), (3000, 2560))]
+    def mk(off, n, out=None):
+        return pd.DataFrame({"ts_code": [f"{i:06d}.SZ" for i in range(off, off + n)],
+                             "l1_name": ["食品饮料"] * n, "l2_name": ["白酒Ⅱ"] * n,
+                             "l3_name": ["白酒Ⅲ"] * n,
+                             "in_date": ["20190626"] * n, "out_date": [out] * n})
+    # Y（现役）两页 + N（历史段，带 out_date）一页 —— is_new 必须显式传：
+    # _call 剥掉 None 参数，服务端默认只回现役，历史段从没被拉到过（2026-09-02）。
+    feeds = {"Y": [mk(0, 3000), mk(3000, 2560)], "N": [mk(9000, 2006, out="20211213")]}
     seen = []
 
     class Src(tsrc.TushareSource):
         def __init__(self):                       # 跳过真实 token / 限频
             pass
         def _call(self, api, **kw):
-            seen.append(kw.get("offset"))
-            i = len(seen) - 1
-            return tsrc._to_date(pages[i]) if i < len(pages) else pd.DataFrame()
+            flag = kw["is_new"]                   # 缺了就该 KeyError —— None 剥离正是原缺陷
+            seen.append((flag, kw.get("offset")))
+            q = feeds[flag]
+            return tsrc._to_date(q.pop(0)) if q else pd.DataFrame()
 
     df = Src().sw_members()
-    assert len(df) == 5560, f"只取到 {len(df)} 行 —— 没有翻页"
-    assert seen[:3] == [None, 3000, 5560] or seen[0] in (None, 0), f"offset 递进不对: {seen}"
+    assert len(df) == 3000 + 2560 + 2006, f"只取到 {len(df)} 行 —— 翻页或 Y/N 有缺"
+    assert {f for f, _ in seen} == {"Y", "N"}, f"没有两种 is_new 都拉: {seen}"
+    assert df["out_date"].notna().sum() == 2006, "历史段（带 out_date）没进来"
     assert list(df.columns) == ["ts_code", "sw_l1", "sw_l2", "sw_l3", "in_date", "out_date"]
